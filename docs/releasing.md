@@ -13,7 +13,7 @@ Releases are built and published by GitHub Actions on Windows (`.github/workflow
 3. Commit, then publish in one of two ways:
    - push a tag: `git tag v<version>` and `git push origin v<version>`; or
    - make the commit's message start with `Release v<version>` and push it to `main` (or a `claude/` branch). The workflow creates the tag on that commit.
-4. The workflow checks that the tag matches `Cargo.toml`, runs the tests, builds the release, packages it, and creates the GitHub release (a version with a `-`, like `0.4.0-beta.1`, becomes a pre-release).
+4. The workflow checks that the tag matches `Cargo.toml`, runs the tests, builds the release and packages it on Windows, then a small Linux job checks the checksums and creates the GitHub release (a version with a `-`, like `0.4.0-beta.1`, becomes a pre-release). Publishing happens on Linux because the release call from the Windows job was refused once, while the same call from Linux works.
 
 Running the workflow by hand (Actions → Release → Run workflow) builds the same files as a downloadable artifact without publishing anything.
 
