@@ -151,6 +151,9 @@ pub(crate) struct Setup {
     generation: u64,
     /// The distro, the agent or the sign-in changed: reconnect when the guide closes.
     reconnect: bool,
+    /// The guide opened instead of connecting (first start): connect once it's left,
+    /// however that happens (its buttons, Esc, or another page from Ctrl K).
+    pub pending: bool,
 }
 
 // ---- Talking to Windows and WSL --------------------------------------------------------------
@@ -813,6 +816,7 @@ impl Monaged {
 
     /// Leaves the guide: remembers it's done, connects to Claude.
     pub(crate) fn finish_setup(&mut self, then: SetupThen, window: &mut Window, cx: &mut Context<Self>) {
+        self.setup.pending = false;
         let _ = self.store.set_setting("setup:done", "1");
         let _ = self.store.delete_setting("setup:restart");
         reopen_after_restart(false);
@@ -828,6 +832,21 @@ impl Monaged {
             SetupThen::AddProject => self.open_project_form(window, cx),
         }
         cx.notify();
+    }
+
+    /// The guide was left some other way than its own buttons: carry on as if
+    /// it had been closed (called while rendering).
+    pub(crate) fn left_setup(&mut self, cx: &mut Context<Self>) {
+        if !self.setup.pending || matches!(self.form, Some(Form::Setup)) {
+            return;
+        }
+        self.setup.pending = false;
+        let _ = self.store.set_setting("setup:done", "1");
+        reopen_after_restart(false);
+        self.setup.job = None;
+        self.setup.window = None;
+        self.setup.generation += 1;
+        self.after_setup(cx);
     }
 
     /// What `new` holds back while the guide is open on a fresh PC.
@@ -894,10 +913,30 @@ impl Monaged {
         let progress = div()
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .child(ui::meta(if checking { "Checking this PC…".to_string() } else { format!("{done_count} of {required} steps done") }))
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().child(ui::meta(if checking { "Checking this PC…".to_string() } else { format!("{done_count} of {required} steps done") })))
+                    // Ready: the next step is right here, not below the extras.
+                    .when(ready, |d| {
+                        d.child(
+                            ui::button("setup-playground-top", Kind::Secondary, Some(Icon::Flow), "Try the playground")
+                                .tooltip(crate::shell::tip("A small app with a bug, a flaky test and a merge conflict, to try every feature on"))
+                                .on_click(cx.listener(|this, _, window, cx| this.finish_setup(SetupThen::Playground, window, cx))),
+                        )
+                        .child(
+                            ui::button("setup-add-top", Kind::Primary, Some(Icon::Plus), "Add your first project")
+                                .on_click(cx.listener(|this, _, window, cx| this.finish_setup(SetupThen::AddProject, window, cx))),
+                        )
+                    }),
+            )
             .child(ui::progress_bar("setup-progress", if checking { None } else { Some(done_count as f32 / required as f32) }));
         let steps = div()
+            .flex()
+            .flex_col()
             .rounded(px(10.))
             .border_1()
             .border_color(rgb(theme::line()))
@@ -995,7 +1034,7 @@ impl Monaged {
             StepId::Login => "With your Claude subscription or an Anthropic Console account.".into(),
             StepId::Git if done => format!("{} <{}>", p.git_name, p.git_email),
             StepId::Git => "Agents commit their work under this name inside WSL.".into(),
-            StepId::Extras => "Optional. Each one turns on a feature.".into(),
+            StepId::Extras => "Each one turns on a feature; Monaged works without them.".into(),
         };
         let open = (current || error.is_some() || job.is_some() || step == StepId::Extras || (step == StepId::Git && !done && self.step_done(StepId::Distro))) && !checking;
         let title_row = div()
@@ -1044,6 +1083,7 @@ impl Monaged {
         div()
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .gap(px(12.))
             .px(px(18.))
             .py(px(16.))
@@ -1330,9 +1370,9 @@ fn command_row(id: &'static str, command: &'static str, cx: &mut Context<Monaged
         .child(copy_button(id, command, cx))
 }
 
-/// Monaged's mark: a dark rounded square with a dot-matrix M and the red dot.
+/// Monaged's mark, as in the app icon: a dark rounded square with a
+/// dot-matrix M and the red dot top left.
 pub(crate) fn logo_mark(size: f32) -> impl IntoElement {
-    let dot = size * 0.075;
     div()
         .size(px(size))
         .flex_none()
@@ -1341,11 +1381,8 @@ pub(crate) fn logo_mark(size: f32) -> impl IntoElement {
         .bg(rgb(0x0f0f0f))
         .border_1()
         .border_color(rgb(0x2f2f2f))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(div().pt(px(size * 0.1)).child(crate::dots::dot_text("M", dot, gpui::rgb(0xededed))))
-        .child(div().absolute().top(px(size * 0.13)).left(px(size * 0.15)).size(px(size * 0.13)).rounded_full().bg(rgb(0xd71921)))
+        .child(div().absolute().left(px(size * 0.335)).top(px(size * 0.245)).child(crate::dots::dot_text("M", size * 0.05, gpui::rgb(0xededed))))
+        .child(div().absolute().left(px(size * 0.125)).top(px(size * 0.105)).size(px(size * 0.13)).rounded_full().bg(rgb(0xd71921)))
 }
 
 #[cfg(test)]

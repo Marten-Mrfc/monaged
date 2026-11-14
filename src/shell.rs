@@ -351,6 +351,7 @@ impl Monaged {
     // ---- The shell -----------------------------------------------------------------------
 
     pub(crate) fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.left_setup(cx);
         let width = f32::from(window.viewport_size().width);
         // Keys only reach Monaged's actions through something focused: when a
         // closed palette, menu or form leaves nothing focused, take it back.

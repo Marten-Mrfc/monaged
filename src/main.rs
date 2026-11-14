@@ -598,6 +598,7 @@ impl Monaged {
         window.focus(&this.focus);
         // A fresh PC gets the setup guide first; it connects when it's done.
         if this.setup_needed(std::env::args().any(|a| a == "--setup")) {
+            this.setup.pending = true;
             this.open_setup(cx);
         } else {
             this.after_setup(cx);

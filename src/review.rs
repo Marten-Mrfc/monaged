@@ -109,18 +109,29 @@ pub fn summarize(backend: &Backend, turn: &TurnInfo) -> Result<(Summary, Usage)>
 
 /// Detects the project's test command in the worktree and runs it (10 min max).
 pub fn run_checks(distro: &str, worktree: &str) -> Checks {
+    // The project's own test command (monaged.json, like the Run tab) wins;
+    // otherwise detect one. Python runs pytest only when it's importable,
+    // else unittest, so a missing pytest isn't counted as failing tests.
     let script = format!(
-        "cd {wt} || exit 1\n\
-         if [ -f Cargo.toml ]; then cmd='cargo test --quiet'\n\
-         elif [ -f package.json ] && grep -q '\"test\"' package.json; then cmd='npm test --silent'\n\
-         elif [ -f go.mod ]; then cmd='go test ./...'\n\
-         elif [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -d tests ]; then cmd='python3 -m pytest -q'\n\
-         elif [ -f Makefile ] && grep -qE '^test:' Makefile; then cmd='make test'\n\
-         else echo MONAGED_NO_CHECKS; exit 0; fi\n\
-         echo \"MONAGED_CMD $cmd\"\n\
-         out=$(timeout 600 bash -lc \"$cmd\" 2>&1); code=$?\n\
-         echo \"MONAGED_EXIT $code\"\n\
-         printf '%s\\n' \"$out\" | tail -n 30",
+        r#"cd {wt} || exit 1
+cmd=''
+if [ -f monaged.json ] && command -v python3 >/dev/null; then
+  cmd=$(python3 -c 'import json; print(json.load(open("monaged.json")).get("test", ""))' 2>/dev/null)
+fi
+if [ -n "$cmd" ]; then :
+elif [ -f Cargo.toml ]; then cmd='cargo test --quiet'
+elif [ -f package.json ] && grep -q '"test"' package.json; then cmd='npm test --silent'
+elif [ -f go.mod ]; then cmd='go test ./...'
+elif [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -d tests ]; then
+  if python3 -c 'import pytest' 2>/dev/null; then cmd='python3 -m pytest -q'
+  elif command -v pytest >/dev/null; then cmd='pytest -q'
+  else cmd='python3 -m unittest -q'; fi
+elif [ -f Makefile ] && grep -qE '^test:' Makefile; then cmd='make test'
+else echo MONAGED_NO_CHECKS; exit 0; fi
+echo "MONAGED_CMD $cmd"
+out=$(timeout 600 bash -lc "$cmd" 2>&1); code=$?
+echo "MONAGED_EXIT $code"
+printf '%s\n' "$out" | tail -n 30"#,
         wt = quote(worktree),
     );
     let out = match run(distro, &script) {
