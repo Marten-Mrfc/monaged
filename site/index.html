@@ -96,6 +96,7 @@ h2 { font-size: clamp(28px, 3.6vw, 42px); line-height: 1.12; letter-spacing: -0.
 .feature li::before { content: ""; flex: none; width: 6px; height: 6px; margin-top: 10px; border-radius: 50%; background: var(--text-3); }
 .feature li.r::before { background: var(--red); }
 
+.demo { display: block; width: 100%; height: auto; margin-top: 40px; border-radius: 12px; border: 1px solid var(--line-strong); background: var(--panel); }
 .arch { margin-top: 44px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 34px; overflow-x: auto; }
 .arch svg { min-width: 760px; width: 100%; height: auto; color: var(--text-3); }
 
@@ -152,6 +153,7 @@ footer a { color: var(--text-2); }
   <div class="wrap">
     <a class="brand" href="#top"><span class="dot"></span>Monaged</a>
     <div class="links">
+      <a href="#demo">Demo</a>
       <a href="#features">Features</a>
       <a class="hide-sm" href="#how">How it works</a>
       <a class="hide-sm" href="#faq">FAQ</a>
@@ -195,6 +197,17 @@ footer a { color: var(--text-2); }
       &nbsp;&nbsp;▸ <b>Dashboard</b> <span class="m">feature/dashboard</span><br>
       &nbsp;&nbsp;▸ <b>Security pass</b> <span class="m">standing/security</span>
     </div>
+  </div>
+</section>
+
+<section id="demo">
+  <div class="wrap">
+    <div class="kicker">See it work</div>
+    <h2>A bug fix, then a feature from one sentence.</h2>
+    <p class="sub">An agent fixes a failing test and gets a 5/5 review. Then the pipeline researches, verifies, plans and builds a feature with two builders in parallel. Recorded from the real app, sped up.</p>
+    <video class="demo" src="media/demo.mp4" poster="media/demo-poster.png" controls muted playsinline loop preload="metadata" width="1600" height="1000">
+      Your browser can't play this video. <a href="media/demo.mp4">Download it</a>.
+    </video>
   </div>
 </section>
 
