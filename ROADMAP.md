@@ -336,7 +336,7 @@ One rule for where a message goes:
 - [ ] Next: run `run_with_env` commands in their own sandbox too (bubblewrap, with an optional no-network mode and per-secret allowed hosts); gitleaks before pushes when installed; Windows Hello before revealing or copying.
 - [x] **The database protects itself:** every start makes a backup (VACUUM INTO, last five kept), checks the file, and if it's damaged sets it aside and starts from the newest good backup (and says so). The window position is only saved when it changes, never while minimized.
 
-### Release 0.3.0: ready for other people's PCs (done 2026-11-15)
+### Release 0.3.0: ready for other people's PCs (done 2026-11-14)
 Decided with the user: build everything ready for a public release but don't depend on the repository being public yet; license MIT with the Commons Clause (use it for anything, change it, contribute, but don't sell it); the setup guide installs WSL and Ubuntu after asking, and the Claude agent too, because Monaged can't work without it; version 0.3.0.
 
 - [x] **Setup guide** on first start (and from Ctrl K, the health check and the connection bar): WSL with one administrator prompt (falling back to the classic install on older Windows 10) and a restart that reopens Monaged; Ubuntu in its own window where you create your Linux user; the Claude agent downloaded into `~/.local/share/claude-agent-acp` without sudo; `claude auth login` in a terminal; git's identity; a checklist of extras with their install commands. Steps that wait on another window are watched and move on by themselves.

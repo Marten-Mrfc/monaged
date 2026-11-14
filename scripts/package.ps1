@@ -8,6 +8,13 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot)
 $exe = "target\release\monaged.exe"
 if (-not (Test-Path $exe)) { throw "$exe is missing; run cargo build --release first" }
+# build.rs embeds the icon and version info when the Windows SDK's rc.exe is there.
+$info = (Get-Item $exe).VersionInfo
+if ($info.ProductVersion -ne $Version) {
+    Write-Warning "monaged.exe has no version info for $Version (rc.exe missing?), so it has no icon either."
+} else {
+    Write-Host "monaged.exe: $($info.ProductName) $($info.ProductVersion), with its icon"
+}
 New-Item -ItemType Directory -Force dist | Out-Null
 Remove-Item dist\* -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item $exe "dist\Monaged-Setup-$Version.exe"

@@ -2,7 +2,7 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - 2026-11-15
+## [0.3.0] - 2026-11-14
 
 The first release meant for other people's PCs: Monaged now sets up everything it needs, asking first.
 
@@ -29,10 +29,11 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 
 - **Updates work without the GitHub CLI** once the repository is public: Monaged reads GitHub's public release API first and falls back to your `gh` login for a private repository. Every download is checked against the release's `SHA256SUMS.txt` before it replaces anything. A release now counts as newer than its own pre-releases.
 - Monaged uses the WSL distribution the setup guide picked (for example `Ubuntu-24.04`) instead of assuming one called `Ubuntu`, and remembers it. `--distro` still overrides it.
-- Confidence checks run the project's own test command from `monaged.json` (as the Run tab does). Python projects use pytest only when it's installed, and `unittest` otherwise.
+- Confidence checks run the project's own test command: the one in Project settings → Run, else the one in `monaged.json` (as the Run tab does). Python projects use pytest only when it's installed, and `unittest` otherwise; tests that need a missing pytest count as checks that couldn't run, not as failures.
 - Release builds no longer open a console window next to Monaged.
 - In the sidebar, builders are tagged "build" instead of repeating their workstream's name.
 - Releases are built and published by GitHub Actions on Windows, with checksums.
+- Updates copy the new version next to the old one first and put the old one back if the swap fails. Uninstalling removes the program folder too, once its window has closed.
 
 ### Fixed
 

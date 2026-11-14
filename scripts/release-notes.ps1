@@ -24,7 +24,7 @@ $install = @"
 2. Windows SmartScreen may say it protected your PC, because the installer isn't code-signed yet: click **More info → Run anyway**.
 3. Monaged opens its setup guide, which installs WSL and Ubuntu if you need them, then the Claude agent, and signs you in.
 
-Already installed? Monaged updates itself: **Settings → General → Check for updates**.
+Already installed? Monaged updates itself: **Settings → Updates → Check now** (it also checks once a day).
 
 The zip is the same app without installing. ``SHA256SUMS.txt`` lists the checksums.
 "@
