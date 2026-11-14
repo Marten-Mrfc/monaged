@@ -5,6 +5,7 @@
 //! Usage: monaged [--distro Ubuntu] [--agent <path to claude-agent-acp in WSL>]
 
 mod acp;
+mod add_project;
 mod agent;
 mod attach;
 mod changes_ui;
@@ -12,6 +13,7 @@ mod checkpoints;
 mod coord;
 mod coord_ui;
 mod diff;
+mod env;
 mod dots;
 mod feedback;
 mod git;
@@ -21,23 +23,30 @@ mod health;
 mod hosting;
 mod icons;
 mod install;
+mod instance;
+mod keys;
 mod layout;
 mod llm;
 mod markdown;
+mod media;
 mod menu;
 mod merge_ui;
 mod notify;
 mod palette;
 mod pipeline;
+mod playground;
 mod pipeline_edit;
 mod pipeline_ui;
+mod project_ui;
 mod queue_ui;
 mod review;
 mod review_ui;
+mod run_ui;
 mod search;
 mod secrets;
 mod session_ui;
 mod settings_ui;
+mod side_chat;
 mod shell;
 mod store;
 mod syntax;
@@ -72,7 +81,7 @@ use text_input::TextInput;
 
 actions!(
     monaged,
-    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext]
+    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext, FocusTree, ToggleSideChat, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen]
 );
 
 /// Quoted so neither PowerShell nor cmd rewrites the `~`; bash expands it.
@@ -96,7 +105,7 @@ enum Pending {
     SetConfig(i64),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum SourceKind {
     Clone,
     Existing,
@@ -119,16 +128,8 @@ impl SubKind {
 }
 
 enum Form {
-    NewProject {
-        source: SourceKind,
-        name: Entity<TextInput>,
-        url: Entity<TextInput>,
-        folder: Entity<TextInput>,
-        busy: bool,
-        error: Option<String>,
-        /// The field the error is about (its label), shown under that field.
-        invalid: Option<&'static str>,
-    },
+    /// Adding a project (checks as you type, then step by step).
+    NewProject(Box<add_project::AddProject>),
     NewSubproject {
         project_id: i64,
         kind: SubKind,
@@ -153,6 +154,10 @@ enum Form {
     },
     /// The health check page.
     Health,
+    /// A project's own settings (MCP servers, knowledge, run commands).
+    Project(Box<project_ui::ProjectPage>),
+    /// The playground's tour (PLAYGROUND.md).
+    Guide,
     /// Editing the plan before approving it.
     EditPlan {
         sub_id: i64,
@@ -287,6 +292,28 @@ struct Monaged {
     /// Sessions that just opened: snapshot them on the next event.
     want_checkpoint: Vec<i64>,
     replay: Option<checkpoints::Replay>,
+    /// An image opened full size.
+    lightbox: Option<std::sync::Arc<gpui::Image>>,
+    /// Side chats with Haiku, per agent.
+    side_chats: HashMap<i64, side_chat::SideChat>,
+    /// The sidebar, when you move through it with the keyboard.
+    tree_focus: FocusHandle,
+    tree_cursor: Option<keys::TreeNode>,
+    tree_scroll: ScrollHandle,
+    tree_scroll_pending: std::cell::Cell<bool>,
+    /// Settings → Keyboard: the shortcut waiting for its new keys.
+    key_capture: Option<&'static str>,
+    capture_focus: FocusHandle,
+    capture_blur: Option<gpui::Subscription>,
+    /// The playground is being made in WSL.
+    playground_busy: bool,
+    playground_steps: Option<Vec<ui::StepView>>,
+    /// Environment variables (encrypted), agents' requests to use them.
+    vault: env::Vault,
+    /// The window bounds last written to the database.
+    saved_bounds: String,
+    /// Numbers background jobs (adding a project) so stale updates are dropped.
+    next_run: u64,
     /// Queued messages as last saved (they survive a restart).
     saved_queue: HashMap<i64, String>,
     /// The pipeline stage last written to the timeline, per subproject.
@@ -306,6 +333,10 @@ struct Monaged {
     last_place: String,
     /// Settings → Git: your identity inside WSL.
     git_identity: Option<(Entity<TextInput>, Entity<TextInput>)>,
+    /// The Run tab: per worktree, its commands, dev server and test results.
+    run_states: HashMap<String, run_ui::RunState>,
+    /// Which worktree the Run tab shows, per subproject.
+    run_targets: HashMap<i64, git_ui::GitTarget>,
     /// Each subproject's latest CI run: (asked at, run).
     ci: HashMap<i64, (Instant, Option<hosting::Ci>)>,
     /// Subprojects waiting their turn to merge (Merge ready ones).
@@ -334,6 +365,7 @@ struct Monaged {
 
 impl Monaged {
     fn new(store: Store, config: AgentConfig, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let vault = env::Vault::load(&store);
         let projects = store.projects().unwrap_or_default();
         let subprojects = store.subprojects().unwrap_or_default();
         let mut reviews = store.reviews().unwrap_or_default();
@@ -383,7 +415,14 @@ impl Monaged {
         let (sidebar_w_saved, inspector_w_saved) = (store_f32("ui:sidebar_w"), store_f32("ui:inspector_w"));
         // Remember the window's place and size (restored at the next start).
         let bounds_watch = cx.observe_window_bounds(window, |this: &mut Self, window, _cx| {
-            let _ = this.store.set_setting("ui:window", &format_bounds(window.window_bounds()));
+            // Minimized windows sit far off-screen and tiny; moving fires this
+            // many times a second, so only a real change is written.
+            let bounds = window.window_bounds();
+            let text = format_bounds(bounds);
+            if parse_bounds(&text).is_some() && this.saved_bounds != text {
+                let _ = this.store.set_setting("ui:window", &text);
+                this.saved_bounds = text;
+            }
         });
         let inspector_open = store.setting("ui:inspector").map_or(f32::from(window.viewport_size().width) >= 1500., |v| v == "1");
         let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
@@ -397,6 +436,7 @@ impl Monaged {
                 writer.kill();
             }
             notify::shutdown();
+            this.stop_all_dev_servers();
             async {}
         });
         notify::init();
@@ -491,6 +531,8 @@ impl Monaged {
             form_inputs: HashMap::new(),
             expanded_tools: HashSet::new(),
             ci: HashMap::new(),
+            run_states: HashMap::new(),
+            run_targets: HashMap::new(),
             git_panels: HashMap::new(),
             commit_view: None,
             fetched: HashMap::new(),
@@ -510,6 +552,20 @@ impl Monaged {
             next_note: HashMap::new(),
             want_checkpoint: Vec::new(),
             replay: None,
+            lightbox: None,
+            side_chats: HashMap::new(),
+            tree_focus: cx.focus_handle(),
+            tree_cursor: None,
+            tree_scroll: ScrollHandle::new(),
+            tree_scroll_pending: std::cell::Cell::new(false),
+            key_capture: None,
+            capture_focus: cx.focus_handle(),
+            capture_blur: None,
+            playground_busy: false,
+            playground_steps: None,
+            vault,
+            saved_bounds: String::new(),
+            next_run: 0,
             logged_stage: HashMap::new(),
             next_toast: 1,
             queued_toasts: Vec::new(),
@@ -539,6 +595,10 @@ impl Monaged {
             this.checkpoints.insert((agent, ordinal), checkpoints::Checkpoint { commit, head });
         }
         this.reload_sub_costs();
+        if let Some(backup) = this.store.restored.clone() {
+            this.toast_error(format!("Monaged's database was damaged, so it went back to the backup {backup}. Recent changes since that backup may be missing."), cx);
+        }
+        this.check_sandbox(cx);
         this.apply_theme(window);
         window.focus(&this.focus);
         this.connect(cx);
@@ -681,6 +741,10 @@ impl Monaged {
                 Some((label, action)) => self.toast_action(tone, text, label, action, cx),
                 None => self.toast(tone, text, cx),
             }
+        }
+        let leaking: Vec<i64> = self.agents.iter().filter(|a| !a.leaks.is_empty()).map(|a| a.record.id).collect();
+        for agent_id in leaking {
+            self.check_leaks(agent_id, cx);
         }
         self.follow_all();
         cx.notify();
@@ -923,13 +987,23 @@ impl Monaged {
                 self.sessions.insert(session_id.clone(), agent_id);
                 self.request(
                     "session/load",
-                    json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp }),
+                    {
+                        let mut params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp });
+                        if let Some(meta) = self.session_meta(agent_id) {
+                            params["_meta"] = meta;
+                        }
+                        params
+                    },
                     Pending::LoadSession(agent_id),
                 );
             }
             None => {
                 agent.status = Status::Starting;
-                self.request("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), Pending::NewSession(agent_id));
+                let mut params = json!({ "cwd": cwd, "mcpServers": mcp });
+                if let Some(meta) = self.session_meta(agent_id) {
+                    params["_meta"] = meta;
+                }
+                self.request("session/new", params, Pending::NewSession(agent_id));
             }
         }
     }
@@ -991,15 +1065,6 @@ impl Monaged {
 
     // ---- Creating things --------------------------------------------------
 
-    fn open_project_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| TextInput::new("e.g. HR app", cx));
-        let url = cx.new(|cx| TextInput::new("git@gitlab.com:team/hr-app.git  or  https://github.com/you/repo.git", cx));
-        let folder = cx.new(|cx| TextInput::new("Leave empty for ~/code/<name>", cx));
-        window.focus(&name.focus_handle(cx));
-        self.form = Some(Form::NewProject { source: SourceKind::Clone, name, url, folder, busy: false, error: None, invalid: None });
-        cx.notify();
-    }
-
     fn open_sub_form(&mut self, project_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| TextInput::new("e.g. Company car reservation", cx));
         let request = cx.new(|cx| TextInput::new("e.g. Employees can reserve a company car for a date range; show it on the dashboard", cx));
@@ -1029,74 +1094,9 @@ impl Monaged {
     fn submit_form(&mut self, cx: &mut Context<Self>) {
         let distro = self.config.distro.clone();
         match &mut self.form {
-            Some(Form::NewProject { source, name, url, folder, busy, error, invalid }) => {
-                if *busy {
-                    return;
-                }
-                let url_text = url.read(cx).text().trim().to_string();
-                let folder_text = folder.read(cx).text().trim().to_string();
-                let mut name_text = name.read(cx).text().trim().to_string();
-                if name_text.is_empty() {
-                    let from = if *source == SourceKind::Clone { &url_text } else { &folder_text };
-                    name_text = last_segment(from);
-                }
-                let problem = match source {
-                    SourceKind::Clone if url_text.is_empty() => Some(("Git URL", "Paste the Git URL to clone.", url.clone())),
-                    SourceKind::Existing if folder_text.is_empty() => Some(("Folder in WSL", "Enter the WSL folder, e.g. ~/code/hr-app.", folder.clone())),
-                    _ if name_text.is_empty() => Some(("Name", "Give the project a name.", name.clone())),
-                    _ => None,
-                };
-                if let Some((field, problem, input)) = problem {
-                    *error = Some(problem.into());
-                    *invalid = Some(field);
-                    input.update(cx, |input, cx| input.set_invalid(true, cx));
-                    cx.notify();
-                    return;
-                }
-                *invalid = None;
-                let folder_path = if folder_text.is_empty() { format!("~/code/{}", git::slug(&name_text)) } else { folder_text };
-                let git_source = match source {
-                    SourceKind::Clone => git::Source::Clone(url_text),
-                    SourceKind::Existing => git::Source::Existing,
-                    SourceKind::Empty => git::Source::Empty,
-                };
-                *busy = true;
-                *error = None;
-                cx.spawn(async move |view, cx| {
-                    let d = distro.clone();
-                    let prepared = cx.background_spawn(async move { git::prepare_project(&d, &folder_path, &git_source) }).await;
-                    view.update(cx, |this, cx| {
-                        let identity_missing = prepared.as_ref().is_ok_and(|p| p.identity_missing);
-                        match prepared.and_then(|p| this.store.add_project(&name_text, &distro, &p.path, &p.base_branch)) {
-                            Ok(project) => {
-                                let id = project.id;
-                                this.projects.push(project);
-                                this.projects.sort_by_key(|p| p.name.to_lowercase());
-                                this.select_project(id, cx);
-                                this.toast(Tone::Info, format!("Added {name_text}"), cx);
-                                if identity_missing {
-                                    this.identity_missing = true;
-                                    this.toast_action(
-                                        Tone::Warn,
-                                        "Git inside WSL has no name or email yet, so agents can't commit.",
-                                        "Fix in Settings",
-                                        feedback::ToastAction::OpenSettings,
-                                        cx,
-                                    );
-                                }
-                            }
-                            Err(err) => {
-                                if let Some(Form::NewProject { busy, error, .. }) = &mut this.form {
-                                    *busy = false;
-                                    *error = Some(format!("{err:#}"));
-                                }
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
+            Some(Form::NewProject(_)) => {
+                self.submit_add_project(cx);
+                return;
             }
             Some(Form::NewSubproject { project_id, kind, name, request, run_pipeline, auto_mode, busy, error, invalid }) => {
                 if *busy {
@@ -1164,7 +1164,7 @@ impl Monaged {
                 self.save_plan_edit(cx);
                 return;
             }
-            Some(Form::Settings { .. }) | Some(Form::Health) | None => {}
+            Some(Form::Settings { .. }) | Some(Form::Health) | Some(Form::Project(_)) | Some(Form::Guide) | None => {}
         }
         cx.notify();
     }
@@ -1264,7 +1264,7 @@ impl Monaged {
         let attachments = std::mem::take(&mut agent.attachments);
         agent.items.push(Item::User(text.clone()));
         if !attachments.is_empty() {
-            agent.items.push(Item::Attachments(attachments.iter().map(|a| a.name.clone()).collect()));
+            agent.items.push(Item::Attachments(attachments.iter().map(|a| (a.name.clone(), a.preview.clone())).collect()));
         }
         agent.turn = Some(Turn { started: Instant::now(), first_words: None });
         let mut prompt = vec![json!({ "type": "text", "text": text })];
@@ -1316,6 +1316,14 @@ impl Monaged {
         }
         if self.comment_focused(window, cx) {
             self.save_comment(cx);
+            return;
+        }
+        // Project settings → Environment: Enter goes name → value → saved.
+        if self.env_submit(window, cx) {
+            return;
+        }
+        if let Some(agent_id) = self.focused_side_chat(window, cx) {
+            self.ask_side_chat(agent_id, cx);
             return;
         }
         if self.form.is_some() {
@@ -1377,6 +1385,10 @@ impl Monaged {
     /// Esc closes the innermost thing first: a dialog, a menu, the palette, a
     /// form; otherwise it stops the agent you're typing to.
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.lightbox.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.text_prompt.is_some() {
             self.close_text_prompt(window, cx);
             return;
@@ -1395,6 +1407,14 @@ impl Monaged {
         }
         if self.palette.is_some() {
             self.close_palette(window, cx);
+            return;
+        }
+        if self.tree_focus.is_focused(window) {
+            self.leave_tree(window, cx);
+            return;
+        }
+        // Esc while a clone runs stops it; the next Esc closes the form.
+        if self.cancel_add_project(cx) {
             return;
         }
         if self.comment_draft.is_some() {
@@ -1435,6 +1455,16 @@ impl Monaged {
         if let Some(sub_id) = self.sel_sub {
             self.form = None;
             self.add_agent(sub_id, cx);
+        }
+    }
+
+    fn on_focus_tree(&mut self, _: &FocusTree, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_tree(window, cx);
+    }
+
+    fn on_toggle_side_chat(&mut self, _: &ToggleSideChat, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(agent_id) = self.sel_agent {
+            self.toggle_side_chat(agent_id, window, cx);
         }
     }
 
@@ -1556,6 +1586,31 @@ impl Render for Monaged {
     }
 }
 
+/// Keys that don't change: Enter and Esc, and arrows inside lists. The
+/// shortcuts you can change are in `keys::SHORTCUTS`.
+pub(crate) fn fixed_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("enter", Submit, Some("TextInput")),
+        // Settings → Message box: Ctrl+Enter sends, Enter adds a line.
+        KeyBinding::new("enter", text_input::Newline, Some("ctrl_send")),
+        KeyBinding::new("ctrl-enter", Submit, Some("multiline")),
+        // Enter also submits a form when focus isn't in a text field.
+        KeyBinding::new("enter", Submit, Some("Monaged")),
+        KeyBinding::new("escape", Cancel, None),
+        KeyBinding::new("left", ReplayPrev, Some("Replay")),
+        KeyBinding::new("right", ReplayNext, Some("Replay")),
+        KeyBinding::new("up", PaletteUp, Some("Palette")),
+        KeyBinding::new("down", PaletteDown, Some("Palette")),
+        KeyBinding::new("up", PaletteUp, Some("Menu")),
+        KeyBinding::new("down", PaletteDown, Some("Menu")),
+        KeyBinding::new("up", TreeUp, Some("Tree")),
+        KeyBinding::new("down", TreeDown, Some("Tree")),
+        KeyBinding::new("left", TreeLeft, Some("Tree")),
+        KeyBinding::new("right", TreeRight, Some("Tree")),
+        KeyBinding::new("enter", TreeOpen, Some("Tree")),
+    ]
+}
+
 // ---- Small UI helpers ------------------------------------------------------
 
 /// Older call sites pick a button by its background; map them onto the kit.
@@ -1612,7 +1667,7 @@ fn parse_args() -> AgentConfig {
         match arg.as_str() {
             "--distro" => config.distro = args.next().unwrap_or(config.distro),
             "--agent" => config.agent_cmd = args.next().unwrap_or(config.agent_cmd),
-            "--install" | "--uninstall" => {}
+            "--install" | "--uninstall" | "--restarted" => {}
             other => eprintln!("ignoring unknown argument {other}"),
         }
     }
@@ -1654,6 +1709,10 @@ fn main() {
         });
         return;
     }
+    // One Monaged at a time: a second start brings the open window forward.
+    if instance::already_running(args.iter().any(|a| a == "--restarted")) {
+        return;
+    }
     install::cleanup_old();
     let mut config = parse_args();
     let store = match Store::open() {
@@ -1669,33 +1728,8 @@ fn main() {
     }
     let saved_bounds = store.setting("ui:window").and_then(|v| parse_bounds(&v));
     Application::new().with_assets(icons::Assets).run(move |cx: &mut App| {
-        cx.bind_keys(text_input::key_bindings());
-        cx.bind_keys([
-            KeyBinding::new("enter", Submit, Some("TextInput")),
-            // Settings → Message box: Ctrl+Enter sends, Enter adds a line.
-            KeyBinding::new("enter", text_input::Newline, Some("ctrl_send")),
-            KeyBinding::new("ctrl-enter", Submit, Some("multiline")),
-            // Enter also submits a form when focus isn't in a text field.
-            KeyBinding::new("enter", Submit, Some("Monaged")),
-            KeyBinding::new("escape", Cancel, None),
-            KeyBinding::new("ctrl-k", TogglePalette, None),
-            KeyBinding::new("ctrl-b", ToggleSidebar, None),
-            KeyBinding::new("ctrl-alt-b", ToggleInspector, None),
-            KeyBinding::new("ctrl-,", OpenSettings, None),
-            KeyBinding::new("ctrl-/", ShowShortcuts, None),
-            KeyBinding::new("f11", ToggleZen, None),
-            KeyBinding::new("ctrl-f", FindInConversation, None),
-            KeyBinding::new("ctrl-shift-f", SearchAgents, None),
-            KeyBinding::new("ctrl-n", NewAgentHere, None),
-            KeyBinding::new("left", ReplayPrev, Some("Replay")),
-            KeyBinding::new("right", ReplayNext, Some("Replay")),
-            KeyBinding::new("alt-up", PrevAgent, None),
-            KeyBinding::new("alt-down", NextAgent, None),
-            KeyBinding::new("up", PaletteUp, Some("Palette")),
-            KeyBinding::new("down", PaletteDown, Some("Palette")),
-            KeyBinding::new("up", PaletteUp, Some("Menu")),
-            KeyBinding::new("down", PaletteDown, Some("Menu")),
-        ]);
+        // Text boxes, the fixed keys, and your shortcuts (Settings → Keyboard).
+        keys::apply(cx, &store);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

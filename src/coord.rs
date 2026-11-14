@@ -22,6 +22,14 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
 /// The tools every agent gets. Descriptions steer agents to be frugal.
 pub fn tool_list() -> Value {
+    let mut tools = base_tools();
+    if let Some(list) = tools.as_array_mut() {
+        list.extend(crate::env::tool_defs());
+    }
+    tools
+}
+
+fn base_tools() -> Value {
     json!([
         {
             "name": "board_read",

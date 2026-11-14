@@ -63,6 +63,8 @@ pub struct BoardEntry {
 
 pub struct Store {
     conn: Connection,
+    /// Set when a damaged database was replaced by a backup at startup.
+    pub restored: Option<String>,
 }
 
 /// One line in a subproject's timeline. `kind` is "turn", "review", "agent",
@@ -172,6 +174,24 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     PRIMARY KEY (agent_id, ordinal)
 );
+CREATE TABLE IF NOT EXISTS env_vars (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    secret INTEGER NOT NULL DEFAULT 1,
+    agents INTEGER NOT NULL DEFAULT 1,
+    -- Encrypted with Windows DPAPI (this Windows account only), never plain text.
+    value BLOB NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE (project_id, env, name)
+);
+CREATE TABLE IF NOT EXISTS env_audit (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    what TEXT NOT NULL,
+    at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 CREATE TABLE IF NOT EXISTS queued_prompts (
     agent_id INTEGER PRIMARY KEY,
     text TEXT NOT NULL,
@@ -206,16 +226,78 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE board ADD COLUMN delivered_to INTEGER",
 ];
 
+/// How many startup backups to keep.
+const BACKUPS: usize = 5;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Opens a database file and checks it's whole.
+fn open_checked(path: &std::path::Path) -> Result<Connection> {
+    let conn = Connection::open(path).context("could not open the Monaged database")?;
+    conn.execute_batch(SCHEMA).context("could not set up the database")?;
+    for migration in MIGRATIONS {
+        let _ = conn.execute(migration, []);
+    }
+    let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0)).context("could not check the database")?;
+    anyhow::ensure!(check == "ok", "the database is damaged ({check})");
+    Ok(conn)
+}
+
 impl Store {
+    /// Opens the database. A damaged one is set aside and the newest good
+    /// backup takes its place (`restored` says which); every start makes a
+    /// fresh backup in `backups\` (the last five are kept).
     pub fn open() -> Result<Self> {
         let dir = PathBuf::from(std::env::var("APPDATA").context("APPDATA is not set")?).join("Monaged");
         std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
-        let conn = Connection::open(dir.join("monaged.db")).context("could not open the Monaged database")?;
-        conn.execute_batch(SCHEMA).context("could not set up the database")?;
-        for migration in MIGRATIONS {
-            let _ = conn.execute(migration, []);
+        let path = dir.join("monaged.db");
+        let (conn, restored) = match open_checked(&path) {
+            Ok(conn) => (conn, None),
+            Err(err) => {
+                let backups = Self::backups(&dir);
+                let Some(good) = backups.iter().rev().find(|b| open_checked(b).is_ok()) else {
+                    return Err(err.context("and there's no good backup in the backups folder"));
+                };
+                let kept = dir.join(format!("monaged-damaged-{}.db", now_secs()));
+                std::fs::rename(&path, &kept).with_context(|| format!("couldn't set the damaged database aside ({err:#})"))?;
+                std::fs::copy(good, &path).context("couldn't put the backup in place")?;
+                let name = good.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                (open_checked(&path)?, Some(format!("{name} (the damaged file is kept as {})", kept.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())))
+            }
+        };
+        let store = Self { conn, restored };
+        store.backup(&dir);
+        Ok(store)
+    }
+
+    fn backups(dir: &std::path::Path) -> Vec<PathBuf> {
+        let mut list: Vec<PathBuf> = std::fs::read_dir(dir.join("backups"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("monaged-") && n.to_string_lossy().ends_with(".db")))
+            .collect();
+        list.sort();
+        list
+    }
+
+    /// A consistent copy (VACUUM INTO), even while another process uses the file.
+    fn backup(&self, dir: &std::path::Path) {
+        let folder = dir.join("backups");
+        if std::fs::create_dir_all(&folder).is_err() {
+            return;
         }
-        Ok(Self { conn })
+        let target = folder.join(format!("monaged-{}.db", now_secs()));
+        if self.conn.execute("VACUUM INTO ?1", params![target.to_string_lossy()]).is_err() {
+            return;
+        }
+        let list = Self::backups(dir);
+        for old in list.iter().take(list.len().saturating_sub(BACKUPS)) {
+            let _ = std::fs::remove_file(old);
+        }
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
@@ -621,6 +703,52 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    // ---- Environment variables (values are DPAPI blobs) --------------------
+
+    /// (id, project, env, name, secret, agents, encrypted value, updated)
+    pub fn env_vars(&self) -> Result<Vec<(i64, i64, String, String, bool, bool, Vec<u8>, i64)>> {
+        let mut stmt = self.conn.prepare("SELECT id, project_id, env, name, secret, agents, value, updated_at FROM env_vars ORDER BY project_id, env, name")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0, r.get::<_, i64>(5)? != 0, r.get(6)?, r.get(7)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn save_env_var(&self, project_id: i64, env: &str, name: &str, secret: bool, agents: bool, value: &[u8]) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO env_vars (project_id, env, name, secret, agents, value) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(project_id, env, name) DO UPDATE SET secret = excluded.secret, agents = excluded.agents, value = excluded.value, updated_at = strftime('%s','now')",
+            params![project_id, env, name, secret as i64, agents as i64, value],
+        )?;
+        Ok(self.conn.query_row("SELECT id FROM env_vars WHERE project_id = ?1 AND env = ?2 AND name = ?3", params![project_id, env, name], |r| r.get(0))?)
+    }
+
+    pub fn set_env_flags(&self, id: i64, secret: bool, agents: bool) -> Result<()> {
+        self.conn.execute("UPDATE env_vars SET secret = ?2, agents = ?3 WHERE id = ?1", params![id, secret as i64, agents as i64])?;
+        Ok(())
+    }
+
+    pub fn delete_env_var(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM env_vars WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn delete_env(&self, project_id: i64, env: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM env_vars WHERE project_id = ?1 AND env = ?2", params![project_id, env])?;
+        Ok(())
+    }
+
+    /// What happened to a project's variables (never their values).
+    pub fn env_audit(&self, project_id: i64, what: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO env_audit (project_id, what) VALUES (?1, ?2)", params![project_id, what])?;
+        Ok(())
+    }
+
+    /// Newest first: (when, what)
+    pub fn env_audit_log(&self, project_id: i64, limit: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare("SELECT at, what FROM env_audit WHERE project_id = ?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = stmt.query_map(params![project_id, limit], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // ---- Queued messages ----------------------------------------------------
 
     /// A message waiting to go out survives a restart.
@@ -647,6 +775,11 @@ impl Store {
         self.conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).ok()
     }
 
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
@@ -655,3 +788,4 @@ impl Store {
         Ok(())
     }
 }
+

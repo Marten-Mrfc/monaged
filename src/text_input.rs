@@ -25,7 +25,7 @@ actions!(
     text_input,
     [
         Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Cut, Copy, Up, Down, Newline,
-        AcceptSuggestion, DeleteWordLeft
+        AcceptSuggestion, DeleteWordLeft, NextField, PreviousField
     ]
 );
 
@@ -72,12 +72,18 @@ pub struct TextInput {
     pub suggesting: bool,
     /// Ctrl+Enter sends and Enter adds a line (Settings → Message box).
     ctrl_send: bool,
+    /// A secret: drawn as dots, never copied.
+    masked: bool,
 }
+
+/// What a secret field shows for each character.
+const MASK: char = '•';
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            // Fields are tab stops: Tab and Shift+Tab move between them.
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: "".into(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -99,6 +105,7 @@ impl TextInput {
             draft: String::new(),
             suggesting: false,
             ctrl_send: false,
+            masked: false,
         }
     }
 
@@ -116,6 +123,34 @@ impl TextInput {
     /// Wraps and grows; Shift+Enter adds a line.
     pub fn multiline(mut self) -> Self {
         self.multiline = true;
+        self
+    }
+
+    /// A secret field: shows dots, and copy and cut do nothing (single line).
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
+    }
+
+    /// Where a content offset is in the shown text (dots are 3 bytes each).
+    fn to_display(&self, offset: usize) -> usize {
+        if !self.masked || self.content.is_empty() {
+            return offset;
+        }
+        self.content[..offset.min(self.content.len())].chars().count() * MASK.len_utf8()
+    }
+
+    fn from_display(&self, offset: usize) -> usize {
+        if !self.masked || self.content.is_empty() {
+            return offset;
+        }
+        let n = offset / MASK.len_utf8();
+        self.content.char_indices().nth(n).map(|(i, _)| i).unwrap_or(self.content.len())
+    }
+
+    /// How many lines it grows to before it scrolls.
+    pub fn max_lines(mut self, lines: usize) -> Self {
+        self.max_lines = lines.max(1);
         self
     }
 
@@ -244,6 +279,14 @@ impl TextInput {
         if self.suggesting {
             cx.emit(InputEvent::SuggestAccept);
         }
+    }
+
+    fn next_field(&mut self, _: &NextField, window: &mut Window, _: &mut Context<Self>) {
+        window.focus_next();
+    }
+
+    fn previous_field(&mut self, _: &PreviousField, window: &mut Window, _: &mut Context<Self>) {
+        window.focus_prev();
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
@@ -392,13 +435,13 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
         }
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
             self.replace_text_in_range(None, "", window, cx)
         }
@@ -429,7 +472,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
+        self.from_display(line.closest_index_for_x(position.x - bounds.left() + self.scroll_x))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -573,8 +616,8 @@ impl EntityInputHandler for TextInput {
         }
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        // The layout shows the placeholder while the input is empty.
-        if last_layout.text != self.content {
+        // The layout shows the placeholder while the input is empty (or dots).
+        if last_layout.text != self.content || self.masked {
             return None;
         }
         let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
@@ -603,10 +646,15 @@ impl IntoElement for TextElement {
 /// marked range underlined.
 fn display_runs(input: &TextInput, window: &Window) -> (SharedString, Vec<TextRun>) {
     let style = window.text_style();
-    let (display_text, text_color) =
-        if input.content.is_empty() { (input.placeholder.clone(), rgb(theme::text_3()).into()) } else { (input.content.clone(), style.color) };
+    let (display_text, text_color) = if input.content.is_empty() {
+        (input.placeholder.clone(), rgb(theme::text_3()).into())
+    } else if input.masked {
+        (SharedString::from(MASK.to_string().repeat(input.content.chars().count())), style.color)
+    } else {
+        (input.content.clone(), style.color)
+    };
     let run = TextRun { len: display_text.len(), font: style.font(), color: text_color, background_color: None, underline: None, strikethrough: None };
-    let runs = match input.marked_range.as_ref().filter(|_| !input.content.is_empty()) {
+    let runs = match input.marked_range.as_ref().filter(|_| !input.content.is_empty() && !input.masked) {
         Some(marked_range) => vec![
             TextRun { len: marked_range.start, ..run.clone() },
             TextRun {
@@ -744,7 +792,7 @@ impl Element for TextElement {
 
         let line = window.text_system().shape_line(display_text, font_size, &runs, None);
         // Keep the cursor in view: scroll just enough, never past the text's end.
-        let cursor_pos = line.x_for_index(cursor);
+        let cursor_pos = line.x_for_index(input.to_display(cursor));
         let width = bounds.size.width - px(2.);
         let mut scroll_x = input.scroll_x;
         if cursor_pos - scroll_x > width {
@@ -761,8 +809,8 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(left + line.x_for_index(selected_range.start), bounds.top()),
-                        point(left + line.x_for_index(selected_range.end), bounds.bottom()),
+                        point(left + line.x_for_index(input.to_display(selected_range.start)), bounds.top()),
+                        point(left + line.x_for_index(input.to_display(selected_range.end)), bounds.bottom()),
                     ),
                     rgba(0x6ea8fe40),
                 )),
@@ -865,6 +913,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::accept_suggestion))
+            .on_action(cx.listener(Self::next_field))
+            .on_action(cx.listener(Self::previous_field))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -901,6 +951,8 @@ pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     let ctx = Some("TextInput");
     let multi = Some("multiline");
     vec![
+        KeyBinding::new("tab", NextField, Some("TextInput && !multiline")),
+        KeyBinding::new("shift-tab", PreviousField, ctx),
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("ctrl-backspace", DeleteWordLeft, ctx),
         KeyBinding::new("delete", Delete, ctx),

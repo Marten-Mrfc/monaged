@@ -61,6 +61,8 @@ pub(crate) enum MenuAction {
     Replay(i64),
     UndoLastTurn(i64),
     SubCap(i64),
+    ProjectSettings(i64),
+    SideChat(i64),
 }
 
 pub(crate) enum Entry {
@@ -76,7 +78,9 @@ fn item(label: impl Into<String>, glyph: Icon, action: MenuAction) -> Entry {
 
 impl Entry {
     fn hint(mut self, text: &'static str) -> Self {
-        if let Entry::Item { hint, .. } = &mut self {
+        if let Entry::Item { hint, .. } = &mut self
+            && !text.is_empty()
+        {
             *hint = Some(text);
         }
         self
@@ -125,6 +129,7 @@ impl Monaged {
                 vec![
                     item("Open overview", Icon::Folder, MenuAction::OpenProject(pid)),
                     item("New subproject", Icon::Plus, MenuAction::NewSub(pid)),
+                    item("Project settings", Icon::Sliders, MenuAction::ProjectSettings(pid)),
                     Entry::Separator,
                     item("Open in Zed", Icon::External, MenuAction::OpenZed(project.path.clone())),
                     item("Copy path", Icon::Copy, MenuAction::Copy(project.path.clone(), "path")),
@@ -140,7 +145,7 @@ impl Monaged {
                 vec![
                     item("Open", Icon::Layers, MenuAction::OpenSub(sid)),
                     item("All changes", Icon::Diff, MenuAction::SubChanges(sid)),
-                    item("New agent", Icon::Plus, MenuAction::NewAgent(sid)).hint("Ctrl N"),
+                    item("New agent", Icon::Plus, MenuAction::NewAgent(sid)).hint(crate::keys::label("new-agent")),
                     item(if running { "Pipeline running" } else { "Run the pipeline" }, Icon::Play, MenuAction::RunPipeline(sid)).enabled(!running),
                     Entry::Separator,
                     item("Pipeline", Icon::Flow, MenuAction::Inspector(sid, InspectorTab::Pipeline)),
@@ -171,6 +176,7 @@ impl Monaged {
                     item("Open beside", Icon::PanelRight, MenuAction::OpenBeside(aid)).hint("Ctrl-click").enabled(!shown),
                     item("Show changes", Icon::Diff, MenuAction::ShowChanges(aid)),
                     item("Replay turn by turn", Icon::Clock, MenuAction::Replay(aid)),
+                    item("Side chat with Haiku", Icon::Ask, MenuAction::SideChat(aid)).hint(crate::keys::label("side-chat")),
                     item("Undo the last turn's changes…", Icon::Undo, MenuAction::UndoLastTurn(aid)).enabled(!working && self.checkpoints.contains_key(&(aid, agent.items.iter().filter(|i| matches!(i, crate::agent::Item::User(_))).count() as i64 - 1))),
                     item("Review", Icon::Eye, MenuAction::Review(aid)).enabled(!agent.reviewing),
                     Entry::Separator,
@@ -261,6 +267,11 @@ impl Monaged {
             MenuAction::Restore(aid) => self.restore_agent(aid, cx),
             MenuAction::SubChanges(sid) => self.open_sub_changes(sid, cx),
             MenuAction::SubCap(sid) => self.ask_sub_cap(sid, window, cx),
+            MenuAction::ProjectSettings(pid) => self.open_project_settings(pid, window, cx),
+            MenuAction::SideChat(aid) => {
+                self.open_agent(aid, cx);
+                self.toggle_side_chat(aid, window, cx);
+            }
             MenuAction::Replay(aid) => {
                 self.open_agent(aid, cx);
                 self.open_replay(aid, window, cx);

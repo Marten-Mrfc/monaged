@@ -24,6 +24,8 @@ use crate::ui::{self, Kind};
 use crate::{Conn, Monaged, theme};
 
 /// How long a toast stays, by tone. Errors stay until closed.
+/// Info toasts with a button (Undo, Restore).
+const ACTION_MS: u64 = 12_000;
 const INFO_MS: u64 = 4_500;
 const WARN_MS: u64 = 8_000;
 const MAX_TOASTS: usize = 4;
@@ -153,6 +155,7 @@ impl Monaged {
         self.toasts.retain(|t| t.text != text);
         let id = self.next_toast;
         self.next_toast += 1;
+        let has_action = action.is_some();
         self.toasts.push(Toast { id, tone, text, key, progress, action });
         while self.toasts.len() > MAX_TOASTS {
             // Drop the oldest that isn't an error, else the oldest.
@@ -161,6 +164,8 @@ impl Monaged {
         }
         let lifetime = match tone {
             _ if progress => None,
+            // A toast with a button (Undo, Restore) stays long enough to use it.
+            Tone::Info if has_action => Some(ACTION_MS),
             Tone::Info => Some(INFO_MS),
             Tone::Warn => Some(WARN_MS),
             Tone::Error => None,
@@ -556,32 +561,37 @@ impl Monaged {
         if !self.shortcuts_open {
             return None;
         }
-        let groups: [(&str, &[(&str, &str)]); 4] = [
-            (
-                "Move around",
-                &[
-                    ("Ctrl K", "Search and run a command"),
-                    ("Alt ↑  Alt ↓", "Previous / next agent"),
-                    ("Ctrl B", "Sidebar"),
-                    ("Ctrl Alt B", "Inspector"),
-                    ("Ctrl ,", "Settings"),
-                    ("Ctrl /", "This list"),
-                ],
-            ),
-            ("Agents", &[("Enter", "Send your message"), ("Esc", "Stop the turn"), ("Ctrl N", "New agent here"), ("Ctrl-click", "Open beside the current one")]),
-            ("Menus and lists", &[("Right-click", "Actions for a row"), ("↑  ↓", "Move"), ("Enter", "Run"), ("Esc", "Close")]),
-            ("Forms and dialogs", &[("Enter", "Submit or confirm"), ("Esc", "Cancel")]),
-        ];
-        let column = |title: &'static str, rows: &'static [(&'static str, &'static str)]| {
-            div().flex().flex_col().gap(px(8.)).child(ui::label(title)).children(rows.iter().map(|(keys, what)| {
+        // Your shortcuts as they are now (Settings → Keyboard), then the fixed keys.
+        let mut groups: Vec<(&'static str, Vec<(&'static str, &'static str)>)> = Vec::new();
+        for s in crate::keys::SHORTCUTS {
+            let Some(keys) = crate::keys::hint(s.id) else { continue };
+            match groups.iter_mut().find(|(g, _)| *g == s.group) {
+                Some((_, rows)) => rows.push((keys, s.label)),
+                None => groups.push((s.group, vec![(keys, s.label)])),
+            }
+        }
+        match groups.iter_mut().find(|(g, _)| *g == "Agents") {
+            Some((_, rows)) => rows.splice(0..0, [("Enter", "Send your message"), ("Esc", "Stop the turn"), ("Ctrl-click", "Open beside the current one")]).for_each(drop),
+            None => groups.push(("Agents", vec![("Enter", "Send your message"), ("Esc", "Stop the turn")])),
+        }
+        groups.push(("In the sidebar", vec![("↑  ↓", "Move"), ("→", "Open a level"), ("←", "Back up a level"), ("Enter", "Open"), ("Esc", "Leave the sidebar")]));
+        groups.push(("Menus and lists", vec![("Right-click", "Actions for a row"), ("↑  ↓", "Move"), ("Enter", "Run"), ("Esc", "Close")]));
+        groups.push(("Forms and dialogs", vec![("Enter", "Submit or confirm"), ("Esc", "Cancel")]));
+        let column = |title: &'static str, rows: Vec<(&'static str, &'static str)>| {
+            div().flex().flex_col().gap(px(8.)).child(ui::label(title)).children(rows.into_iter().map(|(keys, what)| {
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(div().w(px(120.)).flex_none().flex().child(ui::kbd(*keys)))
-                    .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(*what))
+                    .child(div().w(px(120.)).flex_none().flex().child(ui::kbd(keys)))
+                    .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(what))
             }))
         };
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        for (i, (title, rows)) in groups.into_iter().enumerate() {
+            let el = column(title, rows);
+            if i % 2 == 0 { left.push(el) } else { right.push(el) }
+        }
         let panel = div()
             .id("shortcuts")
             .occlude()
@@ -609,8 +619,22 @@ impl Monaged {
                 div()
                     .flex()
                     .gap(px(32.))
-                    .child(div().flex_1().flex().flex_col().gap(px(20.)).child(column(groups[0].0, groups[0].1)).child(column(groups[3].0, groups[3].1)))
-                    .child(div().flex_1().flex().flex_col().gap(px(20.)).child(column(groups[1].0, groups[1].1)).child(column(groups[2].0, groups[2].1))),
+                    .child(div().flex_1().flex().flex_col().gap(px(20.)).children(left))
+                    .child(div().flex_1().flex().flex_col().gap(px(20.)).children(right)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .pt(px(12.))
+                    .border_t_1()
+                    .border_color(rgb(theme::line()))
+                    .child(div().flex_1().child(ui::meta("Change any of these in Settings → Keyboard.")))
+                    .child(ui::button("shortcuts-edit", ui::Kind::Secondary, Some(Icon::Sliders), "Change shortcuts").on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_shortcuts(window, cx);
+                        this.open_settings_at("Keyboard", window, cx);
+                    }))),
             );
         Some(
             div()

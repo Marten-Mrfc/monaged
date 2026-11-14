@@ -213,17 +213,138 @@ pub fn fade_in(id: impl Into<ElementId>, el: impl IntoElement + gpui::Styled + '
         .into_any_element()
 }
 
-/// The loading spinner: a three-quarter ring turning once every 0.9 s. With
-/// motion off it stands still (the label next to it says what's happening).
+/// Loading: three dots that light up in turn, in Monaged's dot language (like
+/// the numerals). With motion off they sit at a steady half brightness; the
+/// label next to them says what's happening.
 pub fn spinner(id: impl Into<ElementId>, size: f32, color: u32) -> AnyElement {
-    let ring = icon_sized(Icon::Spinner, size).text_color(rgb(color));
-    if !motion() {
-        return ring.into_any_element();
+    let dot = (size / 4.4).clamp(2.5, 5.);
+    let gap = dot * 0.75;
+    let mut row = div().id(id).flex_none().h(px(size)).flex().items_center().gap(px(gap));
+    for i in 0..3usize {
+        let d = div().size(px(dot)).flex_none().rounded_full().bg(rgb(color));
+        if !motion() {
+            row = row.child(d.opacity(0.55));
+            continue;
+        }
+        row = row.child(d.with_animation(("dot", i), Animation::new(Duration::from_millis(1100)).repeat(), move |el, t| {
+            // Each dot peaks a third of a cycle after the one before it.
+            let phase = (t - i as f32 / 3.0).rem_euclid(1.0);
+            let bump = (1.0 - (phase * 2.0 - 1.0).abs()).powf(1.5);
+            el.opacity(0.22 + 0.78 * bump)
+        }));
     }
-    ring.with_animation(id, Animation::new(Duration::from_millis(900)).repeat(), |svg, t| {
-        svg.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
-    })
-    .into_any_element()
+    row.into_any_element()
+}
+
+/// A thin progress bar: filled to `fraction`, or (None) a short segment that
+/// slides along while it isn't known how far along the work is.
+pub fn progress_bar(id: impl Into<ElementId>, fraction: Option<f32>) -> AnyElement {
+    let track = div().id(id).relative().w_full().h(px(3.)).rounded_full().overflow_hidden().bg(rgb(theme::line()));
+    match fraction {
+        Some(f) => track
+            .child(div().absolute().top_0().left_0().h_full().w(gpui::relative(f.clamp(0., 1.))).rounded_full().bg(rgb(theme::text_2())))
+            .into_any_element(),
+        None if !motion() => track.child(div().absolute().top_0().left_0().h_full().w(gpui::relative(0.3)).bg(rgb(theme::text_3()))).into_any_element(),
+        None => track
+            .child(
+                div().absolute().top_0().h_full().w(gpui::relative(0.28)).rounded_full().bg(rgb(theme::text_2())).with_animation(
+                    "slide",
+                    Animation::new(Duration::from_millis(1300)).repeat().with_easing(gpui::ease_in_out),
+                    |el, t| el.left(gpui::relative(-0.28 + 1.28 * t)),
+                ),
+            )
+            .into_any_element(),
+    }
+}
+
+/// Where a step of a longer job is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum StepState {
+    Waiting,
+    Running,
+    Done,
+    Failed,
+    Skipped,
+}
+
+/// One step for `steps`.
+#[derive(Clone, Debug)]
+pub struct StepView {
+    pub label: SharedString,
+    pub detail: Option<SharedString>,
+    pub state: StepState,
+    /// While running: Some(None) shows a sliding bar, Some(Some(f)) a filled one.
+    pub progress: Option<Option<f32>>,
+}
+
+/// A job as a list of steps, joined by a thin line: an outlined dot waits, a
+/// pulsing dot runs (with a progress bar when there is one), a check is done,
+/// red failed. Shows exactly where things are instead of a bare spinner.
+pub fn steps(id: impl Into<SharedString>, items: &[StepView]) -> Div {
+    let id: SharedString = id.into();
+    let last = items.len().saturating_sub(1);
+    div().flex().flex_col().children(items.iter().enumerate().map(|(i, step)| {
+        let marker: AnyElement = match step.state {
+            StepState::Waiting | StepState::Skipped => div().size(px(9.)).rounded_full().border_1().border_color(rgb(theme::line_strong())).into_any_element(),
+            StepState::Running => {
+                let dot = div().size(px(9.)).rounded_full().bg(rgb(theme::text()));
+                if motion() {
+                    dot.with_animation(
+                        SharedString::from(format!("{id}-pulse-{i}")),
+                        Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.3, 1.0)),
+                        |el, t| el.opacity(t),
+                    )
+                    .into_any_element()
+                } else {
+                    dot.into_any_element()
+                }
+            }
+            StepState::Done => icon_sized(Icon::Check, 14.).text_color(rgb(theme::text_2())).into_any_element(),
+            StepState::Failed => icon_sized(Icon::Alert, 14.).text_color(rgb(theme::red_text())).into_any_element(),
+        };
+        let text_color = match step.state {
+            StepState::Waiting | StepState::Skipped => theme::text_3(),
+            StepState::Failed => theme::red_text(),
+            _ => theme::text(),
+        };
+        div()
+            .flex()
+            .gap(px(12.))
+            .child(
+                div()
+                    .w(px(16.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(div().h(px(20.)).flex().items_center().justify_center().child(marker))
+                    .when(i < last, |d| d.child(div().flex_1().min_h(px(10.)).w(px(1.)).bg(rgb(if step.state == StepState::Done { theme::text_3() } else { theme::line() })))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .pb(px(if i < last { 14. } else { 0. }))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .min_h(px(20.))
+                            .flex()
+                            .items_center()
+                            .text_size(px(13.5))
+                            .text_color(rgb(text_color))
+                            .when(step.state == StepState::Running, |d| d.font_weight(FontWeight::MEDIUM))
+                            .when(step.state == StepState::Skipped, |d| d.line_through())
+                            .child(step.label.clone()),
+                    )
+                    .children(step.detail.clone().map(|d| div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(d)))
+                    .when_some(step.progress.filter(|_| step.state == StepState::Running), |d, p| {
+                        d.child(div().pt(px(4.)).max_w(px(360.)).child(progress_bar(SharedString::from(format!("{id}-bar-{i}")), p)))
+                    }),
+            )
+    }))
 }
 
 /// A placeholder bar where content is about to appear (skeleton loading):

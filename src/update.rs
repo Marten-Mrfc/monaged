@@ -184,7 +184,8 @@ impl Monaged {
 
     pub(crate) fn restart(&mut self, cx: &mut Context<Self>) {
         if let Ok(exe) = std::env::current_exe() {
-            let _ = Command::new(exe).spawn();
+            // The new copy waits for this one to close (one Monaged at a time).
+            let _ = Command::new(exe).arg("--restarted").spawn();
         }
         cx.quit();
     }

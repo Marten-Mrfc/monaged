@@ -21,14 +21,21 @@ Options: `--distro Ubuntu`, and `--agent <path to claude-agent-acp in WSL>`.
 
 ## Using it
 
-- **The window:** the sidebar tree on the left (with a **Needs you** inbox on top), agents in the middle, and the inspector (Pipeline, Board, Merge, Git, Timeline) on the right. The status bar shows the connection, weekly usage and Monaged's share.
+- **Try it:** Ctrl K → **Create the playground project** (or **Try the playground** on the welcome screen) makes Lunchbox in `~/code/monaged-playground`: a small Python app with a bug, a flaky test, a merge conflict, an MCP server and project knowledge, plus a tour of every feature (`PLAYGROUND.md`, also shown in Monaged).
+- **The window:** the sidebar tree on the left (with a **Needs you** inbox on top), agents in the middle, and the inspector (Pipeline, Board, Merge, Git, Run, Timeline) on the right. The status bar shows the connection, weekly usage and Monaged's share.
 - **Wide screens** show several agents side by side; Ctrl-click an agent in the tree to open it beside the current one.
 - **Ctrl K** opens the command palette: jump anywhere, run an action, switch theme.
 - **Right-click** a project, subproject or agent (or use its ⋯) for everything you can do with it.
-- **Other shortcuts:** Ctrl B toggles the sidebar, Ctrl Alt B the inspector, Ctrl , opens Settings, Ctrl / lists every shortcut, Alt ↑/↓ moves between agents, Ctrl N starts an agent, Ctrl F finds in a conversation, Ctrl Shift F searches all of them, F11 is zen mode; Enter sends, Shift+Enter adds a line, Esc stops an agent or closes whatever is open.
-- **The message box:** `/` lists commands, ↑ brings back what you sent, paste or drop images and files. The chips under it set the agent's mode, model and effort.
+- **Other shortcuts:** Ctrl B toggles the sidebar, Ctrl Alt B the inspector, Ctrl , opens Settings, Ctrl / lists every shortcut, Alt ↑/↓ moves between agents, Ctrl N starts an agent, Ctrl J opens the side chat, Ctrl F finds in a conversation, Ctrl Shift F searches all of them, F11 is zen mode; Enter sends, Shift+Enter adds a line, Esc stops an agent or closes whatever is open. Ctrl 0 puts a cursor in the sidebar (↑ ↓ → ← Enter Esc). Change any of them in Settings → Keyboard.
+- **The message box:** `/` lists commands, ↑ brings back what you sent, paste or drop images and files (images show as thumbnails; click one for full size). The chips under it set the agent's mode, model and effort.
+- **Undo and replay:** every turn is checkpointed; point at one of your messages and ↶ rolls the worktree back to before it (with Undo). Right-click an agent → Replay steps through its turns with each turn's diff.
+- **Side chat** (Ctrl J): ask Haiku about an agent's work beside its conversation; the agent never sees it.
+- **Project settings** (right-click a project): MCP servers for its agents (with a Test button), its knowledge (CLAUDE.md, skills, subagents, commands, shared notes) and its run and test commands.
+- **Run tab:** start a worktree's dev server (output, port, Open), run its tests once or three times to find flaky ones, and send failures to the agent.
+- **Spending cap:** right-click a subproject → Set a spending cap; its agents pause when they reach it.
+- **Environment** (Project settings): variables per environment (Development, Test…), encrypted with Windows DPAPI. The Run tab and project MCP servers (`${NAME}`) get them as environment variables; agents only get names, and run commands with them through `run_with_env` after you approve (output masked). Secret values are masked everywhere Monaged shows text, flagged in diffs, and block merges and pushes.
 - **Questions:** when an agent asks something, a form appears in its conversation; it waits for your answer.
-- **The inspector** has Pipeline, Board, Merge, Git and Timeline tabs. The Git tab commits, syncs, resolves conflicts and shows the history.
+- **The inspector** has Pipeline, Board, Merge, Git, Run and Timeline tabs. The Git tab commits, syncs, resolves conflicts and shows the history.
 - **Installing:** run `scripts/release.ps1` to build `dist/Monaged-Setup-<version>.exe`; running that installs Monaged for you (no admin). With `-Publish` it also makes the GitHub release that installed copies update from.
 - **Messages:** things that happened appear bottom right and fade (errors stay); things that are true right now (offline, not logged in, paused) sit in a bar at the top until fixed.
 - **Themes** (Settings → Appearance): Carbon, Graphite, Clay, Paper, or follow Windows.
@@ -92,10 +99,21 @@ Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a 
 | `src/pipeline_edit.rs` | Editing the plan, running a stage or builder again |
 | `src/queue_ui.rs` | The merge queue with CI status |
 | `src/git_ops.rs`, `src/git_ui.rs` | Git: status, commit, stash, sync, conflicts, history; the Git tab and its settings |
+| `src/syntax.rs` | Syntax colors for code blocks and diffs (a small tokenizer per language family) |
+| `src/checkpoints.rs` | Checkpoints per turn (git objects under `refs/monaged/`), rollback with undo, the turn-by-turn replay |
+| `src/project_ui.rs` | Project settings: MCP servers, knowledge files, run and test commands |
+| `src/run_ui.rs` | The Run tab: dev servers in their own process group, tests, flaky detection |
+| `src/media.rs` | Image thumbnails and the full-size viewer |
+| `src/side_chat.rs` | The side chat with Haiku |
+| `src/keys.rs` | Shortcuts you can change, and moving through the sidebar with the keyboard |
+| `src/playground.rs`, `playground/` | The playground project and its files |
 | `src/notify.rs` | Windows notifications through a tray icon, the flashing taskbar button |
 | `src/health.rs` | The health check |
 | `src/settings_ui.rs` | Settings: agents, message box, notifications, general |
 | `src/install.rs`, `src/update.rs` | The per-user installer and updates from GitHub releases |
+| `src/add_project.rs` | Adding a project: live checks, one-click fixes, step-by-step progress, cancelling a clone |
+| `src/env.rs` | Environment variables: the DPAPI vault, masking, .env import, the agents' `env_list`/`run_with_env` tools and approvals, repo checks |
+| `src/instance.rs` | One Monaged at a time |
 | `src/menu.rs` | Right-click and ⋯ menus |
 | `src/feedback.rs` | Toasts, confirm dialogs, the keyboard sheet, automatic reconnects |
 | `src/ui.rs` | The component kit: buttons, labels, status dots, meters, rows, cards, switches, fields |

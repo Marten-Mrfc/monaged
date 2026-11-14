@@ -5,15 +5,6 @@ use anyhow::Result;
 
 use crate::wsl::{quote, run, shell_path};
 
-pub enum Source {
-    /// A folder that already exists in WSL (made into a repo if needed).
-    Existing,
-    /// `git clone <url>` into the folder.
-    Clone(String),
-    /// A new empty repository.
-    Empty,
-}
-
 pub struct Prepared {
     /// Absolute Linux path of the repository.
     pub path: String,
@@ -27,17 +18,12 @@ pub fn linux_user(distro: &str) -> Result<String> {
     run(distro, "whoami")
 }
 
-pub fn prepare_project(distro: &str, folder: &str, source: &Source) -> Result<Prepared> {
+/// Makes a folder that's already in WSL ready for Monaged: a git repo with at
+/// least one commit (worktrees need one), its base branch and git identity.
+/// Cloning and creating folders happen before this (see `add_project`).
+pub fn prepare_project(distro: &str, folder: &str) -> Result<Prepared> {
     let dir = shell_path(folder);
-    let locate = match source {
-        Source::Existing => format!("cd {dir} && pwd"),
-        Source::Clone(url) => format!(
-            "mkdir -p \"$(dirname {dir})\" && git clone --quiet {} {dir} && cd {dir} && pwd",
-            quote(url)
-        ),
-        Source::Empty => format!("mkdir -p {dir} && cd {dir} && pwd"),
-    };
-    let path = run(distro, &locate)?;
+    let path = run(distro, &format!("cd {dir} && pwd"))?;
     let repo = quote(&path);
 
     // Worktrees need a repository with at least one commit.
@@ -190,6 +176,10 @@ pub enum MergeOutcome {
 /// has no uncommitted changes), or else in Monaged's own merge worktree.
 /// Conflicts are aborted and reported.
 pub fn merge_branch(distro: &str, repo: &str, source: &str, target: &str, message: &str) -> Result<MergeOutcome> {
+    let found = secrets_in(distro, repo, &format!("{}..{}", quote(target), quote(source)))?;
+    if !found.is_empty() {
+        return Ok(MergeOutcome::Blocked(format!("{source} has commits with the value of {}; remove it before merging", found.join(", "))));
+    }
     let merge_worktree = worktree_path(repo, "_merge", "worktree");
     let script = format!(
         "cd {repo} || exit 1\n\
@@ -237,7 +227,25 @@ pub fn merge_branch(distro: &str, repo: &str, source: &str, target: &str, messag
 }
 
 /// `git push -u origin <branch>` from WSL.
+/// Names of secrets whose values are in a git range's patches (empty when
+/// Monaged has no secrets to look for).
+fn secrets_in(distro: &str, repo: &str, revs: &str) -> Result<Vec<String>> {
+    if !crate::env::has_masks() {
+        return Ok(Vec::new());
+    }
+    let patches = run(distro, &format!("cd {} && git log -p --no-color --no-ext-diff {revs} 2>/dev/null; true", quote(repo)))?;
+    Ok(crate::env::mask_names(&patches).1)
+}
+
 pub fn push_branch(distro: &str, repo: &str, branch: &str) -> Result<String> {
+    // Commits that aren't on any remote yet must not carry a secret's value.
+    let found = secrets_in(distro, repo, &format!("{} --not --remotes", quote(branch)))?;
+    if !found.is_empty() {
+        anyhow::bail!(
+            "Not pushed: {branch} has commits with the value of {}. Remove it from the code and the commits (or rotate it) first.",
+            found.join(", ")
+        );
+    }
     run(distro, &format!("cd {} && git push -u origin {} 2>&1", quote(repo), quote(branch)))
 }
 

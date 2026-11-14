@@ -69,6 +69,7 @@ fn tab_key(tab: InspectorTab) -> &'static str {
         InspectorTab::Merge => "merge",
         InspectorTab::Git => "git",
         InspectorTab::Timeline => "timeline",
+        InspectorTab::Run => "run",
     }
 }
 
@@ -78,6 +79,7 @@ fn tab_from(key: &str) -> InspectorTab {
         "merge" => InspectorTab::Merge,
         "git" => InspectorTab::Git,
         "timeline" => InspectorTab::Timeline,
+        "run" => InspectorTab::Run,
         _ => InspectorTab::Pipeline,
     }
 }

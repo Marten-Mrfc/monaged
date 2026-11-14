@@ -1,0 +1,5 @@
+{
+  "dev": "python3 -m lunchbox.server",
+  "test": "python3 -m unittest -v",
+  "port": 8765
+}

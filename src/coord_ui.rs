@@ -6,7 +6,7 @@ use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, rgb};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::agent::Tone;
 use crate::coord::{self, ToolReply, ToolRequest};
@@ -37,11 +37,14 @@ const KINDS: [&str; 3] = ["contract", "decision", "note"];
 
 impl Monaged {
     /// The `monaged` MCP server for this agent's session (empty if the bridge failed).
+    /// Monaged's own coordination server, plus the project's (Project settings → MCP servers).
     pub(crate) fn mcp_servers(&self, agent_id: i64) -> Value {
-        match &self.bridge {
-            Some(bridge) => json!([coord::mcp_server_spec(bridge, agent_id)]),
-            None => json!([]),
+        let mut servers = Vec::new();
+        if let Some(bridge) = &self.bridge {
+            servers.push(coord::mcp_server_spec(bridge, agent_id));
         }
+        servers.extend(self.project_mcp_specs(agent_id));
+        Value::Array(servers)
     }
 
     pub(crate) fn on_tool_request(&mut self, request: ToolRequest, cx: &mut Context<Self>) {
@@ -55,6 +58,8 @@ impl Monaged {
             "board_post" => self.tool_board_post(agent, &arguments),
             "claim_files" => self.tool_claim_files(agent, &arguments),
             "ask" => return self.tool_ask(agent, &arguments, reply, cx),
+            "env_list" => self.tool_env_list(agent),
+            "run_with_env" => return self.tool_run_with_env(agent, &arguments, reply, cx),
             other => ToolReply::error(format!("Unknown Monaged tool: {other}")),
         };
         let _ = reply.send(answer);

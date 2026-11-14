@@ -302,6 +302,40 @@ One rule for where a message goes:
 
 **Not done in this batch:** conversations of agents whose sessions aren't open yet aren't searchable (their history loads with the session); a signed installer.
 
+### Undo, run, project knowledge and a playground (done 2026-11-14)
+- [x] **Checkpoints and rollback:** every turn snapshots the worktree into git objects under `refs/monaged/checkpoints/` (your branch history is untouched). ↶ on a message rolls back to before it, the agent menu undoes the last turn; both can be undone, and the agent hears about it with your next message.
+- [x] **Replay:** step through an agent's turns (← →) with each turn's diff between its checkpoints.
+- [x] **Spending cap per subproject:** a weekly dollar cap; its agents pause when they reach it and the pipeline tab shows how close it is.
+- [x] **MCP servers per project:** stdio commands or HTTP URLs, on/off, a Test that lists the server's tools; sessions get them in `session/new`.
+- [x] **Project knowledge editor:** CLAUDE.md, skills, subagents and commands in the repo (save, or save and commit), plus shared notes above every worktree that aren't committed.
+- [x] **Run tab:** the dev server per worktree in its own process group (Stop ends all of it), live output, the port and an Open button; tests once or three times with flaky detection; failures sent to the agent. Commands from Project settings or detected (monaged.json, package.json, Cargo, go.mod, Python, Makefile).
+- [x] **Syntax colors** in code blocks and diffs, per theme.
+- [x] **Images in conversations:** thumbnails for attachments (also after a session reopens) and images agents show; click for full size.
+- [x] **Side chat with Haiku** beside an agent: questions about its work, answered from its conversation and diff, never sent to the agent.
+- [x] **Keyboard:** every app shortcut can be changed in Settings → Keyboard (conflicts refused, reset per key or all); Ctrl 0 moves through the sidebar with the arrows; the shortcut sheet, menus and tooltips show the current keys.
+- [x] **The playground:** Ctrl K → Create the playground project builds Lunchbox in WSL (a bug, a flaky test, a prepared merge conflict, an MCP server, knowledge files, a local bare remote, three subprojects) with a tour of every feature.
+- [x] **Fixed:** shortcuts stopped working after a palette command opened a page (nothing had focus); the MCP test never matched Python servers' replies; Undo toasts faded before you could use them; the replay lost the keyboard to a hidden message box; unittest's closing `FAILED (failures=1)` line was read as a test name.
+
+### Adding projects, feedback and WSL hygiene (done 2026-11-14)
+- [x] **Add a project, redone:** three cards (clone a repo, a folder I have, start empty); fields that fill in the name and folder; Browse… for folders (Windows and `\wsl.localhost` paths become WSL paths). While you type, a "Before adding" panel checks the address or folder in WSL: whether WSL can sign in to the host over SSH or HTTPS, where the repo lands and whether that folder is free, what's in a folder you picked, and whether it sits on a Windows drive.
+- [x] **One-click fixes:** use the HTTPS address, trust a host (ssh-keyscan), use the folder that's already there, remove an empty repo a failed clone left, clone a repo off a Windows drive into ~/code, open Settings → Git.
+- [x] **Adding step by step:** each step with its state; clones stream git's real progress (download size and speed) and can be stopped with Esc or Stop, which removes the folder it started. Failures are explained in words with the fixes, plus git's own output to show or copy. Wide windows put the form and the panel side by side.
+- [x] **Feedback without spinners:** a three-dot loader in Monaged's dot language replaces the ring spinner everywhere; a progress bar; step lists for adding a subproject and making the playground.
+- [x] **WSL hygiene:** every `wsl.exe` starts in the Linux home (`--cd ~`), so git never runs from Monaged's Windows folder (that caused WSL's "Performance Tip" notification); git and ssh never wait for prompts nobody can answer (`BatchMode`), so an SSH clone without a key fails in a second instead of hanging.
+- [x] **One Monaged at a time:** starting it again brings the open window forward (a restart after an update waits for the old copy).
+- [x] **Fixed:** scripts with `set -e` that ended with `exit` reported failure (a login shell's `.bash_logout` runs `clear_console`, which fails without a terminal).
+
+### Environment and secrets (done 2026-11-14)
+- [x] **A vault per project:** variables per environment (Development, Test, …), each value encrypted with Windows DPAPI for your account plus a per-install key in Credential Manager; the database only holds encrypted blobs. Masked entry, Paste (clears the clipboard after), reveal for 15 s, copy kept out of clipboard history and cleared after 30 s, an audit log of what happened (never values).
+- [x] **Delivery without files:** the Run tab's dev server and tests get the active environment as environment variables through the script on stdin (never a command line); project MCP servers take `${NAME}` in their env and headers.
+- [x] **Agents never see values:** `env_list` gives names, `run_with_env` runs a command with them after you approve it (once, or always for that exact command), with warnings for network, printing and encoding commands; output comes back with secrets as `[secret:NAME]`. Waiting requests show in the agent's pane and under Needs you.
+- [x] **Masking everywhere:** conversations, tool input and output, diffs (so reviews never get them either), dev-server logs and test output. A value that shows up in a conversation is reported once (it was sent to Claude: rotate it); diffs with one get a red note; merges and pushes with one are refused.
+- [x] **Around the repo:** tracked `.env` files (stop tracking), `.gitignore` coverage (add it), plain `.env` files (import, then delete), and deny rules that keep agents from reading `.env` files in every worktree (`.claude/settings.local.json`, ignored by git).
+- [x] **Forms:** Tab and Shift+Tab move between fields; Enter in the Environment section goes name → value → saved.
+- [x] **After a research pass** (Claude Code docs, OWASP LLM06, GitHub/GitLab masking docs, Microsoft DPAPI and clipboard docs, gitleaks/trufflehog): agents' rules (no .env reads, no `git push`) and the optional sandbox go to each session as a `--settings` layer the agent can't edit (`_meta.claudeCode.options.settings`); Claude Code's sandbox (bubblewrap + socat) hides other processes, `/mnt` and Windows programs from agents' commands; approvals let you untick variables, and "always" is tied to the worktree and the exact set of variables; the Run tab keeps secrets out of agents' worktrees unless you allow it; scripts that carry secrets run without shell startup files; masking also catches Base64 (all alignments), hex, percent and JSON forms; each encrypted value is bound to its project, environment and name; DPAPI output is wiped with volatile writes; one more clipboard-manager opt-out.
+- [ ] Next: run `run_with_env` commands in their own sandbox too (bubblewrap, with an optional no-network mode and per-secret allowed hosts); gitleaks before pushes when installed; Windows Hello before revealing or copying.
+- [x] **The database protects itself:** every start makes a backup (VACUUM INTO, last five kept), checks the file, and if it's damaged sets it aside and starts from the newest good backup (and says so). The window position is only saved when it changes, never while minimized.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.

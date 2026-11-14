@@ -98,6 +98,8 @@ pub struct SlashCommand {
 pub struct Attachment {
     pub name: String,
     pub kind: AttachmentKind,
+    /// For images: shown as a thumbnail.
+    pub preview: Option<std::sync::Arc<gpui::Image>>,
 }
 
 #[derive(Clone, Debug)]
@@ -140,7 +142,7 @@ impl ToolDetail {
     fn merge(&mut self, update: &Value) {
         if !update["rawInput"].is_null() {
             let raw = &update["rawInput"];
-            self.input = Some(serde_json::to_string_pretty(raw).unwrap_or_else(|_| raw.to_string()));
+            self.input = Some(crate::env::mask(&serde_json::to_string_pretty(raw).unwrap_or_else(|_| raw.to_string())));
         }
         if let Some(locations) = update["locations"].as_array() {
             self.locations = locations
@@ -161,8 +163,8 @@ impl ToolDetail {
                     "content" => content_text(&c["content"]).map(ToolContent::Text),
                     "diff" => Some(ToolContent::Diff {
                         path: c["path"].as_str().unwrap_or_default().to_string(),
-                        old: c["oldText"].as_str().map(str::to_owned),
-                        new: c["newText"].as_str().unwrap_or_default().to_string(),
+                        old: c["oldText"].as_str().map(crate::env::mask),
+                        new: crate::env::mask(c["newText"].as_str().unwrap_or_default()),
                     }),
                     "terminal" => c["terminalId"].as_str().map(|t| ToolContent::Terminal(t.to_string())),
                     _ => None,
@@ -297,8 +299,10 @@ pub enum Item {
     Notice(Tone, String),
     /// The agent asks you to fill in a form (questions, input, a sign-in link).
     Elicit(Elicitation),
-    /// Files and images sent with the message before this item.
-    Attachments(Vec<String>),
+    /// Files and images sent with the message before this item (name, image).
+    Attachments(Vec<(String, Option<std::sync::Arc<gpui::Image>>)>),
+    /// An image the agent showed.
+    AgentImage(std::sync::Arc<gpui::Image>),
 }
 
 pub struct Turn {
@@ -336,6 +340,10 @@ pub struct AgentView {
     pub changes: Option<Vec<FileDiff>>,
     pub changes_raw: String,
     pub changes_truncated: bool,
+    /// Secrets whose values are in the diff (by name).
+    pub changes_secrets: Vec<String>,
+    /// Secrets whose values showed up in the conversation, not reported yet.
+    pub leaks: Vec<String>,
     pub selected_file: usize,
     pub loading_changes: bool,
     pub summary: Option<Summary>,
@@ -388,6 +396,8 @@ impl AgentView {
             changes: None,
             changes_raw: String::new(),
             changes_truncated: false,
+            changes_secrets: Vec::new(),
+            leaks: Vec::new(),
             selected_file: 0,
             loading_changes: false,
             summary: None,
@@ -500,21 +510,50 @@ impl AgentView {
     }
 
     /// Applies one `session/update` (live, or replayed by `session/load`).
+    /// Secret values are masked on the way in; ones that showed up are noted.
     pub fn apply_update(&mut self, update: &Value) {
+        self.apply_update_inner(update);
+        self.leaks.extend(crate::env::take_found());
+    }
+
+    fn apply_update_inner(&mut self, update: &Value) {
         match update["sessionUpdate"].as_str().unwrap_or_default() {
             "user_message_chunk" => {
+                // Images you attached come back with the history: show them, not "[image]".
+                if update["content"]["type"] == "image"
+                    && let Some(image) = crate::media::from_content(&update["content"])
+                {
+                    match self.items.last_mut() {
+                        Some(Item::Attachments(list)) => list.push(("image".into(), Some(image))),
+                        _ => self.items.push(Item::Attachments(vec![("image".into(), Some(image))])),
+                    }
+                    return;
+                }
                 if let Some(text) = content_text(&update["content"]) {
                     match self.items.last_mut() {
-                        Some(Item::User(existing)) => existing.push_str(&text),
+                        // A secret can be split across chunks: mask the whole message.
+                        Some(Item::User(existing)) => {
+                            existing.push_str(&text);
+                            crate::env::mask_in_place(existing);
+                        }
                         _ => self.items.push(Item::User(text)),
                     }
                 }
             }
             "agent_message_chunk" => {
+                if update["content"]["type"] == "image"
+                    && let Some(image) = crate::media::from_content(&update["content"])
+                {
+                    self.items.push(Item::AgentImage(image));
+                    return;
+                }
                 if let Some(text) = content_text(&update["content"]) {
                     self.mark_first_words();
                     match self.items.last_mut() {
-                        Some(Item::Agent(existing)) => existing.push_str(&text),
+                        Some(Item::Agent(existing)) => {
+                            existing.push_str(&text);
+                            crate::env::mask_in_place(existing);
+                        }
                         _ => self.items.push(Item::Agent(text)),
                     }
                 }
@@ -522,7 +561,10 @@ impl AgentView {
             "agent_thought_chunk" => {
                 if let Some(text) = content_text(&update["content"]) {
                     match self.items.last_mut() {
-                        Some(Item::Thought(existing)) => existing.push_str(&text),
+                        Some(Item::Thought(existing)) => {
+                            existing.push_str(&text);
+                            crate::env::mask_in_place(existing);
+                        }
                         _ => self.items.push(Item::Thought(text)),
                     }
                 }
@@ -533,7 +575,7 @@ impl AgentView {
                 detail.merge(update);
                 self.items.push(Item::Tool {
                     id: update["toolCallId"].as_str().unwrap_or_default().to_owned(),
-                    title: update["title"].as_str().unwrap_or("Tool").to_owned(),
+                    title: crate::env::mask(update["title"].as_str().unwrap_or("Tool")),
                     kind: update["kind"].as_str().unwrap_or_default().to_owned(),
                     status: update["status"].as_str().unwrap_or("pending").to_owned(),
                     detail,
@@ -677,7 +719,7 @@ impl AgentView {
 
 fn content_text(content: &Value) -> Option<String> {
     match content["type"].as_str()? {
-        "text" => content["text"].as_str().map(str::to_owned),
+        "text" => content["text"].as_str().map(crate::env::mask),
         "image" => Some("[image]".into()),
         "resource_link" => Some(format!("[{}]", content["name"].as_str().unwrap_or("link"))),
         _ => None,

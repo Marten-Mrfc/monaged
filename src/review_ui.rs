@@ -13,10 +13,11 @@ use crate::markdown::{self, Block, Inline, Style};
 use crate::review::{self, TurnInfo};
 use crate::{Form, Monaged, dots, secrets, theme, tone_color, ui};
 
-const SETTINGS_SECTIONS: [(&str, Icon); 11] = [
+const SETTINGS_SECTIONS: [(&str, Icon); 12] = [
     ("Appearance", Icon::Eye),
     ("Agents", Icon::Agent),
     ("Message box", Icon::Send),
+    ("Keyboard", Icon::Keyboard),
     ("Usage and budget", Icon::Gauge),
     ("Models", Icon::Layers),
     ("API key", Icon::Key),
@@ -28,6 +29,19 @@ const SETTINGS_SECTIONS: [(&str, Icon); 11] = [
 ];
 
 impl Monaged {
+    /// Settings, scrolled to one section.
+    pub(crate) fn open_settings_at(&mut self, name: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.open_settings(cx);
+        if let Some(i) = SETTINGS_SECTIONS.iter().position(|(n, _)| *n == name) {
+            let scroll = self.settings_scroll.clone();
+            cx.on_next_frame(window, move |_, window, cx| {
+                scroll.scroll_to_top_of_item(i + 1);
+                cx.on_next_frame(window, |_, _, cx| cx.notify());
+                cx.notify();
+            });
+        }
+    }
+
     /// The API key when set; otherwise the Claude CLI (Max plan) if allowed.
     pub(crate) fn backend(&self) -> Option<Backend> {
         if let Some(key) = &self.api_key {
@@ -115,6 +129,7 @@ impl Monaged {
                             agent.changes = Some(changes.files);
                             agent.changes_raw = changes.raw;
                             agent.changes_truncated = changes.truncated;
+                            agent.changes_secrets = changes.secrets;
                         }
                         Err(err) => agent.review_error = Some(format!("Couldn't read the changes: {err:#}")),
                     }
@@ -236,6 +251,7 @@ impl Monaged {
                             agent.changes = Some(changes.files);
                             agent.changes_raw = changes.raw;
                             agent.changes_truncated = changes.truncated;
+                            agent.changes_secrets = changes.secrets;
                             match reviewed {
                                 Some((confidence, _)) => agent.confidence = Some(confidence),
                                 None => agent.review_error = Some("Nothing to review yet: this worktree has no changes.".into()),
@@ -466,8 +482,8 @@ impl Monaged {
                 .child(
                     ui::row("settings-nav-keys", false)
                         .child(icon(Icon::Keyboard).size(px(14.)))
-                        .child(div().flex_1().child("Keyboard"))
-                        .child(ui::kbd("Ctrl /"))
+                        .child(div().flex_1().child("Shortcut sheet"))
+                        .children(crate::keys::hint("shortcuts").map(ui::kbd))
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_shortcuts(window, cx))),
                 )
         });
@@ -497,6 +513,9 @@ impl Monaged {
                             section("Agents", Some("The AI agent Monaged runs your sessions with, and others you can switch to.")).child(self.render_agent_settings(cx)),
                         ))
                         .child(column(section("Message box", None).child(self.render_message_box_settings(cx))))
+                        .child(column(
+                            section("Keyboard", Some("Change any shortcut: click Change, then press the keys you want.")).child(self.render_keyboard_settings(cx)),
+                        ))
                         .child(column(section("Usage and budget", None).child(self.render_usage_settings(cx))))
                         .child(column(section("Models", None).child(self.render_model_settings(cx))))
                         .child(column(
@@ -689,7 +708,22 @@ impl Monaged {
                     .children(self.render_comments_bar(agent_id, cx))
                     .child(self.render_diff_body(Some(agent_id), file, cx))
                     .when(agent.changes_truncated, |d| d.child(muted("This diff is very large; only the first part was loaded.")));
-                div().flex().items_start().gap(px(16.)).child(list).child(diff_view).into_any_element()
+                let secrets = (!agent.changes_secrets.is_empty()).then(|| {
+                    ui::callout(
+                        Tone::Error,
+                        format!(
+                            "These changes contain the value of {}. Don't commit, merge or push them: ask the agent to read it from the environment instead (it's masked here).",
+                            agent.changes_secrets.join(", ")
+                        ),
+                    )
+                });
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .children(secrets)
+                    .child(div().flex().items_start().gap(px(16.)).child(list).child(diff_view))
+                    .into_any_element()
             }
         };
 

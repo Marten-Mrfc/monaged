@@ -28,6 +28,7 @@ pub fn from_image(image: &gpui::Image, number: usize) -> Result<Attachment> {
     Ok(Attachment {
         name: format!("pasted-image-{number}.{ext}"),
         kind: AttachmentKind::Image { mime: mime.into(), data: base64(&image.bytes) },
+        preview: Some(std::sync::Arc::new(image.clone())),
     })
 }
 
@@ -47,7 +48,14 @@ pub fn from_path(path: &Path) -> Result<Attachment> {
         if bytes.len() > MAX_IMAGE_BYTES {
             bail!("{name} is over 5 MB; Claude can't take images that large.");
         }
-        return Ok(Attachment { name, kind: AttachmentKind::Image { mime: mime.into(), data: base64(&bytes) } });
+        let format = match mime {
+            "image/jpeg" => gpui::ImageFormat::Jpeg,
+            "image/gif" => gpui::ImageFormat::Gif,
+            "image/webp" => gpui::ImageFormat::Webp,
+            _ => gpui::ImageFormat::Png,
+        };
+        let data = base64(&bytes);
+        return Ok(Attachment { name, kind: AttachmentKind::Image { mime: mime.into(), data }, preview: Some(std::sync::Arc::new(gpui::Image::from_bytes(format, bytes))) });
     }
     if bytes.len() > MAX_TEXT_BYTES {
         bail!("{name} is over 256 KB. Mention its path instead and the agent reads what it needs.");
@@ -56,7 +64,7 @@ pub fn from_path(path: &Path) -> Result<Attachment> {
         bail!("{name} isn't text or a PNG, JPEG, GIF or WebP image.");
     };
     let uri = format!("file:///{}", path.to_string_lossy().replace('\\', "/").trim_start_matches('/'));
-    Ok(Attachment { name, kind: AttachmentKind::Text { uri, text } })
+    Ok(Attachment { name, kind: AttachmentKind::Text { uri, text }, preview: None })
 }
 
 /// Standard base64 with padding.

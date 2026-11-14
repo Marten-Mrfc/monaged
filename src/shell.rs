@@ -17,7 +17,7 @@ use crate::icons::{Icon, icon, icon_sized};
 use crate::menu::MenuTarget;
 use crate::pipeline::{self, Role, Stage};
 use crate::ui::{self, Kind, State};
-use crate::{Conn, Form, LOGIN_COMMAND, Monaged, SourceKind, SubKind, coord, coord_ui, dots, pipeline_ui, review_ui, theme};
+use crate::{Conn, Form, LOGIN_COMMAND, Monaged, SubKind, coord, coord_ui, dots, pipeline_ui, review_ui, theme};
 
 pub(crate) const COLUMN_MIN: f32 = 600.;
 const READING_WIDTH: f32 = 680.;
@@ -29,6 +29,7 @@ pub(crate) enum InspectorTab {
     Merge,
     Git,
     Timeline,
+    Run,
 }
 
 /// One pane in the agent area.
@@ -80,7 +81,12 @@ pub(crate) fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) ->
 }
 
 pub(crate) fn tip_key(text: &'static str, key: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> AnyView {
-    move |_, cx| cx.new(|_| Tip(text.into(), Some(key))).into()
+    move |_, cx| cx.new(|_| Tip(text.into(), (!key.is_empty()).then_some(key))).into()
+}
+
+/// The keyboard cursor in the sidebar: a bar on the row's left edge.
+fn tree_bar() -> gpui::Div {
+    div().absolute().left(px(1.)).top(px(6.)).bottom(px(6.)).w(px(2.)).rounded_full().bg(rgb(theme::text_2()))
 }
 
 /// A ⋯ button that shows while you point at its row (group "tree-row") and
@@ -235,7 +241,11 @@ impl Monaged {
                 handle
             });
         }
-        if let Some(id) = self.focus_request.take()
+        // The replay and the commit view cover the columns and own the keyboard;
+        // a message box gets the cursor once they close.
+        if self.replay.is_none()
+            && self.commit_view.is_none()
+            && let Some(id) = self.focus_request.take()
             && let Some(input) = self.inputs.get(&id)
         {
             window.focus(&input.focus_handle(cx));
@@ -299,7 +309,9 @@ impl Monaged {
                 }
             }
             for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub.id && !a.record.archived) {
-                let title = if agent.needs_attention() {
+                let title = if self.vault.requests.iter().any(|r| r.agent_id == agent.record.id) {
+                    Some("Wants to use secrets".to_string())
+                } else if agent.needs_attention() {
                     Some("Asks for permission".to_string())
                 } else if agent.open_form() || open_question(agent) {
                     Some("Has a question".to_string())
@@ -340,6 +352,11 @@ impl Monaged {
 
     pub(crate) fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let width = f32::from(window.viewport_size().width);
+        // Keys only reach Monaged's actions through something focused: when a
+        // closed palette, menu or form leaves nothing focused, take it back.
+        if window.focused(cx).is_none() && self.focus_request.is_none() {
+            window.focus(&self.focus);
+        }
         let zen = self.zen && self.sel_agent.is_some() && self.form.is_none();
         let sidebar_w = if self.sidebar_open && !zen { self.sidebar_px(width) } else { 0. };
         let inspector_w = if self.inspector_visible() && !zen { self.inspector_px(width) } else { 0. };
@@ -353,6 +370,9 @@ impl Monaged {
             self.load_pane_weights(sub_id, columns.len());
             if self.inspector_tab == InspectorTab::Git && self.inspector_open {
                 self.prepare_git_panel(sub_id, cx);
+            }
+            if self.inspector_tab == InspectorTab::Run && self.inspector_open {
+                self.prepare_run(sub_id, cx);
             }
         }
         self.prepare_columns(&columns, window, cx);
@@ -372,7 +392,7 @@ impl Monaged {
             .flex_1()
             .min_h(px(0.))
             .flex()
-            .when(sidebar_w > 0., |d| d.child(self.render_sidebar(sidebar_w, cx)))
+            .when(sidebar_w > 0., |d| d.child(self.render_sidebar(sidebar_w, self.tree_focus.is_focused(window), cx)))
             .child(
                 div()
                     .flex_1()
@@ -405,6 +425,8 @@ impl Monaged {
             .on_action(cx.listener(Self::on_toggle_zen))
             .on_action(cx.listener(Self::on_find))
             .on_action(cx.listener(Self::on_search_agents))
+            .on_action(cx.listener(Self::on_focus_tree))
+            .on_action(cx.listener(Self::on_toggle_side_chat))
             // Dragging an edge (sidebar, inspector, pane divider).
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| this.drag_move(event, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
@@ -427,6 +449,7 @@ impl Monaged {
             .children(self.render_confirm(cx))
             .children(self.render_text_prompt(cx))
             .children(self.render_shortcuts(cx))
+            .children(self.render_lightbox(cx))
             .into_any_element()
     }
 
@@ -446,8 +469,11 @@ impl Monaged {
         if matches!(self.form, Some(Form::Health)) {
             crumbs = vec!["Health check".into()];
         }
+        if matches!(self.form, Some(Form::Guide)) {
+            crumbs = vec!["Playground guide".into()];
+        }
         if self.zen && self.form.is_none() {
-            crumbs.push("Zen · F11 to leave".into());
+            crumbs.push(format!("Zen · {} to leave", crate::keys::label("zen")).into());
         }
         let last = crumbs.len().saturating_sub(1);
         let crumb_row = div().flex().items_center().gap(px(6.)).min_w(px(0.)).overflow_hidden().children(
@@ -537,7 +563,7 @@ impl Monaged {
                         .hover(|s| s.border_color(rgb(theme::line_strong())))
                         .child(icon(Icon::Search).size(px(14.)).text_color(rgb(theme::text_3())))
                         .child(div().flex_1().child("Search or run a command"))
-                        .child(ui::kbd("Ctrl K"))
+                        .children(crate::keys::hint("palette").map(ui::kbd))
                         .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
                 ),
             )
@@ -546,16 +572,28 @@ impl Monaged {
 
     // ---- Sidebar ---------------------------------------------------------------------------
 
-    fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(&self, width: f32, tree_focused: bool, cx: &mut Context<Self>) -> AnyElement {
+        use crate::keys::TreeNode;
         let inbox = self.inbox();
         let mut list = div().flex().flex_col().gap(px(1.)).px(px(6.)).pb(px(12.));
+        // The keyboard cursor (Ctrl 0) and which child row it is, to scroll to it.
+        let cursor = if tree_focused { self.tree_current() } else { None };
+        let mut ix = 0usize;
+        let mut cursor_ix = None;
 
         for project in &self.projects {
             let pid = project.id;
             let open = !self.collapsed.contains(&pid);
             let selected = self.sel_project == Some(pid) && self.sel_sub.is_none() && self.form.is_none();
+            let on = cursor == Some(TreeNode::Project(pid));
+            if on {
+                cursor_ix = Some(ix);
+            }
+            ix += 1;
             list = list.child(
                 ui::row(("project", pid as usize), selected)
+                    .when(on && !selected, |d| d.bg(rgb(theme::hover())))
+                    .when(on, |d| d.child(tree_bar()))
                     .relative()
                     .group("tree-row")
                     .on_mouse_down(MouseButton::Right, on_right_click(MenuTarget::Project(pid), cx))
@@ -612,8 +650,15 @@ impl Monaged {
                     div().into_any_element()
                 };
                 let sub_row_selected = selected_sub && self.sel_agent.is_none();
+                let on = cursor == Some(TreeNode::Sub(sid));
+                if on {
+                    cursor_ix = Some(ix);
+                }
+                ix += 1;
                 list = list.child(
                     ui::row(("sub", sid as usize), sub_row_selected)
+                        .when(on && !sub_row_selected, |d| d.bg(rgb(theme::hover())))
+                        .when(on, |d| d.child(tree_bar()))
                         .relative()
                         .group("tree-row")
                         .on_mouse_down(MouseButton::Right, on_right_click(MenuTarget::Sub(sid), cx))
@@ -642,8 +687,15 @@ impl Monaged {
                     let aid = agent.record.id;
                     let role = agent.role();
                     let shown = self.sel_agent == Some(aid);
+                    let on = cursor == Some(TreeNode::Agent(aid));
+                    if on {
+                        cursor_ix = Some(ix);
+                    }
+                    ix += 1;
                     list = list.child(
                         ui::row(("agent", aid as usize), shown)
+                            .when(on && !shown, |d| d.bg(rgb(theme::hover())))
+                            .when(on, |d| d.child(tree_bar()))
                             .relative()
                             .group("tree-row")
                             .on_mouse_down(MouseButton::Right, on_right_click(MenuTarget::Agent(aid), cx))
@@ -662,6 +714,7 @@ impl Monaged {
                             })),
                     );
                 }
+                ix += 1;
                 list = list.child(if self.creating_agent == Some(sid) {
                     div()
                         .id(("new-agent", sid as usize))
@@ -681,13 +734,14 @@ impl Monaged {
                         .text_color(rgb(theme::text_3()))
                         .child(icon_sized(Icon::Plus, 13.).text_color(rgb(theme::text_3())))
                         .child(div().flex_1().child("New agent"))
-                        .child(div().invisible().group_hover("new-agent-row", |s| s.visible()).child(ui::kbd("Ctrl N")))
+                        .child(div().invisible().group_hover("new-agent-row", |s| s.visible()).children(crate::keys::hint("new-agent").map(ui::kbd)))
                         .group("new-agent-row")
                         .on_click(cx.listener(move |this, _, _, cx| this.add_agent(sid, cx)))
                 });
                 let archived: Vec<&AgentView> = self.agents.iter().filter(|a| a.record.subproject_id == sid && a.record.archived).collect();
                 if !archived.is_empty() {
                     let open = self.show_archived.contains(&sid);
+                    ix += 1;
                     list = list.child(
                         ui::row(("show-archived", sid as usize), false)
                             .pl(px(46.))
@@ -704,8 +758,14 @@ impl Monaged {
                     if open {
                         for agent in archived {
                             let aid = agent.record.id;
+                            let on = cursor == Some(TreeNode::Agent(aid));
+                            if on {
+                                cursor_ix = Some(ix);
+                            }
+                            ix += 1;
                             list = list.child(
                                 ui::row(("archived-agent", aid as usize), self.sel_agent == Some(aid))
+                                    .when(on, |d| d.child(tree_bar()))
                                     .relative()
                                     .group("tree-row")
                                     .on_mouse_down(MouseButton::Right, on_right_click(MenuTarget::Agent(aid), cx))
@@ -721,6 +781,13 @@ impl Monaged {
                 }
             }
         }
+
+        if let Some(row) = cursor_ix
+            && self.tree_scroll_pending.replace(false)
+        {
+            self.tree_scroll.scroll_to_item(row);
+        }
+        let _ = ix;
 
         let inbox_el = (!inbox.is_empty()).then(|| {
             div()
@@ -800,7 +867,22 @@ impl Monaged {
                         .on_click(cx.listener(|this, _, window, cx| this.open_project_form(window, cx))),
                 ),
             )
-            .child(div().id("sidebar-list").flex_1().min_h(px(0.)).overflow_y_scroll().child(list))
+            .child(
+                list.id("sidebar-list")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.tree_scroll)
+                    .track_focus(&self.tree_focus)
+                    .key_context("Tree")
+                    // A click puts the keyboard cursor back on what you open.
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.tree_cursor = None))
+                    .on_action(cx.listener(|this, _: &crate::TreeUp, _, cx| this.tree_step(-1, cx)))
+                    .on_action(cx.listener(|this, _: &crate::TreeDown, _, cx| this.tree_step(1, cx)))
+                    .on_action(cx.listener(|this, _: &crate::TreeLeft, _, cx| this.tree_left(cx)))
+                    .on_action(cx.listener(|this, _: &crate::TreeRight, _, cx| this.tree_right(cx)))
+                    .on_action(cx.listener(|this, _: &crate::TreeOpen, window, cx| this.tree_open(window, cx))),
+            )
             .child(
                 div()
                     .flex()
@@ -820,7 +902,7 @@ impl Monaged {
                         ui::row("nav-settings", matches!(self.form, Some(Form::Settings { .. })))
                             .child(icon(Icon::Sliders))
                             .child(div().flex_1().child("Settings"))
-                            .child(ui::kbd("Ctrl ,"))
+                            .children(crate::keys::hint("settings").map(ui::kbd))
                             .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
                     ),
             )
@@ -868,7 +950,7 @@ impl Monaged {
             .child(
                 item("status-sidebar")
                     .cursor_pointer()
-                    .tooltip(tip_key("Sidebar", "Ctrl B"))
+                    .tooltip(tip_key("Sidebar", crate::keys::label("sidebar")))
                     .child(icon_sized(Icon::Sidebar, 14.))
                     .on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(&crate::ToggleSidebar, window, cx))),
             )
@@ -914,14 +996,14 @@ impl Monaged {
             .child(
                 item("status-keys")
                     .cursor_pointer()
-                    .tooltip(tip_key("Keyboard shortcuts", "Ctrl /"))
+                    .tooltip(tip_key("Keyboard shortcuts", crate::keys::label("shortcuts")))
                     .child(icon_sized(Icon::Keyboard, 14.))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_shortcuts(window, cx))),
             )
             .child(
                 item("status-inspector")
                     .cursor_pointer()
-                    .tooltip(tip_key("Inspector", "Ctrl Alt B"))
+                    .tooltip(tip_key("Inspector", crate::keys::label("inspector")))
                     .child(icon_sized(Icon::PanelRight, 14.))
                     .on_click(cx.listener(|this, _, window, cx| this.on_toggle_inspector(&crate::ToggleInspector, window, cx))),
             )
@@ -980,6 +1062,12 @@ impl Monaged {
         if let Some(Form::Health) = &self.form {
             return self.render_health(cx);
         }
+        if let Some(Form::Guide) = &self.form {
+            return self.render_guide(cx);
+        }
+        if let Some(Form::Project(page)) = &self.form {
+            return self.render_project_page(page, cx);
+        }
         if let Some(view) = self.render_commit_view(cx) {
             return view;
         }
@@ -987,7 +1075,7 @@ impl Monaged {
             return view;
         }
         if let Some(form) = &self.form {
-            return self.render_form(form, cx);
+            return self.render_form(form, main_w, cx);
         }
         if let Some(sub_id) = self.sel_sub {
             if self.sub_view == Some(sub_id) {
@@ -1027,8 +1115,17 @@ impl Monaged {
             Icon::Folder,
             "Add your first project",
             "A project is a git repo inside WSL. Split it into subprojects and let Claude agents work on them side by side, each in its own worktree.",
-            ui::button("welcome-add", Kind::Primary, Some(Icon::Plus), "Add project")
-                .on_click(cx.listener(|this, _, window, cx| this.open_project_form(window, cx)))
+            div()
+                .flex()
+                .gap(px(8.))
+                .child(ui::button("welcome-add", Kind::Primary, Some(Icon::Plus), "Add project").on_click(cx.listener(|this, _, window, cx| this.open_project_form(window, cx))))
+                .child(if self.playground_busy {
+                    ui::busy_button("welcome-playground", Kind::Secondary, "Making the playground…")
+                } else {
+                    ui::button("welcome-playground", Kind::Secondary, Some(Icon::Flow), "Try the playground")
+                        .tooltip(tip("A small app with a bug, a flaky test and a merge conflict, to try every feature on"))
+                        .on_click(cx.listener(|this, _, _, cx| this.create_playground(cx)))
+                })
                 .into_any_element(),
         )
     }
@@ -1101,6 +1198,8 @@ impl Monaged {
     ) -> AnyElement {
         // An exact width: GPUI measures wrapped text against the width it's given,
         // and a max-width column made long replies taller than their layout box.
+        let side_open = self.side_chats.get(&agent.record.id).is_some_and(|c| c.open);
+        let pane_w = if side_open { pane_w - crate::side_chat::SIDE_WIDTH } else { pane_w };
         let reading = (pane_w - 48.).clamp(240., READING_WIDTH);
         let id = agent.record.id;
         let focused = self.sel_agent == Some(id);
@@ -1116,7 +1215,11 @@ impl Monaged {
             .flex()
             .flex_col()
             .child(self.render_agent_header(agent, focused, multi, has_room, changes_beside, cx))
-            .child(body)
+            .child(match self.render_side_chat(id, cx) {
+                Some(side) => div().flex_1().min_h(px(0.)).flex().child(div().flex_1().min_w(px(0.)).flex().flex_col().child(body)).child(side).into_any_element(),
+                None => body,
+            })
+            .children(self.render_env_requests(id, cx).map(|cards| div().px(px(16.)).pb(px(8.)).child(cards)))
             .when((agent.tab == AgentTab::Conversation || changes_beside) && !agent.record.archived, |d| d.child(self.render_message_box(agent, reading, cx)))
             .when(agent.record.archived, |d| {
                 d.child(
@@ -1251,6 +1354,11 @@ impl Monaged {
                     .tooltip(tip("Review: run the tests and a skeptical read"))
                     .on_click(cx.listener(move |this, _, _, cx| this.review_agent(id, cx)))
             })
+            .child(
+                ui::icon_button(("side-chat", id as usize), Icon::Ask)
+                    .tooltip(tip_key("Side chat: ask Haiku about this agent's work (the agent doesn't see it)", crate::keys::label("side-chat")))
+                    .on_click(cx.listener(move |this, _, window, cx| this.toggle_side_chat(id, window, cx))),
+            )
             .child(
                 ui::icon_button(("zed", id as usize), Icon::External)
                     .tooltip(tip("Open the worktree in Zed"))
@@ -1568,13 +1676,17 @@ impl Monaged {
                 .into_any_element(),
             Item::Tool { title, kind, status, detail, .. } => self.render_tool_item(agent_id, index, title, kind, status, detail, cx),
             Item::Elicit(form) => self.render_elicitation(agent_id, index, form, cx),
+            Item::AgentImage(image) => div().flex().child(self.thumbnail(format!("agent-img-{agent_id}-{index}"), image.clone(), 240., cx)).into_any_element(),
             Item::Attachments(names) => div()
                 .flex()
                 .justify_end()
                 .flex_wrap()
                 .gap(px(6.))
                 .mt(px(-8.))
-                .children(names.iter().map(|name| {
+                .children(names.iter().enumerate().map(|(n, (name, image))| {
+                    if let Some(image) = image {
+                        return self.thumbnail(format!("att-{agent_id}-{index}-{n}"), image.clone(), 120., cx);
+                    }
                     div()
                         .flex()
                         .items_center()
@@ -1588,6 +1700,7 @@ impl Monaged {
                         .text_color(rgb(theme::text_3()))
                         .child(icon_sized(Icon::Paperclip, 11.).text_color(rgb(theme::text_3())))
                         .child(name.clone())
+                        .into_any_element()
                 }))
                 .into_any_element(),
             Item::Plan(entries) => ui::card()
@@ -1664,6 +1777,7 @@ impl Monaged {
             InspectorTab::Merge => self.render_merge_inspector(sub_id, cx),
             InspectorTab::Git => self.render_git_inspector(sub_id, cx),
             InspectorTab::Timeline => self.render_timeline(sub_id, cx),
+            InspectorTab::Run => self.render_run_inspector(sub_id, cx),
         };
         let handle = self.inspector_handle(width, cx);
         // Five tabs: icons only when the inspector is narrow.
@@ -1712,6 +1826,7 @@ impl Monaged {
                     .child(tab("insp-board", Icon::Board, if board > 0 { format!("Board {board}") } else { "Board".into() }, InspectorTab::Board))
                     .child(tab("insp-merge", Icon::Merge, "Merge".into(), InspectorTab::Merge))
                     .child(tab("insp-git", Icon::Branch, "Git".into(), InspectorTab::Git))
+                    .child(tab("insp-run", Icon::Play, "Run".into(), InspectorTab::Run))
                     .child(tab("insp-timeline", Icon::Clock, "Timeline".into(), InspectorTab::Timeline)),
             )
             .child(div().id("inspector-body").flex_1().min_h(px(0.)).overflow_y_scroll().child(body))
@@ -1849,6 +1964,10 @@ impl Monaged {
                                     .child(ui::mono(format!("{} · {} · base {}", project.path, project.distro, project.base_branch))),
                             )
                             .child(
+                                ui::button("project-settings", Kind::Secondary, Some(Icon::Sliders), "Project settings")
+                                    .on_click(cx.listener(move |this, _, window, cx| this.open_project_settings(project_id, window, cx))),
+                            )
+                            .child(
                                 ui::button("project-zed", Kind::Secondary, Some(Icon::External), "Open in Zed")
                                     .on_click(cx.listener(move |this, _, _, cx| this.open_in_zed(path.clone(), cx))),
                             )
@@ -1869,59 +1988,34 @@ impl Monaged {
 
     // ---- Forms ---------------------------------------------------------------------------------------
 
-    fn render_form(&self, form: &Form, cx: &mut Context<Self>) -> AnyElement {
+    fn render_form(&self, form: &Form, main_w: f32, cx: &mut Context<Self>) -> AnyElement {
+        if let Form::NewProject(page) = form {
+            return self.render_add_project(page, main_w, cx);
+        }
         // A problem with one field shows under that field; anything else above the buttons.
         let (invalid, form_error) = match form {
-            Form::NewProject { invalid, error, .. }
-            | Form::NewSubproject { invalid, error, .. }
+            Form::NewSubproject { invalid, error, .. }
             | Form::StartPipeline { invalid, error, .. }
             | Form::EditPlan { invalid, error, .. } => (*invalid, error.clone()),
-            Form::Settings { .. } | Form::Health => (None, None),
+            Form::Settings { .. } | Form::Health | Form::Project(_) | Form::Guide | Form::NewProject(_) => (None, None),
         };
         let problem = |label: &'static str| -> Option<SharedString> {
             (invalid == Some(label)).then(|| form_error.clone().unwrap_or_default().into())
         };
-        let (title, subtitle, body, busy, error, submit_label): (&str, &str, AnyElement, bool, Option<String>, &str) = match form {
-            Form::NewProject { source, name, url, folder, busy, error, .. } => {
-                let source = *source;
-                let choice = |id: &'static str, label: &'static str, kind: SourceKind, cx: &mut Context<Self>| {
-                    ui::choice(id, label, source == kind).on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(Form::NewProject { source, name, url, .. }) = &mut this.form {
-                            *source = kind;
-                            let target = if kind == SourceKind::Clone { url } else { name };
-                            window.focus(&target.focus_handle(cx));
-                        }
-                        cx.notify();
-                    }))
-                };
-                let folder_hint = match source {
-                    SourceKind::Existing => "The folder inside WSL, like ~/code/hr-app. It becomes a git repo if it isn't one yet.",
-                    SourceKind::Clone => "Where to clone it. Leave empty for ~/code/<name>. Uses your git and SSH setup inside WSL.",
-                    SourceKind::Empty => "Where to create the new repo. Leave empty for ~/code/<name>.",
-                };
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(18.))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(choice("src-clone", "Clone from GitLab or GitHub", SourceKind::Clone, cx))
-                            .child(choice("src-existing", "Existing WSL folder", SourceKind::Existing, cx))
-                            .child(choice("src-empty", "New empty repo", SourceKind::Empty, cx)),
-                    )
-                    .when(source == SourceKind::Clone, |d| d.child(ui::field_checked("Git URL", None, url.clone(), problem("Git URL"), Some(cx))))
-                    .child(ui::field_checked("Name", Some("Leave empty to use the repo or folder name."), name.clone(), problem("Name"), Some(cx)))
-                    .child(ui::field_checked("Folder in WSL", Some(folder_hint), folder.clone(), problem("Folder in WSL"), Some(cx)))
-                    .into_any_element();
-                let label = match (*busy, source) {
-                    (true, SourceKind::Clone) => "Cloning…",
-                    (true, _) => "Setting up…",
-                    (false, _) => "Add project",
-                };
-                ("Add a project", "A git repo inside WSL that agents work on.", body, *busy, error.clone(), label)
+        let busy_steps: Option<Vec<ui::StepView>> = match form {
+            Form::NewSubproject { project_id, kind, name, run_pipeline, busy: true, .. } => {
+                let base = self.projects.iter().find(|p| p.id == *project_id).map(|p| p.base_branch.clone()).unwrap_or_default();
+                let branch = format!("{}/{}", kind.as_str(), crate::git::slug(name.read(cx).text()));
+                let step = |label: String, state| ui::StepView { label: label.into(), detail: None, state, progress: None };
+                Some(vec![
+                    step(format!("Make the branch {branch} off {base}"), ui::StepState::Running),
+                    step(if *run_pipeline { "Start the research".into() } else { "Make a worktree for its first agent".into() }, ui::StepState::Waiting),
+                ])
             }
+            _ => None,
+        };
+        let (title, subtitle, body, busy, error, submit_label): (&str, &str, AnyElement, bool, Option<String>, &str) = match form {
+            Form::NewProject(_) => return div().into_any_element(),
             Form::NewSubproject { kind, name, request, run_pipeline, auto_mode, busy, error, .. } => {
                 let (kind, run, auto) = (*kind, *run_pipeline, *auto_mode);
                 let choice = |id: &'static str, label: &'static str, value: SubKind, cx: &mut Context<Self>| {
@@ -2000,7 +2094,7 @@ impl Monaged {
                 let body = self.render_plan_editor(title, summary, rows, problem("Workstreams").map(|s| s.to_string()), cx);
                 ("Edit the plan", "Change what the builders do before you approve it.", body, false, error.clone(), "Save plan")
             }
-            Form::Settings { .. } | Form::Health => return div().into_any_element(),
+            Form::Settings { .. } | Form::Health | Form::Project(_) | Form::Guide => return div().into_any_element(),
         };
 
         div()
@@ -2017,6 +2111,15 @@ impl Monaged {
                         .gap(px(24.))
                         .child(div().flex().flex_col().gap(px(4.)).child(ui::title(title)).child(div().text_color(rgb(theme::text_3())).child(subtitle)))
                         .child(body)
+                        .children(busy_steps.map(|steps| {
+                            div()
+                                .p(px(16.))
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(rgb(theme::line()))
+                                .bg(rgb(theme::panel()))
+                                .child(ui::steps("form-steps", &steps))
+                        }))
                         .children(error.filter(|_| invalid.is_none()).map(|e| {
                             let copy = e.clone();
                             ui::callout(Tone::Error, e).child(

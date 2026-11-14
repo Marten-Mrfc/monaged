@@ -430,7 +430,8 @@ impl Monaged {
                     .border_1()
                     .border_color(rgb(theme::line()))
                     .text_size(px(12.))
-                    .child(icon_sized(if image { Icon::Image } else { Icon::Lines }, 13.).text_color(rgb(theme::text_3())))
+                    .children(a.preview.clone().map(|p| gpui::img(p).size(px(18.)).rounded(px(3.)).object_fit(gpui::ObjectFit::Cover)))
+                    .when(a.preview.is_none(), |d| d.child(icon_sized(if image { Icon::Image } else { Icon::Lines }, 13.).text_color(rgb(theme::text_3()))))
                     .child(div().max_w(px(220.)).truncate().child(a.name.clone()))
                     .child(
                         div()

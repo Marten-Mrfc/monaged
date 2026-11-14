@@ -40,7 +40,8 @@ pub(crate) fn item_text(item: &Item) -> Option<String> {
         Item::Permission { title, .. } => Some(title.clone()),
         Item::Elicit(form) => Some(format!("{} {}", form.message, form.fields.iter().map(|f| f.description.as_str()).collect::<Vec<_>>().join(" "))),
         Item::Plan(entries) => Some(entries.iter().map(|e| e.content.as_str()).collect::<Vec<_>>().join(" ")),
-        Item::Attachments(names) => Some(names.join(" ")),
+        Item::Attachments(names) => Some(names.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(" ")),
+        Item::AgentImage(_) => None,
     }
 }
 

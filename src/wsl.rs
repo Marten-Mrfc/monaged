@@ -12,12 +12,28 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// `wsl.exe -d <distro> -- bash -lc <script>`, without a console window.
-pub fn bash(distro: &str, script: &str) -> Command {
+/// `wsl.exe -d <distro> --cd ~`, without a console window.
+///
+/// Every command starts in the Linux home. Without `--cd`, wsl.exe starts in
+/// Monaged's own Windows folder (`/mnt/c/…`), which is slow, and WSL shows a
+/// "Performance Tip" notification whenever git runs there.
+pub fn command(distro: &str) -> Command {
     let mut command = Command::new("wsl.exe");
-    command.args(["-d", distro, "--", "bash", "-lc", script]);
+    command.args(["-d", distro, "--cd", "~"]);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+/// What every script starts with: git never prompts (there's no terminal to
+/// answer in), and neither does ssh, unless you set your own ssh command.
+const PRELUDE: &str = "export GIT_TERMINAL_PROMPT=0\n\
+[ -n \"$(git config --get core.sshCommand 2>/dev/null)\" ] || export GIT_SSH_COMMAND=\"ssh -o BatchMode=yes -o ConnectTimeout=20\"\n";
+
+/// `wsl.exe -d <distro> --cd ~ -- bash -lc <script>`, without a console window.
+pub fn bash(distro: &str, script: &str) -> Command {
+    let mut command = command(distro);
+    command.args(["--", "bash", "-lc", script]);
     command
 }
 
@@ -28,10 +44,8 @@ pub fn bash(distro: &str, script: &str) -> Command {
 /// changes scripts. Git never prompts for credentials here (it would hang
 /// without a terminal).
 pub fn run(distro: &str, script: &str) -> Result<String> {
-    let mut command = Command::new("wsl.exe");
-    command.args(["-d", distro, "--", "bash", "-l", "-s"]);
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
+    let mut command = command(distro);
+    command.args(["--", "bash", "-l", "-s"]);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -40,7 +54,115 @@ pub fn run(distro: &str, script: &str) -> Result<String> {
         .context("could not run wsl.exe — is WSL installed?")?;
     {
         let mut stdin = child.stdin.take().context("wsl stdin missing")?;
-        stdin.write_all(format!("export GIT_TERMINAL_PROMPT=0\n{script}\n").as_bytes())?;
+        stdin.write_all(format!("{PRELUDE}{script}\n").as_bytes())?;
+    }
+    let output = child.wait_with_output().context("waiting for wsl.exe failed")?;
+    if !output.status.success() {
+        let stderr = decode(&output.stderr);
+        let stdout = decode(&output.stdout);
+        let message = if stderr.trim().is_empty() { stdout } else { stderr };
+        let short: Vec<&str> = message.trim().lines().take(4).collect();
+        bail!("{}", short.join(" · "));
+    }
+    Ok(decode(&output.stdout).trim().to_string())
+}
+
+/// Runs a script and hands over its output as it comes, split at line ends
+/// and at carriage returns (git redraws its progress with `\r`). stderr is
+/// merged into stdout. Returns all of it; fails when the script does.
+pub fn stream(distro: &str, script: &str, mut on_line: impl FnMut(&str)) -> Result<String> {
+    use std::io::Read;
+    let mut command = command(distro);
+    command.args(["--", "bash", "-l", "-s"]);
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not run wsl.exe — is WSL installed?")?;
+    {
+        let mut stdin = child.stdin.take().context("wsl stdin missing")?;
+        stdin.write_all(format!("{PRELUDE}exec 2>&1\n{script}\n").as_bytes())?;
+    }
+    let mut stdout = child.stdout.take().context("wsl stdout missing")?;
+    let mut all = String::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut flush = |line: &mut Vec<u8>, all: &mut String| {
+        if !line.is_empty() {
+            let text = String::from_utf8_lossy(line).into_owned();
+            on_line(&text);
+            all.push_str(&text);
+            all.push('\n');
+            line.clear();
+        }
+    };
+    loop {
+        let n = stdout.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            if b == b'\n' || b == b'\r' {
+                flush(&mut line, &mut all);
+            } else {
+                line.push(b);
+            }
+        }
+    }
+    flush(&mut line, &mut all);
+    let output = child.wait_with_output().context("waiting for wsl.exe failed")?;
+    if !output.status.success() {
+        let stderr = decode(&output.stderr);
+        let message = if stderr.trim().is_empty() { all.clone() } else { stderr };
+        let tail: Vec<&str> = message.trim().lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+        bail!("{}", tail.join("\n"));
+    }
+    Ok(all)
+}
+
+/// The PATH a login shell sets up (nvm, ~/.local/bin…), worked out once per
+/// distro without any secrets in the environment.
+pub fn login_path(distro: &str) -> String {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    static PATHS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    if let Some(path) = PATHS.lock().ok().and_then(|p| p.get(distro).cloned()) {
+        return path;
+    }
+    let path = run(distro, "printf '%s' \"$PATH\"").unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into());
+    if let Ok(mut paths) = PATHS.lock() {
+        paths.insert(distro.to_string(), path.clone());
+    }
+    path
+}
+
+/// For scripts that carry secrets: bash without startup files (an agent can
+/// write ~/.profile or ~/.bashrc, and they'd run with the secrets set), no
+/// BASH_ENV, and the login shell's PATH.
+pub fn clean_prelude(distro: &str) -> String {
+    format!("unset BASH_ENV ENV PROMPT_COMMAND\nexport PATH={}\n", quote(&login_path(distro)))
+}
+
+/// `wsl.exe … bash --noprofile --norc -s`, for scripts that carry secrets.
+pub fn clean_command(distro: &str) -> Command {
+    let mut command = command(distro);
+    command.args(["--", "bash", "--noprofile", "--norc", "-s"]);
+    command
+}
+
+/// Like `run`, in a clean shell (see `clean_prelude`).
+pub fn run_clean(distro: &str, script: &str) -> Result<String> {
+    let prelude = clean_prelude(distro);
+    let mut child = clean_command(distro)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not run wsl.exe — is WSL installed?")?;
+    {
+        let mut stdin = child.stdin.take().context("wsl stdin missing")?;
+        stdin.write_all(format!("{PRELUDE}{prelude}{script}\n").as_bytes())?;
     }
     let output = child.wait_with_output().context("waiting for wsl.exe failed")?;
     if !output.status.success() {

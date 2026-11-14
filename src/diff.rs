@@ -34,6 +34,8 @@ pub struct FileDiff {
 
 pub struct Changes {
     pub files: Vec<FileDiff>,
+    /// Secrets whose values are in this diff (they're masked in `files` and `raw`).
+    pub secrets: Vec<String>,
     /// The unified diff text (for reviews), possibly truncated.
     pub raw: String,
     pub truncated: bool,
@@ -61,7 +63,9 @@ pub fn collect(distro: &str, worktree: &str, base_branch: &str) -> Result<Change
         }
         raw.truncate(cut);
     }
-    Ok(Changes { files: parse(&raw), raw, truncated })
+    // Secret values never reach the screen or the reviewer (Haiku).
+    let (raw, secrets) = crate::env::mask_names(&raw);
+    Ok(Changes { files: parse(&raw), raw, truncated, secrets })
 }
 
 pub fn parse(raw: &str) -> Vec<FileDiff> {

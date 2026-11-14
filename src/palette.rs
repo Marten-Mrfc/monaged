@@ -66,6 +66,9 @@ pub(crate) enum Command {
     Health,
     SubChanges(i64),
     CheckUpdates,
+    ProjectSettings(i64),
+    CreatePlayground,
+    Guide,
 }
 
 #[derive(Clone)]
@@ -164,6 +167,8 @@ impl Monaged {
             out.push(Entry { group: "Actions", glyph: Icon::Flow, title: "Show pipeline".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Pipeline) });
             out.push(Entry { group: "Actions", glyph: Icon::Board, title: "Show board".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Board) });
             out.push(Entry { group: "Actions", glyph: Icon::Merge, title: "Show merge".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Merge) });
+            out.push(Entry { group: "Actions", glyph: Icon::Play, title: "Run the app or its tests".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Run) });
+            out.push(Entry { group: "Actions", glyph: Icon::Branch, title: "Show git".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Git) });
         }
         if let Some(agent) = self.sel_agent.and_then(|id| self.agent(id)) {
             out.push(Entry { group: "Actions", glyph: Icon::Eye, title: "Review".into(), detail: agent.record.name.clone(), state: None, hint: None, command: Command::Review(agent.record.id) });
@@ -171,6 +176,7 @@ impl Monaged {
         }
         if let Some(project) = self.sel_project.and_then(|id| self.projects.iter().find(|p| p.id == id)) {
             out.push(Entry { group: "Actions", glyph: Icon::Layers, title: "New subproject".into(), detail: project.name.clone(), state: None, hint: None, command: Command::NewSub(project.id) });
+            out.push(Entry { group: "Actions", glyph: Icon::Sliders, title: "Project settings".into(), detail: "MCP servers, knowledge, run commands".into(), state: None, hint: None, command: Command::ProjectSettings(project.id) });
         }
         out.push(Entry { group: "Actions", glyph: Icon::Folder, title: "Add a project".into(), detail: String::new(), state: None, hint: None, command: Command::NewProject });
         if matches!(self.conn, crate::Conn::Failed(_)) || self.logged_in == Some(false) {
@@ -204,14 +210,27 @@ impl Monaged {
             });
         }
         out.push(Entry { group: "Theme", glyph: Icon::Sliders, title: "Theme: follow Windows".into(), detail: "Carbon in dark mode, Paper in light".into(), state: None, hint: None, command: Command::Theme("system") });
-        out.push(Entry { group: "App", glyph: Icon::Sidebar, title: "Toggle sidebar".into(), detail: String::new(), state: None, hint: Some("Ctrl B"), command: Command::ToggleSidebar });
-        out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: Some("Ctrl ,"), command: Command::Settings });
-        out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: Some("Ctrl /"), command: Command::Shortcuts });
-        out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: Some("F11"), command: Command::Zen });
+        out.push(Entry { group: "App", glyph: Icon::Sidebar, title: "Toggle sidebar".into(), detail: String::new(), state: None, hint: crate::keys::hint("sidebar"), command: Command::ToggleSidebar });
+        out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: crate::keys::hint("settings"), command: Command::Settings });
+        out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: crate::keys::hint("shortcuts"), command: Command::Shortcuts });
+        out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: crate::keys::hint("zen"), command: Command::Zen });
         let compact = ui::compact();
         out.push(Entry { group: "App", glyph: Icon::Lines, title: if compact { "Comfortable density".into() } else { "Compact density".into() }, detail: String::new(), state: None, hint: None, command: Command::Density(!compact) });
         out.push(Entry { group: "App", glyph: Icon::ArrowDown, title: "Check for updates".into(), detail: format!("Monaged {}", crate::update::current()), state: None, hint: None, command: Command::CheckUpdates });
         out.push(Entry { group: "App", glyph: Icon::Gauge, title: "Health check".into(), detail: "WSL, the agent, git, logins, disk".into(), state: None, hint: None, command: Command::Health });
+        let has_playground = self.projects.iter().any(|p| p.path.ends_with("/monaged-playground"));
+        out.push(Entry {
+            group: "App",
+            glyph: Icon::Flow,
+            title: if has_playground { "Open the playground".into() } else { "Create the playground project".into() },
+            detail: "A small app to try every feature on".into(),
+            state: None,
+            hint: None,
+            command: Command::CreatePlayground,
+        });
+        if has_playground {
+            out.push(Entry { group: "App", glyph: Icon::Flow, title: "Playground guide".into(), detail: "The tour of every feature".into(), state: None, hint: None, command: Command::Guide });
+        }
         // Saved layouts of the project you're in.
         if let Some(project_id) = self.sel_project {
             for layout in self.layouts(project_id) {
@@ -339,6 +358,12 @@ impl Monaged {
             Command::Health => self.open_health(cx),
             Command::SubChanges(id) => self.open_sub_changes(id, cx),
             Command::CheckUpdates => self.check_updates(false, cx),
+            Command::CreatePlayground => self.create_playground(cx),
+            Command::Guide => self.open_guide(cx),
+            Command::ProjectSettings(id) => {
+                self.open_project_settings(id, window, cx);
+                return;
+            }
         }
         if self.form.is_none() && self.palette.is_none() && !self.shortcuts_open {
             if let Some(id) = self.sel_agent {
