@@ -351,6 +351,11 @@ Decided with the user: build everything ready for a public release but don't dep
 
 **Not tested on a real PC yet:** installing WSL and Ubuntu through the guide, the restart and reopen, the Claude agent download in a real WSL, and signing in.
 
+**Known limits:**
+- Release builds are windowed apps, so each new agent session (which starts `monaged.exe --mcp-relay` inside WSL) shows Windows' busy cursor for about two seconds. A separate console relay exe would avoid it.
+- A relay only exits when its agent session closes its input; WSL doesn't force-stop windowed children.
+- The installer and the app aren't code-signed, so SmartScreen warns on first run.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.
