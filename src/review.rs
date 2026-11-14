@@ -126,6 +126,7 @@ elif [ -f go.mod ]; then cmd='go test ./...'
 elif [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -d tests ]; then
   if python3 -c 'import pytest' 2>/dev/null; then cmd='python3 -m pytest -q'
   elif command -v pytest >/dev/null; then cmd='pytest -q'
+  elif grep -rqsE '^\s*(import|from) pytest' --include='*.py' --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv --exclude-dir=venv . ; then echo MONAGED_NO_RUNNER pytest; exit 0
   else cmd='python3 -m unittest -q'; fi
 elif [ -f Makefile ] && grep -qE '^test:' Makefile; then cmd='make test'
 else echo MONAGED_NO_CHECKS; exit 0; fi
@@ -143,14 +144,17 @@ printf '%s\n' "$out" | tail -n 30"#,
     if out.contains("MONAGED_NO_CHECKS") {
         return Checks::NotFound;
     }
+    if let Some(runner) = out.lines().find_map(|l| l.strip_prefix("MONAGED_NO_RUNNER ")) {
+        return Checks::Unavailable(format!("the tests need {runner}, which isn't installed in WSL"));
+    }
     let command = out.lines().find_map(|l| l.strip_prefix("MONAGED_CMD ")).unwrap_or("tests").to_string();
     let code: i32 = out.lines().find_map(|l| l.strip_prefix("MONAGED_EXIT ")).and_then(|c| c.trim().parse().ok()).unwrap_or(-1);
     let tail = out.lines().skip_while(|l| !l.starts_with("MONAGED_EXIT")).skip(1).collect::<Vec<_>>().join("\n");
     match code {
         0 => Checks::Passed(command),
         127 => Checks::Unavailable(format!("`{command}` isn't installed in WSL")),
-        // pytest: no tests were collected.
-        5 if command.contains("pytest") => Checks::NotFound,
+        // pytest and unittest (Python 3.12+): no tests were found.
+        5 if command.contains("pytest") || command.contains("unittest") => Checks::NotFound,
         124 => Checks::Failed { command, tail: "timed out after 10 minutes".into() },
         _ => Checks::Failed { command, tail },
     }

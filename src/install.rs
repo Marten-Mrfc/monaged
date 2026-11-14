@@ -44,24 +44,41 @@ pub fn is_setup_exe() -> bool {
         .is_some_and(|n| n.starts_with("monaged-setup"))
 }
 
-/// Removes the copy an update or install moved aside (it was still running then).
+/// Removes the copy an update or install moved aside (it was still running
+/// then), and a staged copy an interrupted update left.
 pub fn cleanup_old() {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
         let _ = std::fs::remove_file(dir.join("monaged.old.exe"));
+        let _ = std::fs::remove_file(dir.join("monaged.new.exe"));
     }
 }
 
 /// Puts `new` where `target` is, even while `target` is running (Windows lets
-/// a running exe be renamed, not overwritten).
+/// a running exe be renamed, not overwritten). The new file is copied next to
+/// it first, so a failed copy leaves the old one untouched, and a failed swap
+/// puts it back.
 pub fn replace_exe(new: &Path, target: &Path) -> Result<()> {
-    if target.exists() {
-        let old = target.with_file_name("monaged.old.exe");
+    let staged = target.with_file_name("monaged.new.exe");
+    let _ = std::fs::remove_file(&staged);
+    std::fs::copy(new, &staged).with_context(|| format!("couldn't write {}", staged.display()))?;
+    let old = target.with_file_name("monaged.old.exe");
+    let moved = target.exists();
+    if moved {
         let _ = std::fs::remove_file(&old);
-        std::fs::rename(target, &old).with_context(|| format!("couldn't move {} aside", target.display()))?;
+        if let Err(err) = std::fs::rename(target, &old) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(err).with_context(|| format!("couldn't move {} aside", target.display()));
+        }
     }
-    std::fs::copy(new, target).with_context(|| format!("couldn't write {}", target.display()))?;
+    if let Err(err) = std::fs::rename(&staged, target) {
+        if moved {
+            let _ = std::fs::rename(&old, target);
+        }
+        let _ = std::fs::remove_file(&staged);
+        return Err(err).with_context(|| format!("couldn't put the new {} in place", target.display()));
+    }
     Ok(())
 }
 
@@ -182,14 +199,23 @@ pub fn uninstall() -> Result<()> {
     }
     let _ = reg(&["delete", UNINSTALL_KEY, "/f"]);
     crate::onboarding::reopen_after_restart(false);
-    let dir = install_dir();
+    // The folder can only go once this window (running from it) closes: try
+    // every second or so for five minutes. ping waits where `timeout` can't
+    // (it needs a console's input).
+    let dir = install_dir().display().to_string();
+    let line = format!("/C for /l %i in (1,1,300) do (ping -n 2 127.0.0.1 >nul & rmdir /s /q \"{dir}\" 2>nul & if not exist \"{dir}\" exit)");
     let mut command = Command::new("cmd.exe");
-    command.args(["/C", &format!("timeout /t 2 /nobreak >nul & rmdir /s /q \"{}\"", dir.display())]);
+    // Not from inside the folder it deletes.
+    command.current_dir(std::env::temp_dir());
+    command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(crate::wsl::CREATE_NO_WINDOW);
+        command.raw_arg(&line);
     }
+    #[cfg(not(windows))]
+    command.arg(&line);
     command.spawn().context("couldn't schedule removing the program folder")?;
     Ok(())
 }
@@ -233,6 +259,7 @@ impl SetupView {
                     }
                 })
                 .await;
+            let removed = matches!(mode, SetupMode::Uninstall) && result.is_ok();
             view.update(cx, |this, cx| {
                 this.state = match result {
                     Ok(path) => SetupState::Done(path),
@@ -241,6 +268,11 @@ impl SetupView {
                 cx.notify();
             })
             .ok();
+            // The program folder can only be removed once this window is gone.
+            if removed {
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                cx.update(|cx| cx.quit()).ok();
+            }
         })
         .detach();
     }
@@ -287,7 +319,7 @@ impl Render for SetupView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child(if self.mode == SetupMode::Install { "Installed. Monaged's setup guide takes it from here." } else { "Removed. You can close this window." }))
+                    .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child(if self.mode == SetupMode::Install { "Installed. Monaged's setup guide takes it from here." } else { "Removed. This window closes by itself." }))
                     .child(ui::button("setup-close", Kind::Ghost, None, "Close").on_click(cx.listener(|_, _, _, cx| cx.quit())))
                     .children(path.map(|p| {
                         ui::button("setup-open", Kind::Primary, Some(Icon::Play), "Open Monaged").on_click(cx.listener(move |_, _, _, cx| {

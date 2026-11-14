@@ -621,7 +621,7 @@ impl Monaged {
         self.reconnect.at = None;
         self.drop_live_sessions();
         // Without WSL, wsl.exe could offer to install it by itself: say so instead.
-        if !onboarding::wsl_present() {
+        if !wsl::installed() {
             self.conn = Conn::Failed("WSL isn't installed on this PC. The setup guide installs it.".into());
             cx.notify();
             return;
@@ -1726,7 +1726,9 @@ fn main() {
     let store = match Store::open() {
         Ok(store) => store,
         Err(err) => {
-            eprintln!("Monaged could not open its database: {err:#}");
+            let text = format!("Monaged could not open its database in %APPDATA%\\Monaged:\n\n{err:#}");
+            eprintln!("{text}");
+            show_error(&text);
             std::process::exit(1);
         }
     };
@@ -1799,4 +1801,23 @@ fn log_to_file() {
             eprintln!("Monaged {} started", env!("CARGO_PKG_VERSION"));
         }
     }
+}
+
+/// A plain Windows message box, for errors before there's a window (a release
+/// build has no console to print them to).
+fn show_error(text: &str) {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        }
+        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (text, caption) = (wide(text), wide("Monaged"));
+        unsafe {
+            MessageBoxW(0, text.as_ptr(), caption.as_ptr(), 0x10);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = text;
 }

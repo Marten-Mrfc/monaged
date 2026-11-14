@@ -25,6 +25,29 @@ pub fn command(distro: &str) -> Command {
     command
 }
 
+/// Whether WSL is installed (see `onboarding::wsl_present`), remembered once
+/// it is and checked again at most every few seconds while it isn't. Every
+/// script goes through this first: on a PC without WSL, Windows' wsl.exe stub
+/// may offer to install WSL by itself, and the script on its stdin would
+/// answer that prompt.
+pub fn installed() -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<(bool, Instant)>> = Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else { return crate::onboarding::wsl_present() };
+    match *last {
+        Some((true, _)) => true,
+        Some((false, at)) if at.elapsed() < Duration::from_secs(5) => false,
+        _ => {
+            let present = crate::onboarding::wsl_present();
+            *last = Some((present, Instant::now()));
+            present
+        }
+    }
+}
+
+const NOT_INSTALLED: &str = "WSL isn't installed on this PC. Ctrl K → Setup guide installs it.";
+
 /// What every script starts with: git never prompts (there's no terminal to
 /// answer in), and neither does ssh, unless you set your own ssh command.
 const PRELUDE: &str = "export GIT_TERMINAL_PROMPT=0\n\
@@ -44,6 +67,9 @@ pub fn bash(distro: &str, script: &str) -> Command {
 /// changes scripts. Git never prompts for credentials here (it would hang
 /// without a terminal).
 pub fn run(distro: &str, script: &str) -> Result<String> {
+    if !installed() {
+        bail!(NOT_INSTALLED);
+    }
     let mut command = command(distro);
     command.args(["--", "bash", "-l", "-s"]);
     let mut child = command
@@ -71,6 +97,9 @@ pub fn run(distro: &str, script: &str) -> Result<String> {
 /// and at carriage returns (git redraws its progress with `\r`). stderr is
 /// merged into stdout. Returns all of it; fails when the script does.
 pub fn stream(distro: &str, script: &str, mut on_line: impl FnMut(&str)) -> Result<String> {
+    if !installed() {
+        bail!(NOT_INSTALLED);
+    }
     use std::io::Read;
     let mut command = command(distro);
     command.args(["--", "bash", "-l", "-s"]);
@@ -153,6 +182,9 @@ pub fn clean_command(distro: &str) -> Command {
 
 /// Like `run`, in a clean shell (see `clean_prelude`).
 pub fn run_clean(distro: &str, script: &str) -> Result<String> {
+    if !installed() {
+        bail!(NOT_INSTALLED);
+    }
     let prelude = clean_prelude(distro);
     let mut child = clean_command(distro)
         .stdin(Stdio::piped())

@@ -170,17 +170,30 @@ fn quiet(program: &str) -> Command {
     command
 }
 
-/// `wsl.exe <args>`: (succeeded, what it printed). WSL_UTF8 makes wsl.exe's
+/// Runs `f` on its own thread and gives up after `secs` (a hung WSL service
+/// mustn't freeze the guide; the thread finishes on its own).
+fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_secs(secs)).unwrap_or_else(|_| bail!("WSL didn't answer within {secs} seconds"))
+}
+
+/// `wsl.exe <args>`: (succeeded, stdout, stderr). WSL_UTF8 makes wsl.exe's
 /// own messages UTF-8 instead of UTF-16.
-fn wsl_exe(args: &[&str]) -> Result<(bool, String)> {
-    let out = quiet("wsl.exe").args(args).env("WSL_UTF8", "1").output().context("wsl.exe isn't on this Windows (WSL needs Windows 10 2004 or newer)")?;
-    let mut text = wsl::decode(&out.stdout);
-    let err = wsl::decode(&out.stderr);
-    if !err.trim().is_empty() {
-        text.push('\n');
-        text.push_str(&err);
-    }
-    Ok((out.status.success(), text.replace('\0', "").trim().to_string()))
+fn wsl_exe(args: &[&str]) -> Result<(bool, String, String)> {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    within(30, move || {
+        let out = quiet("wsl.exe").args(&args).env("WSL_UTF8", "1").output().context("wsl.exe isn't on this Windows (WSL needs Windows 10 2004 or newer)")?;
+        let clean = |b: &[u8]| wsl::decode(b).replace('\0', "").trim().to_string();
+        Ok((out.status.success(), clean(&out.stdout), clean(&out.stderr)))
+    })
+}
+
+/// What wsl.exe said, stdout and stderr together.
+fn said(stdout: &str, stderr: &str) -> String {
+    format!("{stdout}\n{stderr}").trim().to_string()
 }
 
 fn short(text: &str) -> String {
@@ -237,8 +250,9 @@ fn parse_lxss(text: &str) -> Vec<(String, Option<u32>)> {
 
 /// Distros WSL has, without the ones container tools install for themselves.
 pub fn list_distros() -> Vec<String> {
+    // Only stdout: a warning on stderr must never be taken for a distro.
     match wsl_exe(&["--list", "--quiet"]) {
-        Ok((true, text)) => text
+        Ok((true, text, _)) => text
             .lines()
             .map(|l| l.trim().trim_start_matches('\u{feff}').to_string())
             .filter(|l| !l.is_empty() && !l.starts_with("docker-desktop") && !l.starts_with("rancher-desktop") && !l.starts_with("podman-machine"))
@@ -259,7 +273,8 @@ pub fn pick_distro(preferred: &str, distros: &[String]) -> Option<String> {
 
 /// The Claude CLI next to the agent (`…/current/claude`).
 pub fn claude_cli(agent_cmd: &str) -> String {
-    match agent_cmd.trim().rsplit_once('/') {
+    let program = agent_cmd.split_whitespace().next().unwrap_or_default();
+    match program.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/claude"),
         None => "claude".into(),
     }
@@ -274,6 +289,21 @@ fn open_window(args: &[String]) -> Result<Child> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NEW_CONSOLE);
     }
+    command.spawn().context("couldn't open a window for WSL")
+}
+
+/// Opens a visible terminal window running a cmd.exe command line (so it can
+/// pause when something fails and the window doesn't vanish with the error).
+fn open_cmd_window(line: &str) -> Result<Child> {
+    let mut command = Command::new("cmd.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NEW_CONSOLE);
+        command.raw_arg(format!("/c {line}"));
+    }
+    #[cfg(not(windows))]
+    command.args(["/c", line]);
     command.spawn().context("couldn't open a window for WSL")
 }
 
@@ -324,6 +354,31 @@ pub fn reopen_after_restart(on: bool) {
     let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
+/// When Windows last started, in Unix seconds.
+fn booted_at() -> Option<i64> {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetTickCount64() -> u64;
+        }
+        let up = unsafe { GetTickCount64() } / 1000;
+        Some(crate::usage::now_unix() - up as i64)
+    }
+    #[cfg(not(windows))]
+    {
+        let up: f64 = std::fs::read_to_string("/proc/uptime").ok()?.split_whitespace().next()?.parse().ok()?;
+        Some(crate::usage::now_unix() - up as i64)
+    }
+}
+
+/// WSL was installed and Windows hasn't restarted since.
+fn restart_pending(installed_at: Option<String>) -> bool {
+    let Some(at) = installed_at.and_then(|v| v.parse::<i64>().ok()) else { return false };
+    // Without a boot time, assume it's still pending until WSL shows it works.
+    booted_at().is_none_or(|boot| boot < at)
+}
+
 /// Restarts Windows in a few seconds.
 pub fn restart_windows() -> Result<()> {
     let status = quiet("shutdown.exe")
@@ -359,14 +414,14 @@ pub fn probe(preferred: &str, agent_cmd: &str) -> Probe {
     }
     let status = wsl_exe(&["--status"]);
     let version = wsl_exe(&["--version"]);
-    if let Ok((true, text)) = &version {
+    if let Ok((true, text, _)) = &version {
         p.wsl_version = text.lines().next().and_then(|l| l.split_once(':')).map(|(_, v)| v.trim().to_string());
     }
     p.distros = list_distros();
-    p.wsl = matches!(status, Ok((true, _))) || matches!(version, Ok((true, _))) || !p.distros.is_empty();
+    p.wsl = matches!(status, Ok((true, _, _))) || matches!(version, Ok((true, _, _))) || !p.distros.is_empty();
     if !p.wsl {
         p.wsl_error = Some(match status {
-            Ok((_, text)) => short(&text),
+            Ok((_, out, err)) => short(&said(&out, &err)),
             Err(err) => format!("{err:#}"),
         });
     }
@@ -376,7 +431,7 @@ pub fn probe(preferred: &str, agent_cmd: &str) -> Probe {
             r#"echo "user: $(whoami)"
 echo "os: $(. /etc/os-release 2>/dev/null; echo $PRETTY_NAME)"
 for t in curl tar git bwrap socat pytest; do command -v $t >/dev/null 2>&1 && echo "tool: $t"; done
-a={agent}; a="${{a/#\~/$HOME}}"
+a={agent}; a="${{a/#\~/$HOME}}"; a="${{a%% *}}"
 if [ -x "$a" ]; then echo "agent: $(basename "$(dirname "$(readlink -f "$a")")")"; elif command -v "$a" >/dev/null 2>&1; then echo "agent: installed"; fi
 c={cli}; c="${{c/#\~/$HOME}}"
 if [ -x "$c" ]; then if timeout 25 "$c" auth status </dev/null >/dev/null 2>&1; then echo "login: yes"; else echo "login: no"; fi; fi
@@ -386,7 +441,8 @@ true"#,
             agent = wsl::quote(agent_cmd),
             cli = wsl::quote(&claude_cli(agent_cmd)),
         );
-        match wsl::run(&distro, &script) {
+        let d = distro.clone();
+        match within(90, move || wsl::run(&d, &script)) {
             Ok(out) => {
                 for line in out.lines() {
                     let Some((key, value)) = line.split_once(':') else { continue };
@@ -423,13 +479,18 @@ url=$(curl -fsSLI -o /dev/null -w '%{{url_effective}}' https://github.com/{repo}
 v=${{url##*/tag/}}; v=${{v#v}}
 case "$v" in [0-9]*) ;; *) v={fallback}; echo "GitHub didn't say; using $v." ;; esac
 root="$HOME/.local/share/claude-agent-acp"; dir="$root/$v"
-mkdir -p "$root"; rm -rf "$dir.part"; mkdir -p "$dir.part"
+mkdir -p "$root"
+exec 9>"$root/.install.lock"
+flock -n 9 || {{ echo "Another install of the agent is running."; false; }}
+prev=$(readlink -f "$root/current" 2>/dev/null || true)
+rm -rf "$dir.part"; mkdir -p "$dir.part"
 echo "Downloading claude-agent-acp $v for $arch (about 220 MB)…"
 curl -fL --progress-bar "https://github.com/{repo}/releases/download/v$v/claude-agent-acp-linux-$arch.tar.gz" | tar xz -C "$dir.part"
 [ -x "$dir.part/claude-agent-acp" ] || {{ echo "The download didn't contain claude-agent-acp."; false; }}
 rm -rf "$dir"; mv "$dir.part" "$dir"
 ln -sfn "$dir" "$root/current"
-for old in "$root"/*/; do old=${{old%/}}; [ "$old" = "$dir" ] || [ "$old" = "$root/current" ] || rm -rf "$old"; done
+# Older versions go, except the one a running agent may still use.
+for old in "$root"/*/; do old=${{old%/}}; case "$old" in "$dir"|"$root/current"|"$prev") ;; *) rm -rf "$old" ;; esac; done
 echo "Installed claude-agent-acp $v."
 true"#,
         repo = AGENT_REPO,
@@ -437,8 +498,8 @@ true"#,
     )
 }
 
-/// What the sign-in window runs. No double quotes anywhere: wsl.exe drops
-/// them from its arguments.
+/// What the sign-in window runs (through `wsl.exe --exec bash -lc`). No double
+/// quotes, to be safe with how wsl.exe passes arguments.
 fn sign_in_script(cli: &str) -> String {
     let cli = match cli.strip_prefix("~/") {
         Some(rest) => format!("$HOME/{}", wsl::quote(rest)),
@@ -479,7 +540,10 @@ impl Monaged {
         self.form = Some(Form::Setup);
         self.palette = None;
         self.setup.root_ok = self.store.setting("setup:root_ok").is_some();
-        self.setup.restart = self.store.setting("setup:restart").is_some();
+        self.setup.restart = restart_pending(self.store.setting("setup:restart"));
+        if !self.setup.restart {
+            let _ = self.store.delete_setting("setup:restart");
+        }
         if self.setup.name.is_none() {
             self.setup.name = Some(cx.new(|cx| TextInput::new("Your name", cx)));
             self.setup.email = Some(cx.new(|cx| TextInput::new("you@example.com", cx)));
@@ -531,13 +595,24 @@ impl Monaged {
             email.update(cx, |i, cx| i.set_text(e, cx));
         }
         let was_signed_in = self.setup.probe.as_ref().is_some_and(|p| p.login == Some(true));
-        if found.login == Some(true) && !was_signed_in && self.setup.probe.is_some() {
+        if found.login == Some(true) && !was_signed_in && self.setup.probe.is_some() && matches!(self.form, Some(Form::Setup)) {
             self.setup.reconnect = true;
         }
         if found.login == Some(true) && self.logged_in == Some(false) {
             self.logged_in = None;
         }
+        let signed_in_now = found.login == Some(true) && !was_signed_in && self.setup.probe.is_some();
         self.setup.probe = Some(found);
+        if let Some((step, _)) = &self.setup.error
+            && self.step_done(*step)
+        {
+            self.setup.error = None;
+        }
+        // Signed in from the bar outside the guide: the connection can use it now.
+        if signed_in_now && !matches!(self.form, Some(Form::Setup)) {
+            self.setup.reconnect = false;
+            self.reconnect_when_idle(cx);
+        }
         // A window we were waiting on did its job: stop waiting.
         if let Some(Job::Waiting { step, .. }) = &self.setup.job
             && self.step_done(*step)
@@ -566,7 +641,8 @@ impl Monaged {
     pub(crate) fn step_done(&self, step: StepId) -> bool {
         let Some(p) = &self.setup.probe else { return false };
         match step {
-            StepId::Wsl => p.wsl,
+            // Installed but waiting for a restart: the restart prompt stays up.
+            StepId::Wsl => p.wsl && !self.setup.restart,
             StepId::Distro => p.distro.is_some() && p.distro_error.is_none() && p.user_ok(self.setup.root_ok),
             StepId::Agent => p.agent.is_some(),
             StepId::Login => p.login == Some(true) || (p.agent.as_deref() == Some("installed") && p.login.is_none()),
@@ -597,6 +673,15 @@ impl Monaged {
         self.setup.job = job;
         self.setup.error = None;
         cx.notify();
+    }
+
+    /// Another step is running or waiting on its window: one at a time.
+    fn setup_busy(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.setup.job.is_some() {
+            self.toast(Tone::Info, "Another setup step is still running; wait for it, or stop waiting first.", cx);
+            return true;
+        }
+        false
     }
 
     fn fail_step(&mut self, step: StepId, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -652,6 +737,9 @@ impl Monaged {
     /// Step 1: WSL itself, as administrator, without a distro (that installs
     /// as you, in step 2).
     pub(crate) fn setup_install_wsl(&mut self, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
         self.set_job(Some(Job::Running { step: StepId::Wsl, line: "Windows asks for permission, then installs WSL in its own window…".into(), fraction: None }), cx);
         let generation = self.setup.generation;
         cx.spawn(async move |view, cx| {
@@ -664,7 +752,7 @@ impl Monaged {
                     Ok(0) | Ok(3010) => {
                         this.set_job(None, cx);
                         this.setup.restart = true;
-                        let _ = this.store.set_setting("setup:restart", "1");
+                        let _ = this.store.set_setting("setup:restart", &crate::usage::now_unix().to_string());
                         reopen_after_restart(true);
                         this.run_setup_probe(cx);
                     }
@@ -685,8 +773,10 @@ impl Monaged {
     /// Step 2: Ubuntu in a window of its own: it downloads, then asks for a
     /// Linux username and password.
     pub(crate) fn setup_install_distro(&mut self, cx: &mut Context<Self>) {
-        let args: Vec<String> = ["--install", "-d", DEFAULT_DISTRO].iter().map(|s| s.to_string()).collect();
-        match open_window(&args) {
+        if self.setup_busy(cx) {
+            return;
+        }
+        match open_cmd_window(&format!("wsl.exe --install -d {DEFAULT_DISTRO} || pause")) {
             Ok(child) => {
                 self.set_job(
                     Some(Job::Waiting {
@@ -705,6 +795,9 @@ impl Monaged {
     /// Step 2 when the distro is there but only has root: open it so its
     /// first start asks for a user.
     pub(crate) fn setup_open_distro(&mut self, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
         let distro = self.distro_name();
         match open_window(&["-d".into(), distro.clone(), "--cd".into(), "~".into()]) {
             Ok(child) => {
@@ -721,6 +814,9 @@ impl Monaged {
 
     /// Step 3: download claude-agent-acp into WSL, with its progress.
     pub(crate) fn setup_install_agent(&mut self, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
         let distro = self.distro_name();
         self.set_job(Some(Job::Running { step: StepId::Agent, line: "Starting…".into(), fraction: None }), cx);
         let generation = self.setup.generation;
@@ -755,22 +851,24 @@ impl Monaged {
             }
             let result = worker.await;
             view.update(cx, |this, cx| {
-                if this.setup.generation != generation {
-                    return;
-                }
+                // Left the guide meanwhile? The install still counts.
+                let current = this.setup.generation == generation;
                 match result {
                     Ok(_) => {
-                        this.set_job(None, cx);
+                        if current {
+                            this.set_job(None, cx);
+                            this.run_setup_probe(cx);
+                        }
                         this.toast(Tone::Info, "The Claude agent is installed.", cx);
-                        this.run_setup_probe(cx);
                         // A connection that failed for want of the agent can work now.
                         if matches!(this.form, Some(Form::Setup)) {
                             this.setup.reconnect = true;
                         } else {
-                            this.reconnect_now(cx);
+                            this.reconnect_when_idle(cx);
                         }
                     }
-                    Err(err) => this.fail_step(StepId::Agent, format!("{err:#}"), cx),
+                    Err(err) if current => this.fail_step(StepId::Agent, format!("{err:#}"), cx),
+                    Err(err) => this.toast_error(format!("Installing the Claude agent failed: {err:#}"), cx),
                 }
             })
             .ok();
@@ -780,9 +878,13 @@ impl Monaged {
 
     /// Step 4: `claude auth login` in a terminal window.
     pub(crate) fn setup_sign_in(&mut self, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
         let distro = self.distro_name();
         let script = sign_in_script(&claude_cli(&self.config.agent_cmd));
-        match open_window(&["-d".into(), distro, "--cd".into(), "~".into(), "--".into(), "bash".into(), "-lc".into(), script]) {
+        // --exec: no shell between wsl.exe and bash, so the script arrives as written.
+        match open_window(&["-d".into(), distro, "--cd".into(), "~".into(), "--exec".into(), "bash".into(), "-lc".into(), script]) {
             Ok(child) => {
                 self.set_job(
                     Some(Job::Waiting {
@@ -845,8 +947,10 @@ impl Monaged {
     pub(crate) fn finish_setup(&mut self, then: SetupThen, window: &mut Window, cx: &mut Context<Self>) {
         self.setup.pending = false;
         let _ = self.store.set_setting("setup:done", "1");
-        let _ = self.store.delete_setting("setup:restart");
-        reopen_after_restart(false);
+        // A restart still pending keeps the guide reopening afterwards.
+        if !self.setup.restart {
+            reopen_after_restart(false);
+        }
         self.setup.job = None;
         self.setup.window = None;
         self.setup.generation += 1;
@@ -869,7 +973,9 @@ impl Monaged {
         }
         self.setup.pending = false;
         let _ = self.store.set_setting("setup:done", "1");
-        reopen_after_restart(false);
+        if !self.setup.restart {
+            reopen_after_restart(false);
+        }
         self.setup.job = None;
         self.setup.window = None;
         self.setup.generation += 1;
@@ -878,8 +984,15 @@ impl Monaged {
 
     /// What `new` holds back while the guide is open on a fresh PC.
     pub(crate) fn after_setup(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.setup.reconnect) || !matches!(self.conn, crate::Conn::Ready | crate::Conn::Handshaking) {
+        if !matches!(self.conn, crate::Conn::Ready | crate::Conn::Handshaking) {
+            self.setup.reconnect = false;
             self.reconnect_now(cx);
+        } else if std::mem::take(&mut self.setup.reconnect) {
+            self.reconnect_when_idle(cx);
+        }
+        // Nothing below may run wsl.exe on a PC without WSL.
+        if !wsl::installed() {
+            return;
         }
         self.check_sandbox(cx);
         self.check_credentials(cx);
@@ -893,6 +1006,16 @@ impl Monaged {
             .ok();
         })
         .detach();
+    }
+
+    /// Reconnects to use a new agent or sign-in, unless agents are working
+    /// (a reconnect would stop their turns): then it says so instead.
+    pub(crate) fn reconnect_when_idle(&mut self, cx: &mut Context<Self>) {
+        if self.agents.iter().any(|a| a.is_working()) {
+            self.toast_action(Tone::Info, "Reconnect when the agents are done to use it (a reconnect stops their turns).", "Reconnect", crate::feedback::ToastAction::Reconnect, cx);
+        } else {
+            self.reconnect_now(cx);
+        }
     }
 
     /// The login command for a terminal (the banner and the health check).
@@ -1093,7 +1216,7 @@ impl Monaged {
                     )
                     .child(div().text_size(px(12.5)).text_color(rgb(theme::text_3())).child(summary)),
             )
-            .when(done && step == StepId::Agent, |d| {
+            .when(done && step == StepId::Agent && self.setup.job.is_none(), |d| {
                 d.child(
                     ui::button("setup-agent-update", Kind::Ghost, Some(Icon::Refresh), "Update")
                         .tooltip(crate::shell::tip("Download the newest claude-agent-acp again"))
@@ -1454,6 +1577,15 @@ HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{b}\r\n  
         assert!(INSTALL_WSL_SCRIPT.contains("wsl.exe --install --no-distribution"));
         assert!(INSTALL_WSL_SCRIPT.contains("wsl.exe --install --no-launch"));
         assert!(INSTALL_WSL_SCRIPT.trim_end().ends_with("exit $code"));
+    }
+
+    #[test]
+    fn a_restart_counts_once_windows_started_after_the_install() {
+        assert!(!restart_pending(None));
+        assert!(!restart_pending(Some("garbage".into())));
+        // Installed long before this boot: done. Installed in the future: still pending.
+        assert!(!restart_pending(Some("1".into())));
+        assert!(restart_pending(Some((crate::usage::now_unix() + 3600).to_string())));
     }
 
     #[test]
