@@ -223,12 +223,38 @@ impl Monaged {
                 cx.notify();
             })))
             .child(
-                div().flex().gap(px(8.)).child(ui::button("open-data", Kind::Secondary, Some(Icon::Folder), "Open the data folder").on_click(cx.listener(|this, _, _, cx| {
-                    let dir = std::env::var("APPDATA").map(|a| format!("{a}\\Monaged")).unwrap_or_default();
-                    if let Err(err) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
-                        this.toast_error(format!("Couldn't open {dir}: {err}"), cx);
-                    }
-                }))),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .child(ui::button("open-data", Kind::Secondary, Some(Icon::Folder), "Open the data folder").on_click(cx.listener(|this, _, _, cx| {
+                        let dir = std::env::var("APPDATA").map(|a| format!("{a}\\Monaged")).unwrap_or_default();
+                        if let Err(err) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+                            this.toast_error(format!("Couldn't open {dir}: {err}"), cx);
+                        }
+                    })))
+                    .child(ui::button("open-log", Kind::Secondary, Some(Icon::Lines), "Open the log").on_click(cx.listener(|this, _, _, cx| {
+                        let log = crate::store::data_dir().join("monaged.log");
+                        if !log.exists() {
+                            this.toast(Tone::Info, "There's no log yet: development builds write to their console instead.", cx);
+                        } else if let Err(err) = std::process::Command::new("notepad.exe").arg(&log).spawn() {
+                            this.toast_error(format!("Couldn't open {}: {err}", log.display()), cx);
+                        }
+                    })))
+                    .child(ui::button("open-setup", Kind::Secondary, Some(Icon::Flag), "Setup guide").on_click(cx.listener(|this, _, _, cx| this.open_setup(cx)))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(ui::meta(format!(
+                        "Monaged {} · MIT license with the Commons Clause · an independent project, not affiliated with Anthropic.",
+                        env!("CARGO_PKG_VERSION")
+                    )))
+                    .child(ui::button("open-website", Kind::Ghost, Some(Icon::External), "GitHub").on_click(cx.listener(|_, _, _, cx| cx.open_url("https://github.com/Marten-Mrfc/monaged"))))
+                    .child(ui::button("open-docs", Kind::Ghost, Some(Icon::External), "Help").on_click(cx.listener(|_, _, _, cx| cx.open_url("https://github.com/Marten-Mrfc/monaged/blob/main/docs/user-guide.md")))),
             )
             .into_any_element()
     }

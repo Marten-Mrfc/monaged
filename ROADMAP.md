@@ -336,6 +336,21 @@ One rule for where a message goes:
 - [ ] Next: run `run_with_env` commands in their own sandbox too (bubblewrap, with an optional no-network mode and per-secret allowed hosts); gitleaks before pushes when installed; Windows Hello before revealing or copying.
 - [x] **The database protects itself:** every start makes a backup (VACUUM INTO, last five kept), checks the file, and if it's damaged sets it aside and starts from the newest good backup (and says so). The window position is only saved when it changes, never while minimized.
 
+### Release 0.3.0: ready for other people's PCs (done 2026-11-15)
+Decided with the user: build everything ready for a public release but don't depend on the repository being public yet; license MIT with the Commons Clause (use it for anything, change it, contribute, but don't sell it); the setup guide installs WSL and Ubuntu after asking, and the Claude agent too, because Monaged can't work without it; version 0.3.0.
+
+- [x] **Setup guide** on first start (and from Ctrl K, the health check and the connection bar): WSL with one administrator prompt (falling back to the classic install on older Windows 10) and a restart that reopens Monaged; Ubuntu in its own window where you create your Linux user; the Claude agent downloaded into `~/.local/share/claude-agent-acp` without sudo; `claude auth login` in a terminal; git's identity; a checklist of extras with their install commands. Steps that wait on another window are watched and move on by themselves.
+- [x] **No surprise installs:** Monaged looks for WSL without running `wsl.exe` (its stub can offer to install WSL by itself) and only connects once WSL is there.
+- [x] **Installer:** a Settings → Apps entry with version and uninstaller; release builds without a console window and with a log file.
+- [x] **Updates** from public releases without `gh`, falling back to `gh` for a private repository; downloads checked against `SHA256SUMS.txt`.
+- [x] **CI and releases on GitHub Actions** (Windows): build, tests and clippy on every push; tagged versions (or a "Release vX" commit) build and publish the installer, a zip and checksums.
+- [x] **Docs and brand:** README for users, getting started, user guide, troubleshooting, architecture, releasing, privacy, security, contributing; logo and wordmark as SVG, a link card, and a landing page with real screenshots in `site/`.
+- [x] **Fixed on the way:** reviews treated a missing pytest as failing tests (scores capped at 2), now they use the project's own test command; the plan card overflowed the inspector; the setup guide had to be left through its own buttons to connect.
+
+**Tested:** the unit tests on Windows (CI) and under Wine; the setup guide, the playground, an agent's fix with its review, and the whole pipeline (decide, plan, approve, two builders, integrate, auto-merge) in the real UI, driven against a scripted stand-in for the Claude agent. That's also where the screenshots come from.
+
+**Not tested on a real PC yet:** installing WSL and Ubuntu through the guide, the restart and reopen, the Claude agent download in a real WSL, and signing in.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.
@@ -344,6 +359,7 @@ One rule for where a message goes:
 - Several agents at once (Claude and another ACP agent side by side, one connection each).
 - The agent's terminal output (ACP `terminal/*`), and reading and writing files through Monaged (`fs/*`) so edits can be reviewed before they land.
 - A signed installer (a code-signing certificate), and a delta updater.
+- Real screenshots from Windows for the website, and a short video of the pipeline.
 
 ### Later
 - Standing subprojects on a schedule (for example a weekly security pass)

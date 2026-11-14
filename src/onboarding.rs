@@ -277,16 +277,39 @@ fn open_window(args: &[String]) -> Result<Child> {
     command.spawn().context("couldn't open a window for WSL")
 }
 
-/// Runs a program as administrator (one UAC prompt) in its own window and
-/// waits for it. Returns its exit code; 1223 means the prompt was declined.
-fn run_elevated(program: &str, args: &[&str]) -> Result<i32> {
-    let list = args.iter().map(|a| format!("'{}'", a.replace('\'', "''"))).collect::<Vec<_>>().join(",");
-    let script = format!(
-        "try {{ $p = Start-Process -FilePath '{program}' -ArgumentList {list} -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} catch {{ exit 1223 }}"
+/// Runs a PowerShell script as administrator (one UAC prompt) in its own
+/// window and waits for it. Returns its exit code; 1223 means the prompt was
+/// declined. The script travels Base64-encoded, so nothing needs quoting.
+fn run_elevated(script: &str) -> Result<i32> {
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let encoded = crate::attach::base64(&utf16);
+    let outer = format!(
+        "try {{ $p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}' -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} catch {{ exit 1223 }}"
     );
-    let out = quiet("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().context("couldn't run PowerShell")?;
+    let out = quiet("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &outer]).output().context("couldn't run PowerShell")?;
     Ok(out.status.code().unwrap_or(-1))
 }
+
+/// What the administrator window runs: WSL without a distro (Ubuntu installs
+/// as you, in the next step), or on older Windows 10 builds that don't know
+/// --no-distribution, the classic install without launching a distro.
+const INSTALL_WSL_SCRIPT: &str = r#"$Host.UI.RawUI.WindowTitle = 'Installing WSL for Monaged'
+Write-Host 'Installing the Windows Subsystem for Linux for Monaged. This takes a few minutes.'
+Write-Host ''
+wsl.exe --install --no-distribution
+$code = $LASTEXITCODE
+if ($code -ne 0 -and $code -ne 3010) {
+  Write-Host ''
+  Write-Host 'Trying the older way to install WSL...'
+  wsl.exe --install --no-launch
+  $code = $LASTEXITCODE
+}
+if ($code -ne 0 -and $code -ne 3010) {
+  Write-Host ''
+  Read-Host 'WSL did not install (see above). Press Enter to close this window'
+}
+exit $code
+"#;
 
 /// Makes Windows start Monaged once after the next sign-in (to carry on after a restart).
 pub fn reopen_after_restart(on: bool) {
@@ -632,7 +655,7 @@ impl Monaged {
         self.set_job(Some(Job::Running { step: StepId::Wsl, line: "Windows asks for permission, then installs WSL in its own window…".into(), fraction: None }), cx);
         let generation = self.setup.generation;
         cx.spawn(async move |view, cx| {
-            let code = cx.background_spawn(async move { run_elevated("wsl.exe", &["--install", "--no-distribution"]) }).await;
+            let code = cx.background_spawn(async move { run_elevated(INSTALL_WSL_SCRIPT) }).await;
             view.update(cx, |this, cx| {
                 if this.setup.generation != generation {
                     return;
@@ -646,7 +669,11 @@ impl Monaged {
                         this.run_setup_probe(cx);
                     }
                     Ok(1223) => this.fail_step(StepId::Wsl, "Windows didn't get permission (the administrator prompt was declined or closed).", cx),
-                    Ok(code) => this.fail_step(StepId::Wsl, format!("wsl --install stopped with code {code}. Its window said why; if it mentions virtualization, turn it on in your PC's BIOS or UEFI settings."), cx),
+                    Ok(code) => this.fail_step(
+                        StepId::Wsl,
+                        format!("WSL didn't install (code {code}); its window said why. If it mentions virtualization, turn it on in your PC's BIOS or UEFI settings, then try again."),
+                        cx,
+                    ),
                     Err(err) => this.fail_step(StepId::Wsl, format!("{err:#}"), cx),
                 }
             })
@@ -1420,6 +1447,13 @@ HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{b}\r\n  
         assert!(!script.contains('"'));
         assert!(script.starts_with("c=$HOME/'.local/share/claude-agent-acp/current/claude';"));
         assert!(script.contains("$c auth login"));
+    }
+
+    #[test]
+    fn the_wsl_install_script_falls_back_and_reports() {
+        assert!(INSTALL_WSL_SCRIPT.contains("wsl.exe --install --no-distribution"));
+        assert!(INSTALL_WSL_SCRIPT.contains("wsl.exe --install --no-launch"));
+        assert!(INSTALL_WSL_SCRIPT.trim_end().ends_with("exit $code"));
     }
 
     #[test]
