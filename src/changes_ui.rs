@@ -129,6 +129,7 @@ impl Monaged {
     pub(crate) fn render_diff_body(&self, owner: Option<i64>, file: &FileDiff, cx: &mut Context<Self>) -> AnyElement {
         let shown = file.lines.len().min(MAX_LINES);
         let path = file.path.clone();
+        let lang = crate::syntax::lang_from_path(&file.path);
         let mut rows: Vec<AnyElement> = Vec::with_capacity(shown);
         for (n, line) in file.lines[..shown].iter().enumerate() {
             let (sign, bg, fg) = match line.kind {
@@ -189,7 +190,8 @@ impl Monaged {
             } else {
                 row = row.child(div().w(px(16.)).flex_none().text_color(rgb(sign_color)).child(sign));
             }
-            rows.push(row.child(div().flex_1().min_w(px(0.)).text_color(rgb(fg)).child(text)).into_any_element());
+            let body: gpui::AnyElement = if line.kind == LineKind::Hunk { div().child(text).into_any_element() } else { crate::syntax::line(&line.text, lang).into_any_element() };
+            rows.push(row.child(div().flex_1().min_w(px(0.)).text_color(rgb(fg)).child(body)).into_any_element());
 
             // Comments on this line, and the one being written.
             if let (Some(agent_id), Some(no)) = (owner, line_no) {

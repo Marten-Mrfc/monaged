@@ -944,7 +944,7 @@ impl Monaged {
         for content in &detail.content {
             body = match content {
                 ToolContent::Text(text) => body.child(ui::label("Output")).child(mono_box(text.clone(), 24)),
-                ToolContent::Diff { path, old, new } => body.child(ui::label(format!("Diff · {path}"))).child(render_text_diff(old.as_deref(), new)),
+                ToolContent::Diff { path, old, new } => body.child(ui::label(format!("Diff · {path}"))).child(render_text_diff(path, old.as_deref(), new)),
                 ToolContent::Terminal(id) => body.child(ui::mono(format!("Terminal {id}"))),
             };
         }
@@ -1049,7 +1049,8 @@ pub(crate) fn tip_static(text: String) -> impl Fn(&mut Window, &mut gpui::App) -
 
 /// A compact before/after view of an edit: unchanged lines around the change
 /// are trimmed, removed lines then added lines.
-fn render_text_diff(old: Option<&str>, new: &str) -> AnyElement {
+fn render_text_diff(path: &str, old: Option<&str>, new: &str) -> AnyElement {
+    let lang = crate::syntax::lang_from_path(path);
     let old_lines: Vec<&str> = old.map(|o| o.lines().collect()).unwrap_or_default();
     let new_lines: Vec<&str> = new.lines().collect();
     let prefix = old_lines.iter().zip(&new_lines).take_while(|(a, b)| a == b).count();
@@ -1058,7 +1059,7 @@ fn render_text_diff(old: Option<&str>, new: &str) -> AnyElement {
     let added = &new_lines[prefix..new_lines.len() - suffix];
     const MAX: usize = 40;
     let line = |sign: &'static str, text: &str, fg: u32, bg: u32| {
-        div().flex().bg(rgb(bg)).text_color(rgb(fg)).child(div().w(px(16.)).flex_none().child(sign)).child(div().flex_1().min_w(px(0.)).child(if text.is_empty() { " ".to_string() } else { text.replace('\t', "    ") }))
+        div().flex().bg(rgb(bg)).text_color(rgb(fg)).child(div().w(px(16.)).flex_none().child(sign)).child(div().flex_1().min_w(px(0.)).child(crate::syntax::line(text, lang)))
     };
     let shown = removed.len() + added.len();
     div()

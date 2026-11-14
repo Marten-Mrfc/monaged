@@ -48,6 +48,13 @@ pub struct Palette {
     pub del_bg: u32,
     /// Background of inline code.
     pub code_bg: u32,
+    /// Code: keywords, strings, numbers, comments, types, function calls.
+    pub syn_keyword: u32,
+    pub syn_string: u32,
+    pub syn_number: u32,
+    pub syn_comment: u32,
+    pub syn_type: u32,
+    pub syn_function: u32,
     /// Window shadow / scrim strength behind popovers (alpha 0–255).
     pub scrim: u8,
 }
@@ -79,6 +86,12 @@ pub const CARBON: Palette = Palette {
     del: 0xff7a7a,
     del_bg: 0x221012,
     code_bg: 0x1a1a1a,
+    syn_keyword: 0xb9b4f0,
+    syn_string: 0x9fd3a8,
+    syn_number: 0xe5c07b,
+    syn_comment: 0x6a6a6a,
+    syn_type: 0x8fc7e8,
+    syn_function: 0xf0f0f0,
     scrim: 0x99,
 };
 
@@ -109,6 +122,12 @@ pub const GRAPHITE: Palette = Palette {
     del: 0xff8a8a,
     del_bg: 0x34191b,
     code_bg: 0x2a2a2d,
+    syn_keyword: 0xbdb7f2,
+    syn_string: 0xa3d6ab,
+    syn_number: 0xe8c582,
+    syn_comment: 0x76767d,
+    syn_type: 0x93cbea,
+    syn_function: 0xf2f2f4,
     scrim: 0x88,
 };
 
@@ -139,6 +158,12 @@ pub const CLAY: Palette = Palette {
     del: 0xee8884,
     del_bg: 0x40272a,
     code_bg: 0x30302e,
+    syn_keyword: 0xd7b7f0,
+    syn_string: 0xb7d39a,
+    syn_number: 0xebc483,
+    syn_comment: 0x7d7b74,
+    syn_type: 0x9fc9d9,
+    syn_function: 0xfaf9f5,
     scrim: 0x88,
 };
 
@@ -169,6 +194,12 @@ pub const PAPER: Palette = Palette {
     del: 0xc4252c,
     del_bg: 0xfdebec,
     code_bg: 0xf1f1f0,
+    syn_keyword: 0x5a3fc0,
+    syn_string: 0x1a7f37,
+    syn_number: 0x9a5b13,
+    syn_comment: 0x8a8a8a,
+    syn_type: 0x0b6e99,
+    syn_function: 0x111111,
     scrim: 0x40,
 };
 
@@ -192,7 +223,7 @@ macro_rules! roles {
 
 roles!(
     bg, panel, raised, hover, selected, line, line_strong, text, text_body, text_2, text_3, text_4, red, red_text,
-    red_soft, red_line, add, add_bg, del, del_bg, code_bg
+    red_soft, red_line, add, add_bg, del, del_bg, code_bg, syn_keyword, syn_string, syn_number, syn_comment, syn_type, syn_function
 );
 
 /// Text drawn on a `text()`-coloured fill (the primary button).

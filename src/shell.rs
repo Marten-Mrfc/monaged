@@ -983,6 +983,9 @@ impl Monaged {
         if let Some(view) = self.render_commit_view(cx) {
             return view;
         }
+        if let Some(view) = self.render_replay(cx) {
+            return view;
+        }
         if let Some(form) = &self.form {
             return self.render_form(form, cx);
         }
@@ -1518,6 +1521,25 @@ impl Monaged {
             Item::User(text) => div()
                 .flex()
                 .justify_end()
+                .items_center()
+                .gap(px(6.))
+                .group("user-msg")
+                .children(self.rollback_point(agent_id, index).map(|ordinal| {
+                    div()
+                        .id(("rollback", agent_id as usize * 100_000 + index))
+                        .invisible()
+                        .group_hover("user-msg", |s| s.visible())
+                        .size(px(24.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(theme::hover())))
+                        .tooltip(tip("Restore the files to before this message"))
+                        .child(icon_sized(Icon::Undo, 14.).text_color(rgb(theme::text_3())))
+                        .on_click(cx.listener(move |this, _, window, cx| this.ask_confirm(crate::feedback::ConfirmAction::Rollback(agent_id, ordinal), window, cx)))
+                }))
                 .child(
                     div()
                         .max_w(relative(0.85))

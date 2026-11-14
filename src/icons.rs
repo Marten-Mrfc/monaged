@@ -84,6 +84,8 @@ icons! {
     Lines => "lines",
     Hash => "hash",
     ArrowUp => "arrow-up",
+    ChevronLeft => "chevron-left",
+    Undo => "undo",
 }
 
 /// Serves the embedded icons to GPUI.

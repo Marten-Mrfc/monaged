@@ -43,7 +43,8 @@ pub enum Block {
     Paragraph(Inline),
     Item { depth: usize, marker: String, content: Inline },
     Quote(Inline),
-    Code(String),
+    /// (code, the fence's language, e.g. "rust")
+    Code(String, String),
     Rule,
 }
 
@@ -56,6 +57,7 @@ pub fn parse(source: &str) -> Vec<Block> {
     let mut heading: Option<u8> = None;
     let mut quote_depth = 0usize;
     let mut code: Option<String> = None;
+    let mut code_lang = String::new();
 
     // Ends the current item/paragraph/heading and pushes it as a block.
     let flush = |blocks: &mut Vec<Block>,
@@ -82,7 +84,7 @@ pub fn parse(source: &str) -> Vec<Block> {
             match event {
                 Event::Text(text) => buffer.push_str(&text),
                 Event::End(TagEnd::CodeBlock) => {
-                    blocks.push(Block::Code(code.take().unwrap_or_default().trim_end().to_string()));
+                    blocks.push(Block::Code(code.take().unwrap_or_default().trim_end().to_string(), std::mem::take(&mut code_lang)));
                 }
                 _ => {}
             }
@@ -110,8 +112,12 @@ pub fn parse(source: &str) -> Vec<Block> {
             }
             Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
             Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 flush(&mut blocks, &mut inline, &mut item_marker, heading, &lists, quote_depth);
+                code_lang = match kind {
+                    pulldown_cmark::CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or_default().to_string(),
+                    pulldown_cmark::CodeBlockKind::Indented => String::new(),
+                };
                 code = Some(String::new());
             }
             Event::Start(Tag::List(start)) => {

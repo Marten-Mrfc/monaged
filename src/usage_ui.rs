@@ -174,9 +174,52 @@ impl Monaged {
         usage::check(self.budget, &self.meter, &self.plan_usage)
     }
 
+    /// A subproject's weekly spending cap, in dollars (API-equivalent).
+    pub(crate) fn sub_cap(&self, sub_id: i64) -> Option<f64> {
+        self.store.setting(&format!("sub:{sub_id}:cap")).and_then(|v| v.parse::<f64>().ok()).filter(|c| *c > 0.0)
+    }
+
+    /// The subproject spent its cap this week.
+    pub(crate) fn sub_cap_block(&self, sub_id: i64) -> Option<String> {
+        let cap = self.sub_cap(sub_id)?;
+        let spent = self.sub_costs.get(&sub_id).copied().unwrap_or(0.0);
+        (spent >= cap).then(|| {
+            let name = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.name.clone()).unwrap_or_default();
+            format!("{name} spent ${spent:.2} of its ${cap:.0} weekly cap.")
+        })
+    }
+
+    pub(crate) fn ask_sub_cap(&mut self, sub_id: i64, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let name = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.name.clone()).unwrap_or_default();
+        let current = self.sub_cap(sub_id).map(|c| format!("{c:.0}")).unwrap_or_default();
+        self.ask_text(
+            format!("Weekly spending cap for {name}"),
+            "Dollars a week, e.g. 20. Leave empty for no cap.".into(),
+            "Save cap".into(),
+            current,
+            crate::feedback::TextAction::SubCap(sub_id),
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn set_sub_cap(&mut self, sub_id: i64, cap: Option<f64>, cx: &mut Context<Self>) {
+        let _ = self.store.set_setting(&format!("sub:{sub_id}:cap"), &cap.map(|c| format!("{c:.2}")).unwrap_or_default());
+        self.resume_paused(false);
+        match cap {
+            Some(c) => self.toast(Tone::Info, format!("Cap set: ${c:.0} a week for this subproject's automatic work."), cx),
+            None => self.toast(Tone::Info, "No cap for this subproject now.", cx),
+        }
+        cx.notify();
+    }
+
     /// Automatic work hit the budget: keep the message for later.
     pub(crate) fn pause_prompt(&mut self, agent_id: i64, text: String, block: &Block) {
-        let message = block.message();
+        self.pause_with(agent_id, text, block.message());
+    }
+
+    /// Keeps a message for later, saying why.
+    pub(crate) fn pause_with(&mut self, agent_id: i64, text: String, message: String) {
         let Some(agent) = self.agent_mut(agent_id) else { return };
         agent.queued_prompt = Some(match agent.queued_prompt.take() {
             Some(earlier) => format!("{earlier}\n\n{text}"),
@@ -190,7 +233,13 @@ impl Monaged {
 
     /// Sends paused messages once the budget allows (or now, when forced).
     pub(crate) fn resume_paused(&mut self, force: bool) {
-        let paused: Vec<i64> = self.agents.iter().filter(|a| a.paused).map(|a| a.record.id).collect();
+        let paused: Vec<i64> = self
+            .agents
+            .iter()
+            .filter(|a| a.paused)
+            .filter(|a| force || self.sub_cap_block(a.record.subproject_id).is_none())
+            .map(|a| a.record.id)
+            .collect();
         if paused.is_empty() || (!force && self.budget_block().is_some()) {
             return;
         }
@@ -376,7 +425,11 @@ impl Monaged {
         if paused == 0 {
             return None;
         }
-        let message = self.budget_block().map(|b| b.message()).unwrap_or_else(|| "Waiting to resume.".into());
+        let message = self
+            .budget_block()
+            .map(|b| b.message())
+            .or_else(|| self.agents.iter().filter(|a| a.paused).find_map(|a| self.sub_cap_block(a.record.subproject_id)))
+            .unwrap_or_else(|| "Waiting to resume.".into());
         Some(
             div()
                 .flex()

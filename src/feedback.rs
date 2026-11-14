@@ -54,6 +54,8 @@ pub(crate) enum ToastAction {
     Restore(i64),
     /// Download and install the newer release.
     Update,
+    /// Put the files back as they were before a rollback.
+    UndoRollback(i64),
 }
 
 /// Steps that can't be undone ask first.
@@ -65,6 +67,8 @@ pub(crate) enum ConfirmAction {
     Promote(i64, String, String),
     Rerun(i64, crate::pipeline::Stage),
     Discard(i64, crate::git_ops::StatusFile),
+    /// (agent, your message number): restore the files to before it.
+    Rollback(i64, i64),
     RerunBuilder(i64, String),
 }
 
@@ -90,6 +94,8 @@ pub(crate) struct TextPrompt {
 pub(crate) enum TextAction {
     RenameAgent(i64),
     SaveLayout(i64),
+    /// A subproject's weekly cap in dollars ("" or 0 removes it).
+    SubCap(i64),
 }
 
 /// Automatic reconnects after the Claude process dies.
@@ -190,6 +196,7 @@ impl Monaged {
             ToastAction::RetrySession(agent_id) => self.retry_session(agent_id, cx),
             ToastAction::Restore(agent_id) => self.restore_agent(agent_id, cx),
             ToastAction::Update => self.install_update(cx),
+            ToastAction::UndoRollback(agent_id) => self.undo_rollback(agent_id, cx),
             ToastAction::Open { sub_id, agent_id } => {
                 self.form = None;
                 self.select_sub(sub_id, cx);
@@ -327,6 +334,12 @@ impl Monaged {
                 "Run again".to_string(),
                 false,
             ),
+            ConfirmAction::Rollback(agent_id, ordinal) => (
+                format!("Restore {}'s files to before message #{ordinal}?", self.agent(*agent_id).map(|a| a.record.name.clone()).unwrap_or_default()),
+                "Every file in its worktree goes back to how it was then, including new and deleted files; commits made since are undone on its branch. The conversation stays, and the agent hears about it with your next message. You can undo this right after.".to_string(),
+                "Restore files".to_string(),
+                true,
+            ),
             ConfirmAction::Discard(_, file) => (
                 format!("Discard the changes to {}?", file.path),
                 if file.untracked() {
@@ -377,6 +390,7 @@ impl Monaged {
             ConfirmAction::Rerun(sub_id, stage) => self.rerun_stage(sub_id, stage, cx),
             ConfirmAction::RerunBuilder(sub_id, workstream) => self.rerun_builder(sub_id, &workstream, cx),
             ConfirmAction::Discard(sub_id, file) => self.git_discard(sub_id, file, cx),
+            ConfirmAction::Rollback(agent_id, ordinal) => self.rollback_to(agent_id, ordinal, cx),
         }
         cx.notify();
     }
@@ -462,13 +476,21 @@ impl Monaged {
         let text = prompt.input.read(cx).text().trim().to_string();
         window.focus(&self.focus);
         self.focus_request = self.sel_agent;
-        if text.is_empty() {
+        if text.is_empty() && !matches!(prompt.action, TextAction::SubCap(_)) {
             cx.notify();
             return;
         }
         match prompt.action {
             TextAction::RenameAgent(agent_id) => self.rename_agent(agent_id, &text, cx),
             TextAction::SaveLayout(project_id) => self.save_layout(project_id, &text, cx),
+            TextAction::SubCap(sub_id) => {
+                let value = text.trim_start_matches('$').replace(',', ".");
+                match value.parse::<f64>() {
+                    Ok(cap) if cap > 0.0 => self.set_sub_cap(sub_id, Some(cap), cx),
+                    _ if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("none") => self.set_sub_cap(sub_id, None, cx),
+                    _ => self.toast(Tone::Warn, "Type an amount in dollars, like 20.", cx),
+                }
+            }
         }
         cx.notify();
     }

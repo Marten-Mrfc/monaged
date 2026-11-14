@@ -164,6 +164,14 @@ CREATE TABLE IF NOT EXISTS events (
     text TEXT NOT NULL,
     at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+CREATE TABLE IF NOT EXISTS checkpoints (
+    agent_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    commit_sha TEXT NOT NULL,
+    head TEXT NOT NULL,
+    at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (agent_id, ordinal)
+);
 CREATE TABLE IF NOT EXISTS queued_prompts (
     agent_id INTEGER PRIMARY KEY,
     text TEXT NOT NULL,
@@ -592,6 +600,24 @@ impl Store {
         let rows = stmt.query_map(params![subproject_id, limit as i64], |r| {
             Ok(TimelineEvent { at: r.get(0)?, kind: r.get(1)?, agent_id: r.get(2)?, data: r.get::<_, Option<String>>(3)?.unwrap_or_default() })
         })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- Checkpoints -----------------------------------------------------------
+
+    pub fn save_checkpoint(&self, agent_id: i64, ordinal: i64, commit: &str, head: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO checkpoints (agent_id, ordinal, commit_sha, head) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(agent_id, ordinal) DO UPDATE SET commit_sha = excluded.commit_sha, head = excluded.head, at = strftime('%s','now')",
+            params![agent_id, ordinal, commit, head],
+        )?;
+        Ok(())
+    }
+
+    /// (agent, ordinal) -> (commit, head)
+    pub fn checkpoints(&self) -> Result<Vec<(i64, i64, String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT agent_id, ordinal, commit_sha, head FROM checkpoints")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

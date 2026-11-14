@@ -8,6 +8,7 @@ mod acp;
 mod agent;
 mod attach;
 mod changes_ui;
+mod checkpoints;
 mod coord;
 mod coord_ui;
 mod diff;
@@ -39,6 +40,7 @@ mod session_ui;
 mod settings_ui;
 mod shell;
 mod store;
+mod syntax;
 #[cfg(test)]
 mod tests;
 mod text_input;
@@ -70,7 +72,7 @@ use text_input::TextInput;
 
 actions!(
     monaged,
-    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents]
+    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext]
 );
 
 /// Quoted so neither PowerShell nor cmd rewrites the `~`; bash expands it.
@@ -276,6 +278,15 @@ struct Monaged {
     /// Subprojects' combined changes, and which one is open instead of the agents.
     sub_changes: HashMap<i64, changes_ui::SubChanges>,
     sub_view: Option<i64>,
+    /// Worktree snapshots: (agent, messages handled) -> checkpoint.
+    checkpoints: HashMap<(i64, i64), checkpoints::Checkpoint>,
+    /// The state just before a rollback, to undo it.
+    rollback_undo: HashMap<i64, checkpoints::Checkpoint>,
+    /// A note for the agent, sent with your next message (e.g. after a rollback).
+    next_note: HashMap<i64, String>,
+    /// Sessions that just opened: snapshot them on the next event.
+    want_checkpoint: Vec<i64>,
+    replay: Option<checkpoints::Replay>,
     /// Queued messages as last saved (they survive a restart).
     saved_queue: HashMap<i64, String>,
     /// The pipeline stage last written to the timeline, per subproject.
@@ -494,6 +505,11 @@ impl Monaged {
             sub_changes: HashMap::new(),
             sub_view: None,
             saved_queue: HashMap::new(),
+            checkpoints: HashMap::new(),
+            rollback_undo: HashMap::new(),
+            next_note: HashMap::new(),
+            want_checkpoint: Vec::new(),
+            replay: None,
             logged_stage: HashMap::new(),
             next_toast: 1,
             queued_toasts: Vec::new(),
@@ -519,6 +535,9 @@ impl Monaged {
             agent.cost_seen = this.store.setting(&format!("agent:{}:cost_seen", agent.record.id)).and_then(|v| v.parse().ok());
         }
         this.saved_queue = queued;
+        for (agent, ordinal, commit, head) in this.store.checkpoints().unwrap_or_default() {
+            this.checkpoints.insert((agent, ordinal), checkpoints::Checkpoint { commit, head });
+        }
         this.reload_sub_costs();
         this.apply_theme(window);
         window.focus(&this.focus);
@@ -651,6 +670,12 @@ impl Monaged {
             self.after_turn(agent_id, cx);
         }
         self.check_notifications();
+        for agent_id in std::mem::take(&mut self.want_checkpoint) {
+            let handled = self.agent(agent_id).map(|a| a.items.iter().filter(|i| matches!(i, Item::User(_))).count() as i64).unwrap_or(0);
+            if !self.checkpoints.contains_key(&(agent_id, handled)) {
+                self.take_checkpoint(agent_id, cx);
+            }
+        }
         for (tone, text, action) in std::mem::take(&mut self.queued_toasts) {
             match action {
                 Some((label, action)) => self.toast_action(tone, text, label, action, cx),
@@ -748,6 +773,7 @@ impl Monaged {
                     agent.notice(Tone::Info, text);
                 }
                 self.note_models(&result["configOptions"]);
+                self.want_checkpoint.push(agent_id);
                 if !self.apply_model(agent_id, &result["configOptions"]) {
                     self.flush_queued_prompt(agent_id);
                 }
@@ -760,6 +786,7 @@ impl Monaged {
                     agent.cost_baseline = agent.cost_seen.is_none();
                     agent.notice(Tone::Info, "Reopened the saved conversation.");
                 }
+                self.want_checkpoint.push(agent_id);
                 self.note_models(&result["configOptions"]);
                 if !self.apply_model(agent_id, &result["configOptions"]) {
                     self.flush_queued_prompt(agent_id);
@@ -1220,7 +1247,19 @@ impl Monaged {
             self.pause_prompt(agent_id, text, &block);
             return;
         }
+        // The subproject's own weekly cap (messages you type still go through).
+        if !self.bypass_budget
+            && let Some(sub_id) = self.agent(agent_id).map(|a| a.record.subproject_id)
+            && let Some(message) = self.sub_cap_block(sub_id)
+        {
+            self.pause_with(agent_id, text, message);
+            return;
+        }
         let text = self.with_board_updates(agent_id, text);
+        let text = match self.next_note.remove(&agent_id) {
+            Some(note) => format!("{note}\n\n{text}"),
+            None => text,
+        };
         let Some(agent) = self.agent_mut(agent_id) else { return };
         let attachments = std::mem::take(&mut agent.attachments);
         agent.items.push(Item::User(text.clone()));
@@ -1362,7 +1401,8 @@ impl Monaged {
             self.cancel_comment(cx);
             return;
         }
-        if self.commit_view.take().is_some() {
+        if self.commit_view.take().is_some() || self.replay.take().is_some() {
+            self.focus_request = self.sel_agent;
             cx.notify();
             return;
         }
@@ -1647,6 +1687,8 @@ fn main() {
             KeyBinding::new("ctrl-f", FindInConversation, None),
             KeyBinding::new("ctrl-shift-f", SearchAgents, None),
             KeyBinding::new("ctrl-n", NewAgentHere, None),
+            KeyBinding::new("left", ReplayPrev, Some("Replay")),
+            KeyBinding::new("right", ReplayNext, Some("Replay")),
             KeyBinding::new("alt-up", PrevAgent, None),
             KeyBinding::new("alt-down", NextAgent, None),
             KeyBinding::new("up", PaletteUp, Some("Palette")),

@@ -65,6 +65,7 @@ impl Monaged {
         if !answered || other_result {
             self.pipeline_on_turn(agent_id, cx);
         }
+        self.take_checkpoint(agent_id, cx);
         self.flush_queued_prompt(agent_id);
         self.notify_finished(agent_id);
         // A free agent you aren't looking at finished: say so, with a way there.
@@ -836,7 +837,9 @@ fn render_block(block: Block) -> AnyElement {
             .line_height(px(22.))
             .child(styled(inline))
             .into_any_element(),
-        Block::Code(text) => div()
+        Block::Code(text, lang) => {
+            let lang = crate::syntax::lang_from_name(&lang);
+            div()
             .px(px(12.))
             .py(px(10.))
             .rounded(px(6.))
@@ -848,8 +851,9 @@ fn render_block(block: Block) -> AnyElement {
             .line_height(px(19.))
             .text_color(rgb(theme::text()))
             .overflow_hidden()
-            .children(text.lines().map(|l| div().child(if l.is_empty() { " ".to_string() } else { l.replace('\t', "    ") })))
-            .into_any_element(),
+            .children(text.lines().map(|l| div().child(crate::syntax::line(l, lang))))
+            .into_any_element()
+        }
         Block::Rule => div().h(px(1.)).bg(rgb(theme::line())).into_any_element(),
     }
 }

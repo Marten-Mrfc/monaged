@@ -522,13 +522,33 @@ impl Monaged {
             _ => None,
         };
         let spent = self.sub_costs.get(&sub_id).copied().unwrap_or(0.0);
+        let cap = self.sub_cap(sub_id);
         let plan_lines = p.plan.as_ref().map(|plan| {
             let (cost, _, pct) = self.plan_estimate(plan);
             ui::panel_section("Plan")
                 .child(div().text_size(px(13.)).text_color(rgb(theme::text())).child(pipeline::plan_title(plan)))
                 .child(kv("Estimate", format!("${cost:.0} · ≈{pct:.1}% of week")))
-                .child(kv("Spent this week", format!("${spent:.2}")))
+                .child(kv("Spent this week", match cap {
+                    Some(c) => format!("${spent:.2} of ${c:.0} cap"),
+                    None => format!("${spent:.2}"),
+                }))
         });
+        let cap_section = ui::panel_section("Spending cap")
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().text_size(px(12.5)).text_color(rgb(theme::text_2())).child(match cap {
+                        Some(c) => format!("${spent:.2} of ${c:.0} this week"),
+                        None => format!("${spent:.2} this week · no cap"),
+                    }))
+                    .child(ui::button("cap-edit", ui::Kind::Ghost, None, if cap.is_some() { "Change" } else { "Set a cap" }).on_click(cx.listener(move |this, _, window, cx| this.ask_sub_cap(sub_id, window, cx)))),
+            )
+            .children(cap.map(|c| {
+                let ratio = (spent / c).clamp(0.0, 1.0) as f32;
+                div().h(px(4.)).rounded_full().bg(rgb(theme::line_strong())).child(div().h_full().rounded_full().w(gpui::relative(ratio)).bg(rgb(if ratio >= 1.0 { theme::red() } else { theme::text_2() })))
+            }));
 
         div()
             .flex()
@@ -543,6 +563,7 @@ impl Monaged {
             .children(gate.map(|g| div().px(px(12.)).py(px(12.)).border_b_1().border_color(rgb(theme::line())).child(g)))
             .child(div().px(px(16.)).py(px(14.)).border_b_1().border_color(rgb(theme::line())).child(steps))
             .children(plan_lines)
+            .child(cap_section)
             .child(
                 div()
                     .flex()

@@ -58,6 +58,9 @@ pub(crate) enum MenuAction {
     Archive(i64),
     Restore(i64),
     SubChanges(i64),
+    Replay(i64),
+    UndoLastTurn(i64),
+    SubCap(i64),
 }
 
 pub(crate) enum Entry {
@@ -146,6 +149,14 @@ impl Monaged {
                     Entry::Separator,
                     item("Open the repo in Zed", Icon::External, MenuAction::OpenZed(path)),
                     item("Copy branch name", Icon::Copy, MenuAction::Copy(sub.branch.clone(), "branch name")),
+                    item(
+                        match self.sub_cap(sid) {
+                            Some(cap) => format!("Spending cap: ${cap:.0}/week…"),
+                            None => "Set a spending cap…".to_string(),
+                        },
+                        Icon::Gauge,
+                        MenuAction::SubCap(sid),
+                    ),
                     Entry::Separator,
                     item("Clean up worktrees…", Icon::Trash, MenuAction::Cleanup(sid)).danger().enabled(idle_agents),
                 ]
@@ -159,6 +170,8 @@ impl Monaged {
                     item("Open", Icon::Agent, MenuAction::OpenAgent(aid)),
                     item("Open beside", Icon::PanelRight, MenuAction::OpenBeside(aid)).hint("Ctrl-click").enabled(!shown),
                     item("Show changes", Icon::Diff, MenuAction::ShowChanges(aid)),
+                    item("Replay turn by turn", Icon::Clock, MenuAction::Replay(aid)),
+                    item("Undo the last turn's changes…", Icon::Undo, MenuAction::UndoLastTurn(aid)).enabled(!working && self.checkpoints.contains_key(&(aid, agent.items.iter().filter(|i| matches!(i, crate::agent::Item::User(_))).count() as i64 - 1))),
                     item("Review", Icon::Eye, MenuAction::Review(aid)).enabled(!agent.reviewing),
                     Entry::Separator,
                     item("Open the worktree in Zed", Icon::External, MenuAction::OpenZed(agent.record.worktree.clone())),
@@ -247,6 +260,15 @@ impl Monaged {
             MenuAction::Archive(aid) => self.archive_agent(aid, cx),
             MenuAction::Restore(aid) => self.restore_agent(aid, cx),
             MenuAction::SubChanges(sid) => self.open_sub_changes(sid, cx),
+            MenuAction::SubCap(sid) => self.ask_sub_cap(sid, window, cx),
+            MenuAction::Replay(aid) => {
+                self.open_agent(aid, cx);
+                self.open_replay(aid, window, cx);
+            }
+            MenuAction::UndoLastTurn(aid) => {
+                let last = self.agent(aid).map(|a| a.items.iter().filter(|i| matches!(i, crate::agent::Item::User(_))).count() as i64).unwrap_or(0);
+                self.ask_confirm(crate::feedback::ConfirmAction::Rollback(aid, last), window, cx);
+            }
         }
         cx.notify();
     }

@@ -62,7 +62,7 @@ fn markdown_blocks_and_styles() {
             Block::Paragraph(_) => "p",
             Block::Item { .. } => "li",
             Block::Quote(_) => "q",
-            Block::Code(_) => "code",
+            Block::Code(..) => "code",
             Block::Rule => "hr",
         })
         .collect();
