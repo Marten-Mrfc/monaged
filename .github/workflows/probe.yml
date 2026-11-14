@@ -1,0 +1,24 @@
+name: Token probe (temporary)
+
+on:
+  push:
+    branches: ["claude/**"]
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    if: contains(github.event.head_commit.message, '[probe]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Can this token write?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/$GITHUB_REPOSITORY --jq '.permissions, .visibility' || true
+          echo "--- create a throwaway tag"
+          gh api -X POST repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/probe-$GITHUB_RUN_ID -f sha=$GITHUB_SHA && \
+            gh api -X DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/probe-$GITHUB_RUN_ID && echo "TAG WRITE OK" || echo "TAG WRITE FAILED"
+          echo "--- list releases"
+          gh api repos/$GITHUB_REPOSITORY/releases --jq 'length' || echo "RELEASE READ FAILED"
