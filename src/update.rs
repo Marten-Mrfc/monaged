@@ -270,6 +270,19 @@ impl Monaged {
         .detach();
     }
 
+    /// After an update: one note saying what's new (not on a fresh install).
+    pub(crate) fn note_new_version(&mut self, cx: &mut Context<Self>) {
+        let seen = self.store.setting("app:version");
+        if seen.as_deref() == Some(current()) {
+            return;
+        }
+        let _ = self.store.set_setting("app:version", current());
+        if seen.is_some() || !self.projects.is_empty() {
+            let url = format!("https://github.com/{}/releases/tag/v{}", self.update_repo(), current());
+            self.toast_action(Tone::Info, format!("Monaged is updated to {}.", current()), "What's new", crate::feedback::ToastAction::OpenUrl(url), cx);
+        }
+    }
+
     /// Once a day at start, when Settings → Updates allows it.
     pub(crate) fn auto_check_updates(&mut self, cx: &mut Context<Self>) {
         if self.store.setting("updates:auto").is_some_and(|v| v == "0") {

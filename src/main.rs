@@ -607,6 +607,7 @@ impl Monaged {
             this.refresh_branches(project_id, cx);
         }
         this.restore_place(cx);
+        this.note_new_version(cx);
         this.auto_check_updates(cx);
         this
     }
