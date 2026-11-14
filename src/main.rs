@@ -14,6 +14,7 @@ mod diff;
 mod dots;
 mod feedback;
 mod git;
+mod git_ops;
 mod git_ui;
 mod health;
 mod hosting;
@@ -276,6 +277,13 @@ struct Monaged {
     saved_queue: HashMap<i64, String>,
     /// The pipeline stage last written to the timeline, per subproject.
     logged_stage: HashMap<i64, String>,
+    /// The Git tab per subproject, the commit open in the main area, and when
+    /// each project was last fetched.
+    git_panels: HashMap<i64, git_ui::GitPanel>,
+    commit_view: Option<git_ui::CommitView>,
+    fetched: HashMap<i64, Instant>,
+    /// Settings → Git: your identity inside WSL.
+    git_identity: Option<(Entity<TextInput>, Entity<TextInput>)>,
     /// Each subproject's latest CI run: (asked at, run).
     ci: HashMap<i64, (Instant, Option<hosting::Ci>)>,
     /// Subprojects waiting their turn to merge (Merge ready ones).
@@ -461,6 +469,10 @@ impl Monaged {
             form_inputs: HashMap::new(),
             expanded_tools: HashSet::new(),
             ci: HashMap::new(),
+            git_panels: HashMap::new(),
+            commit_view: None,
+            fetched: HashMap::new(),
+            git_identity: None,
             merge_queue: std::collections::VecDeque::new(),
             comments: Vec::new(),
             comment_draft: None,
@@ -1115,6 +1127,7 @@ impl Monaged {
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.refresh_spend();
         self.form = Some(Form::Settings { error: None });
+        self.load_git_identity(cx);
         cx.notify();
     }
 
@@ -1328,6 +1341,10 @@ impl Monaged {
         }
         if self.comment_draft.is_some() {
             self.cancel_comment(cx);
+            return;
+        }
+        if self.commit_view.take().is_some() {
+            cx.notify();
             return;
         }
         if self.find.is_some() {

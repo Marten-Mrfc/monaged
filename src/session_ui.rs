@@ -1040,7 +1040,7 @@ impl Monaged {
 }
 
 /// A tooltip with text known only at runtime.
-fn tip_static(text: String) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView {
+pub(crate) fn tip_static(text: String) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView {
     let text: SharedString = text.into();
     move |_, cx| cx.new(|_| crate::shell::Tip::new(text.clone())).into()
 }

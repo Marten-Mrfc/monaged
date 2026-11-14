@@ -62,6 +62,7 @@ pub(crate) enum ConfirmAction {
     CleanupWorktrees(i64),
     Promote(i64, String, String),
     Rerun(i64, crate::pipeline::Stage),
+    Discard(i64, crate::git_ops::StatusFile),
     RerunBuilder(i64, String),
 }
 
@@ -323,6 +324,16 @@ impl Monaged {
                 "Run again".to_string(),
                 false,
             ),
+            ConfirmAction::Discard(_, file) => (
+                format!("Discard the changes to {}?", file.path),
+                if file.untracked() {
+                    "It's a new file that was never committed, so it's deleted for good.".to_string()
+                } else {
+                    "The file goes back to its last commit. Uncommitted edits to it are lost.".to_string()
+                },
+                "Discard".to_string(),
+                true,
+            ),
             ConfirmAction::RerunBuilder(_, workstream) => (
                 format!("Start a new builder for {workstream}?"),
                 "It gets the same brief and a branch of its own. The earlier builder stays, so you can compare.".to_string(),
@@ -362,6 +373,7 @@ impl Monaged {
             ConfirmAction::Promote(project_id, from, to) => self.promote_confirmed(project_id, from, to, cx),
             ConfirmAction::Rerun(sub_id, stage) => self.rerun_stage(sub_id, stage, cx),
             ConfirmAction::RerunBuilder(sub_id, workstream) => self.rerun_builder(sub_id, &workstream, cx),
+            ConfirmAction::Discard(sub_id, file) => self.git_discard(sub_id, file, cx),
         }
         cx.notify();
     }
@@ -673,6 +685,7 @@ impl Monaged {
                         }
                         this.check_notifications();
                         this.sync_queue();
+                        this.maybe_autofetch(cx);
                         if this.needs_clock() {
                             cx.notify();
                         }

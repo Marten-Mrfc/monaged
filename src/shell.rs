@@ -351,6 +351,9 @@ impl Monaged {
         };
         if let Some(sub_id) = self.sel_sub {
             self.load_pane_weights(sub_id, columns.len());
+            if self.inspector_tab == InspectorTab::Git && self.inspector_open {
+                self.prepare_git_panel(sub_id, cx);
+            }
         }
         self.prepare_columns(&columns, window, cx);
         // A Changes pane shows the diff without being asked.
@@ -976,6 +979,9 @@ impl Monaged {
         }
         if let Some(Form::Health) = &self.form {
             return self.render_health(cx);
+        }
+        if let Some(view) = self.render_commit_view(cx) {
+            return view;
         }
         if let Some(form) = &self.form {
             return self.render_form(form, cx);

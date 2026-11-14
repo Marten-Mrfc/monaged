@@ -517,6 +517,7 @@ impl Monaged {
                         ))
                         .child(column(
                             section("Git", Some("Builders commit their work and Monaged pushes branches, so git inside WSL needs your identity and, for GitHub or GitLab, your logins."))
+                                .child(self.render_git_settings(cx))
                                 .child(self.render_credentials_section(cx))
                                 .child(
                                     div().flex().child(
