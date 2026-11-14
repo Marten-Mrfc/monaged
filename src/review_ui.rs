@@ -457,7 +457,7 @@ impl Monaged {
                         .on_click(cx.listener(move |_, _, window, cx| {
                             scroll.scroll_to_top_of_item(index);
                             // The scroll lands while painting; draw the nav again once it has.
-                            cx.on_next_frame(window, |_, _, cx| cx.notify());
+                            cx.on_next_frame(window, |_, window, cx| cx.on_next_frame(window, |_, _, cx| cx.notify()));
                             cx.notify();
                         }))
                 }))

@@ -261,42 +261,55 @@ One rule for where a message goes:
 - [x] **Window:** Monaged remembers its size, position and maximized state, and whether the sidebar was open.
 - [x] **Fixed:** long replies were measured narrower than they're drawn, so their last lines (and the notes under them) sat past the end of the scroll area. The conversation column now gets an exact width.
 
+### Agent UI, Git and the rest of the ideas list (done 2026-11-14, version 0.2.0)
+**The agent protocol, as a UI.** Monaged shows what the agent reports instead of assuming Claude, so another ACP agent's options appear the same way.
+- [x] **Session settings as chips** under the message box, from the agent's `configOptions`: mode (Manual, Accept edits, Plan, Auto, Bypass), model, effort, fast mode, ultracode, persona. Each opens a menu; changes go through `session/set_config_option`.
+- [x] **Question forms:** Monaged announces `elicitation` support, so Claude's question cards and MCP input or sign-in requests appear in the conversation as forms (single choice, multiple choice, own words, yes/no, numbers, links). The answer goes back; Esc cancels. Off-screen ones raise a toast and a Windows notification.
+- [x] **Slash commands:** typing `/` lists Monaged's own (`/review`, `/stop`, `/model`, `/mode`, `/effort`, `/changes`, `/restart`, `/rename`) and the agent's (from `available_commands_update`); ↑↓ and Tab or Enter pick.
+- [x] **Tool calls open up:** their input, the files they touched (click opens Zed), output and diffs. Notices, compaction and the session's title are shown.
+- [x] **Agent profiles** (Settings → Agents): the ACP command Monaged runs, what the agent reports it can do, and profiles for other agents. Switching reconnects.
+
+**Messages.**
+- [x] Multi-line message box: Shift+Enter adds a line (or Ctrl+Enter sends, Settings → Message box). ↑ at the top walks back through what you sent.
+- [x] Attachments: paste an image, drop files from Explorer, or pick them; images and text files go as ACP content blocks.
+- [x] Messages typed while an agent works are queued for after its turn; queued messages survive a restart.
+
+**Agents and search.**
+- [x] Rename, archive (with undo) and restore agents from their menu; archived ones open read-only.
+- [x] Ctrl F finds in a conversation; Ctrl Shift F and Ctrl K search every loaded conversation; Ctrl K also lists the worktree's files (opens Zed).
+
+**Seeing what happened.**
+- [x] A subproject's combined changes: the feature branch plus every agent's worktree, file by file, with overlaps marked.
+- [x] Comments on diff lines, sent to the agent as one message.
+- [x] Timeline tab: turns (model, cost), reviews, board posts, agents joining, merges, pushes, pipeline stages.
+- [x] Windows notifications through a tray icon (no registration needed), with a flashing taskbar button; clicking one opens the agent.
+
+**Pipeline and merging.**
+- [x] Edit the plan (title, summary, workstreams, owned files) before approving.
+- [x] Run one stage, or one builder, again.
+- [x] Merge queue on the overview: ready first, confidence, conflicts, the merge/pull request, the branch's latest CI run (GitHub Actions or GitLab pipelines), "Merge N ready" one at a time.
+
+**Git.**
+- [x] Git tab: a worktree's changes (discard asks first), commit with a suggested message, stash; origin distances with fetch, fast-forward pull and push; finishing a conflicted merge with a side per file; the history graph, and any commit's diff.
+- [x] Settings → Git: the identity git uses in WSL, auto-fetch, suggestions on/off.
+
+**Layout.**
+- [x] Drag the sidebar, inspector and pane edges (double-click resets); saved layouts per project; zen mode (F11); compact density.
+
+**Reliability and shipping.**
+- [x] Health check page with fixes; open where you left off; the data folder.
+- [x] Unsigned per-user installer (`Monaged-Setup-<version>.exe`, no admin, no registry), updates from the private repo's GitHub releases, `scripts/release.ps1`, Monaged's own icon.
+
+**Not done in this batch:** conversations of agents whose sessions aren't open yet aren't searchable (their history loads with the session); a signed installer.
+
 ### Next ideas
-Grouped by what they'd change. Nothing here is started.
-
-**Working with agents**
-- Shift+Enter for multi-line messages, and a message history (↑ in an empty box).
-- Attach files or a screenshot to a message; paste an image.
-- Slash commands in the message box (`/review`, `/stop`, `/model sonnet`).
-- Per-agent model and effort switch in the header.
-- Search inside a conversation (Ctrl F) and across all agents.
-- Pin, rename, archive and restore agents from the menu.
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
-
-**Seeing what happened**
-- A combined diff for a whole subproject, and inline comments on diff lines that go back to the agent.
-- A timeline per subproject: turns, merges, reviews and costs on one line.
-- Notifications in the Windows notification centre when the window isn't focused.
 - A morning summary: what finished overnight, what waits for you, what it cost.
-
-**Pipeline and merging**
-- Edit the plan before approving it (drag workstreams, change file ownership).
-- Re-run a single stage or builder instead of the whole pipeline.
-- Merge-queue view across subprojects; CI status from GitHub/GitLab next to each branch.
-
-**Layout and looks**
-- Drag to resize the sidebar, inspector and panes; drag an agent into a pane.
-- Saved layouts per project (which agents sit side by side).
-- Zen mode: one conversation, no chrome.
-- Command palette that also searches files in worktrees and opens them in Zed.
-- Accent per project (still never red), compact density option.
-
-**Reliability**
-- Crash-safe queued messages (survive a restart).
-- A health page: WSL, the adapter, Claude login, git identity, GCM, disk space of worktrees.
-- Auto-update and a signed installer.
-
-### Later
+- Drag an agent into a pane; an accent per project (never red).
+- Search conversations that aren't open (store transcripts, or ask the agent for `session/list`).
+- Several agents at once (Claude and another ACP agent side by side, one connection each).
+- The agent's terminal output (ACP `terminal/*`), and reading and writing files through Monaged (`fs/*`) so edits can be reviewed before they land.
+- A signed installer (a code-signing certificate), and a delta updater.
 
 ### Later
 - Standing subprojects on a schedule (for example a weekly security pass)

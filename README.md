@@ -21,11 +21,15 @@ Options: `--distro Ubuntu`, and `--agent <path to claude-agent-acp in WSL>`.
 
 ## Using it
 
-- **The window:** the sidebar tree on the left (with a **Needs you** inbox on top), agents in the middle, and the inspector (Pipeline, Board, Merge) on the right. The status bar shows the connection, weekly usage and Monaged's share.
+- **The window:** the sidebar tree on the left (with a **Needs you** inbox on top), agents in the middle, and the inspector (Pipeline, Board, Merge, Git, Timeline) on the right. The status bar shows the connection, weekly usage and Monaged's share.
 - **Wide screens** show several agents side by side; Ctrl-click an agent in the tree to open it beside the current one.
 - **Ctrl K** opens the command palette: jump anywhere, run an action, switch theme.
 - **Right-click** a project, subproject or agent (or use its ⋯) for everything you can do with it.
-- **Other shortcuts:** Ctrl B toggles the sidebar, Ctrl Alt B the inspector, Ctrl , opens Settings, Ctrl / lists every shortcut, Alt ↑/↓ moves between agents, Ctrl N starts an agent; Enter sends, Esc stops an agent or closes whatever is open.
+- **Other shortcuts:** Ctrl B toggles the sidebar, Ctrl Alt B the inspector, Ctrl , opens Settings, Ctrl / lists every shortcut, Alt ↑/↓ moves between agents, Ctrl N starts an agent, Ctrl F finds in a conversation, Ctrl Shift F searches all of them, F11 is zen mode; Enter sends, Shift+Enter adds a line, Esc stops an agent or closes whatever is open.
+- **The message box:** `/` lists commands, ↑ brings back what you sent, paste or drop images and files. The chips under it set the agent's mode, model and effort.
+- **Questions:** when an agent asks something, a form appears in its conversation; it waits for your answer.
+- **The inspector** has Pipeline, Board, Merge, Git and Timeline tabs. The Git tab commits, syncs, resolves conflicts and shows the history.
+- **Installing:** run `scripts/release.ps1` to build `dist/Monaged-Setup-<version>.exe`; running that installs Monaged for you (no admin). With `-Publish` it also makes the GitHub release that installed copies update from.
 - **Messages:** things that happened appear bottom right and fade (errors stay); things that are true right now (offline, not logged in, paused) sit in a bar at the top until fixed.
 - **Themes** (Settings → Appearance): Carbon, Graphite, Clay, Paper, or follow Windows.
 
@@ -78,7 +82,20 @@ Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a 
 |---|---|
 | `src/main.rs` | The `Monaged` state, ACP routing by session id, forms' logic, actions and key bindings |
 | `src/shell.rs` | The window: title bar, sidebar tree and inbox, agent panes, inspector, status bar, overview, forms |
-| `src/palette.rs` | The Ctrl K command palette |
+| `src/palette.rs` | The Ctrl K command palette (with file and conversation search) |
+| `src/session_ui.rs` | The agent session UI: message box, settings chips, slash commands, question forms, tool details |
+| `src/attach.rs` | Attachments (images, text files) as ACP content blocks |
+| `src/search.rs` | Find in a conversation, search across conversations, the file index |
+| `src/layout.rs` | Resizable panes, saved layouts, zen mode, density |
+| `src/changes_ui.rs` | The diff view with line comments, and a subproject's combined changes |
+| `src/timeline.rs` | The Timeline tab |
+| `src/pipeline_edit.rs` | Editing the plan, running a stage or builder again |
+| `src/queue_ui.rs` | The merge queue with CI status |
+| `src/git_ops.rs`, `src/git_ui.rs` | Git: status, commit, stash, sync, conflicts, history; the Git tab and its settings |
+| `src/notify.rs` | Windows notifications through a tray icon, the flashing taskbar button |
+| `src/health.rs` | The health check |
+| `src/settings_ui.rs` | Settings: agents, message box, notifications, general |
+| `src/install.rs`, `src/update.rs` | The per-user installer and updates from GitHub releases |
 | `src/menu.rs` | Right-click and ⋯ menus |
 | `src/feedback.rs` | Toasts, confirm dialogs, the keyboard sheet, automatic reconnects |
 | `src/ui.rs` | The component kit: buttons, labels, status dots, meters, rows, cards, switches, fields |
