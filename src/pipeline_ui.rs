@@ -6,8 +6,9 @@ use serde_json::Value;
 
 use crate::agent::{Item, Tone};
 use crate::pipeline::{self, Directive, Gate, Pipeline, Question, Role, Segment, Stage};
-use crate::review_ui::{render_markdown, score_color};
-use crate::{AgentSpec, Monaged, button, git, theme, tone_color};
+use crate::icons::{Icon, icon};
+use crate::review_ui::render_markdown;
+use crate::{AgentSpec, Monaged, button, dots, git, theme, tone_color, ui};
 
 impl Monaged {
     pub(crate) fn unique_agent_name(&self, sub_id: i64, base: &str) -> String {
@@ -184,7 +185,7 @@ impl Monaged {
 
     pub(crate) fn copy_git_identity(&mut self, cx: &mut Context<Self>) {
         let distro = self.config.distro.clone();
-        self.banner = Some((Tone::Info, "Copying your Windows git identity into WSL…".into()));
+        self.progress("identity", "Copying your Windows git identity into WSL…", cx);
         cx.notify();
         cx.spawn(async move |view, cx| {
             let result = cx.background_spawn(async move { git::copy_windows_identity(&distro) }).await;
@@ -192,7 +193,7 @@ impl Monaged {
                 match result {
                     Ok(()) => {
                         this.identity_missing = false;
-                        this.banner = Some((Tone::Info, "Done: git in WSL now uses the same name and email as on Windows.".into()));
+                        this.settle("identity", Tone::Info, "Done: git in WSL now uses the same name and email as on Windows.", cx);
                         let waiting: Vec<i64> = this
                             .pipelines
                             .values()
@@ -203,7 +204,7 @@ impl Monaged {
                             this.set_note(sub_id, "Git identity is set. Approve the plan to start building.");
                         }
                     }
-                    Err(err) => this.banner = Some((Tone::Error, format!("{err:#}"))),
+                    Err(err) => this.settle("identity", Tone::Error, format!("Couldn't copy the git identity: {err:#}"), cx),
                 }
                 cx.notify();
             })
@@ -402,38 +403,84 @@ impl Monaged {
         })
     }
 
-    pub(crate) fn render_pipeline_panel(&self, sub_id: i64, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let p = self.pipelines.get(&sub_id)?;
+    /// The inspector's Pipeline tab: where the pipeline is, what each stage
+    /// produced, and the decision waiting for you (if any).
+    pub(crate) fn render_pipeline_inspector(&self, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
+        let Some(p) = self.pipelines.get(&sub_id) else {
+            return ui::panel_section("Pipeline")
+                .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(
+                    "No pipeline has run here yet. It researches the request, has two agents verify that, writes a plan, then builds it with agents in parallel.",
+                ))
+                .child(div().flex().child(
+                    ui::button("insp-run-pipeline", ui::Kind::Primary, Some(Icon::Play), "Run pipeline")
+                        .on_click(cx.listener(move |this, _, window, cx| this.open_pipeline_form(sub_id, window, cx))),
+                ))
+                .into_any_element();
+        };
         let stopped = p.stage == Stage::Stopped;
+        let finished = p.stage == Stage::Done;
         let current = p.stage.index();
-        let waiting = matches!(p.stage, Stage::Decide | Stage::Approve);
+        let waiting = matches!(p.stage, Stage::Decide | Stage::Approve) || self.pipeline_needs_you(sub_id);
+        let builders = self.agents.iter().filter(|a| a.record.subproject_id == sub_id && matches!(a.role(), Role::Builder(_))).count();
 
-        let mut strip = div().flex().items_center().gap_1().text_size(px(12.));
-        for (i, stage) in pipeline::STAGES.iter().enumerate() {
-            let color = if stopped {
-                theme::MUTED
-            } else if i < current || p.stage == Stage::Done {
-                theme::GOOD
-            } else if i == current {
-                if waiting { theme::WARN } else { theme::ACCENT }
+        // Where it is: a big dot-matrix step count, the stage, and the note.
+        let step = if finished { pipeline::STAGES.len() } else { (current + 1).min(pipeline::STAGES.len()) };
+        let headline = div()
+            .flex()
+            .items_end()
+            .gap(px(12.))
+            .child(dots::dot_text(&format!("{step}/{}", pipeline::STAGES.len()), 4., rgb(if waiting && !stopped { theme::red() } else { theme::text() })))
+            .child(div().pb(px(1.)).text_size(px(13.)).text_color(rgb(theme::text_2())).child(if stopped {
+                "Stopped".to_string()
+            } else if finished {
+                "Done".to_string()
             } else {
-                theme::MUTED
-            };
-            if i > 0 {
-                strip = strip.child(div().text_color(rgb(theme::BORDER)).child("─"));
+                p.stage.label().to_string()
+            }));
+        let note = p.note.clone().map(|n| div().text_size(px(12.5)).line_height(px(18.)).text_color(rgb(if waiting { theme::red_text() } else { theme::text_3() })).child(n));
+
+        let meta_for = |stage: Stage| -> String {
+            match stage {
+                Stage::Verify => format!("{} of 2", p.verification_count()),
+                Stage::Plan => p.plan.as_ref().map(|pl| format!("{} · {}/5", pl["size"].as_str().unwrap_or("?"), pl["confidence"].as_u64().unwrap_or(0))).unwrap_or_default(),
+                Stage::Decide | Stage::Approve if p.auto_mode => "auto".into(),
+                Stage::Decide | Stage::Approve => "you".into(),
+                Stage::Build if builders > 0 => format!("{} / {builders}", p.done.len().min(builders)),
+                _ => String::new(),
             }
-            strip = strip.child(
+        };
+        let steps = div().flex().flex_col().gap(px(10.)).children(pipeline::STAGES.iter().enumerate().map(|(i, stage)| {
+            let done = finished || i < current;
+            let now = i == current && !finished && !stopped;
+            let mark: AnyElement = if done {
+                icon(Icon::Check).size(px(14.)).text_color(rgb(theme::text_3())).into_any_element()
+            } else if now {
                 div()
+                    .size(px(14.))
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .child(div().size_2().rounded_full().bg(rgb(color)))
-                    .child(div().text_color(rgb(if i == current && !stopped { theme::TEXT } else { theme::MUTED })).child(stage.label())),
-            );
-        }
-        if stopped {
-            strip = strip.child(div().pl_2().text_color(rgb(theme::BAD)).child("Stopped"));
-        }
+                    .justify_center()
+                    .child(ui::status_dot(("stage-now", i), if waiting { ui::State::NeedsYou } else { ui::State::Working }))
+                    .into_any_element()
+            } else {
+                div()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().size(px(9.)).rounded_full().border_1().border_color(rgb(theme::text_4())))
+                    .into_any_element()
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_size(px(13.))
+                .text_color(rgb(if now { theme::text() } else if done { theme::text_3() } else { theme::text_2() }))
+                .child(mark)
+                .child(div().flex_1().child(stage.label()))
+                .child(ui::mono(if done || now { meta_for(*stage) } else { String::new() }))
+        }));
 
         let gate: Option<AnyElement> = match p.stage {
             Stage::Decide => Some(self.render_decide_card(p, sub_id, cx)),
@@ -441,60 +488,48 @@ impl Monaged {
             Stage::Build | Stage::Integrate => Some(self.render_build_card(p, sub_id)),
             _ => None,
         };
+        let spent = self.sub_costs.get(&sub_id).copied().unwrap_or(0.0);
+        let plan_lines = p.plan.as_ref().map(|plan| {
+            let (cost, _, pct) = self.plan_estimate(plan);
+            ui::panel_section("Plan")
+                .child(div().text_size(px(13.)).text_color(rgb(theme::text())).child(pipeline::plan_title(plan)))
+                .child(kv("Estimate", format!("${cost:.0} · ≈{pct:.1}% of week")))
+                .child(kv("Spent this week", format!("${spent:.2}")))
+        });
 
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(rgb(theme::BORDER))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(strip)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("auto-mode")
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(rgb(if p.auto_mode { theme::ACCENT } else { theme::BORDER }))
-                                        .text_size(px(12.))
-                                        .cursor_pointer()
-                                        .child(if p.auto_mode { "Auto mode: on" } else { "Auto mode: off" })
-                                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_auto_mode(sub_id, cx))),
-                                )
-                                .when(!matches!(p.stage, Stage::Done | Stage::Stopped), |d| {
-                                    d.child(button("stop-pipeline", "Stop", theme::DENY_BG).on_click(cx.listener(move |this, _, _, cx| {
-                                        this.stop_pipeline(sub_id, cx)
-                                    })))
-                                }),
-                        ),
-                )
-                .children(p.note.as_ref().map(|note| {
-                    div().text_size(px(13.)).text_color(rgb(if waiting { theme::WARN } else { theme::MUTED })).child(note.clone())
-                }))
-                .when(self.identity_missing, |d| {
-                    d.child(div().flex().child(
-                        button("copy-identity", "Copy my Windows git identity into WSL", theme::ALLOW_BG)
-                            .on_click(cx.listener(|this, _, _, cx| this.copy_git_identity(cx))),
-                    ))
-                })
-                .children(gate.map(|g| div().id("gate").max_h(px(340.)).overflow_y_scroll().child(g)))
-                .into_any_element(),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .child(ui::panel_section("Stage").child(headline).children(note))
+            .when(self.identity_missing, |d| {
+                d.child(div().px(px(16.)).py(px(12.)).border_b_1().border_color(rgb(theme::line())).child(
+                    ui::button("copy-identity", ui::Kind::Primary, Some(Icon::User), "Copy my Windows git identity into WSL")
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_git_identity(cx))),
+                ))
+            })
+            .children(gate.map(|g| div().px(px(12.)).py(px(12.)).border_b_1().border_color(rgb(theme::line())).child(g)))
+            .child(div().px(px(16.)).py(px(14.)).border_b_1().border_color(rgb(theme::line())).child(steps))
+            .children(plan_lines)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .px(px(16.))
+                    .py(px(14.))
+                    .child(ui::switch("auto-mode", "Auto mode: recommended answers, confident small plans start by themselves", p.auto_mode).on_click(cx.listener(move |this, _, _, cx| this.toggle_auto_mode(sub_id, cx))))
+                    .child(div().flex().gap(px(8.)).map(|d| {
+                        if matches!(p.stage, Stage::Done | Stage::Stopped) {
+                            d.child(
+                                ui::button("run-again", ui::Kind::Secondary, Some(Icon::Play), "Run again")
+                                    .on_click(cx.listener(move |this, _, window, cx| this.open_pipeline_form(sub_id, window, cx))),
+                            )
+                        } else {
+                            d.child(ui::button("stop-pipeline", ui::Kind::Danger, Some(Icon::Stop), "Stop pipeline").on_click(cx.listener(move |this, _, window, cx| this.ask_confirm(crate::feedback::ConfirmAction::StopPipeline(sub_id), window, cx))))
+                        }
+                    })),
+            )
+            .into_any_element()
     }
 
     fn render_decide_card(&self, p: &Pipeline, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
@@ -520,10 +555,10 @@ impl Monaged {
                         .flex()
                         .gap_2()
                         .child(div().font_weight(FontWeight::MEDIUM).child(format!("Verifier {}", i + 1)))
-                        .child(div().text_color(rgb(if verdict.contains("major") { theme::BAD } else { theme::GOOD })).child(verdict))
-                        .child(div().text_color(rgb(score_color(confidence))).child(format!("{confidence}/5"))),
+                        .child(div().text_color(rgb(if verdict.contains("major") { theme::red_text() } else { theme::text_2() })).child(verdict))
+                        .child(ui::score_meter(confidence)),
                 )
-                .children(corrections.into_iter().map(|c| div().pl_3().text_color(rgb(theme::MUTED)).child(format!("• {c}"))))
+                .children(corrections.into_iter().map(|c| div().pl_3().text_color(rgb(theme::text_3())).child(format!("• {c}"))))
         });
         gate_card("Research verified: do we build this?")
             .child(div().line_height(px(20.)).child(summary))
@@ -532,8 +567,8 @@ impl Monaged {
                 div()
                     .flex()
                     .gap_2()
-                    .child(button("decide-go", "Write the plan", theme::ALLOW_BG).on_click(cx.listener(move |this, _, _, cx| this.start_planning(sub_id, cx))))
-                    .child(button("decide-stop", "Don't build this", theme::DENY_BG).on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx)))),
+                    .child(button("decide-go", "Write the plan", theme::PRIMARY_BG).on_click(cx.listener(move |this, _, _, cx| this.start_planning(sub_id, cx))))
+                    .child(button("decide-stop", "Don't build this", theme::red_soft()).on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx)))),
             )
             .into_any_element()
     }
@@ -550,20 +585,20 @@ impl Monaged {
             .flex()
             .items_center()
             .gap_2()
-            .child(div().font_weight(FontWeight::BOLD).child(pipeline::plan_title(plan)))
-            .child(pill(&size, theme::ACCENT))
-            .child(pill(&format!("{confidence}/5"), score_color(confidence)));
+            .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())).child(pipeline::plan_title(plan)))
+            .child(pill(&size, false))
+            .child(ui::score_meter(confidence));
         for risk in &risks {
-            header = header.child(pill(&risk.replace('_', " "), theme::BAD));
+            header = header.child(pill(&risk.replace('_', " "), true));
         }
 
         gate_card("Plan")
             .child(header)
             .children(plan["summary"].as_str().map(|s| div().line_height(px(20.)).child(s.to_string())))
             .children(plan["confidence_reason"].as_str().map(|s| {
-                div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(format!("Confidence: {s}"))
+                div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(format!("Confidence: {s}"))
             }))
-            .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(self.plan_estimate_line(plan)))
+            .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(self.plan_estimate_line(plan)))
             .child(label("Workstreams (one builder each, in parallel)"))
             .children(streams.iter().map(|w| {
                 let goal = w.value["goal"].as_str().unwrap_or_default().to_string();
@@ -571,8 +606,8 @@ impl Monaged {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().flex().gap_2().child(div().font_family("Consolas").child(w.name.clone())).child(goal))
-                    .when(!owns.is_empty(), |d| d.child(div().pl_3().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(format!("owns {owns}"))))
+                    .child(div().flex().gap_2().child(div().font_family(theme::MONO).text_size(px(12.)).child(w.name.clone())).child(div().text_color(rgb(theme::text_2())).child(goal)))
+                    .when(!owns.is_empty(), |d| d.child(div().pl_3().text_size(px(12.)).text_color(rgb(theme::text_3())).child(format!("owns {owns}"))))
             }))
             .when(!strings("contracts").is_empty(), |d| {
                 d.child(label("Contracts")).children(strings("contracts").into_iter().map(|c| div().pl_3().child(format!("• {c}"))))
@@ -587,11 +622,11 @@ impl Monaged {
                         .items_center()
                         .gap_2()
                         .child(
-                            button("plan-approve", format!("Approve and build ({builders} builder{})", if builders == 1 { "" } else { "s" }), theme::ALLOW_BG)
+                            button("plan-approve", format!("Approve and build ({builders} builder{})", if builders == 1 { "" } else { "s" }), theme::PRIMARY_BG)
                                 .on_click(cx.listener(move |this, _, _, cx| this.start_build(sub_id, cx))),
                         )
-                        .child(button("plan-stop", "Stop", theme::DENY_BG).on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx))))
-                        .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child("Want changes? Reply to the planner; its new plan replaces this one.")),
+                        .child(button("plan-stop", "Stop", theme::red_soft()).on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx))))
+                        .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child("Want changes? Reply to the planner; its new plan replaces this one.")),
                 )
             })
             .into_any_element()
@@ -604,20 +639,21 @@ impl Monaged {
             .filter(|a| a.record.subproject_id == sub_id && matches!(a.role(), Role::Builder(_) | Role::Integrator))
             .map(|a| {
                 let done = p.done.contains(&a.record.name) || (a.role() == Role::Integrator && p.stage == Stage::Done);
-                let (mark, color, state) = if done {
-                    ("●", theme::GOOD, "done")
+                let (state, word) = if done {
+                    (ui::State::Done, "done")
                 } else if a.is_working() {
-                    ("◐", theme::ACCENT, "working")
+                    (ui::State::Working, "working")
                 } else {
-                    ("○", theme::MUTED, "waiting")
+                    (ui::State::Idle, "waiting")
                 };
                 div()
                     .flex()
-                    .gap_2()
-                    .child(div().text_color(rgb(color)).child(mark))
-                    .child(div().font_family("Consolas").child(a.record.name.clone()))
-                    .child(div().text_color(rgb(theme::MUTED)).child(state))
-                    .children(a.confidence.as_ref().map(|c| div().text_color(rgb(score_color(c.score))).child(format!("{}/5", c.score))))
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::status_dot(("build-dot", a.record.id as usize), state))
+                    .child(div().flex_1().font_family(theme::MONO).text_size(px(12.)).child(a.record.name.clone()))
+                    .child(ui::mono(word))
+                    .children(a.confidence.as_ref().map(|c| ui::score_meter(c.score)))
             });
         gate_card("Builders").children(rows).into_any_element()
     }
@@ -643,26 +679,26 @@ impl Monaged {
                         }
                         div()
                             .id(SharedString::from(format!("q-{agent_id}-{item}-{qi}-{oi}")))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
+                            .px(px(10.))
+                            .py(px(5.))
+                            .rounded(px(6.))
                             .border_1()
                             .text_size(px(13.))
-                            .border_color(rgb(if selected { theme::ACCENT } else { theme::BORDER }))
-                            .when(selected, |d| d.bg(rgb(theme::SELECTED)))
+                            .border_color(rgb(if selected { theme::text() } else { theme::line_strong() }))
+                            .when(selected, |d| d.bg(rgb(theme::selected())))
                             .when(!answered, |d| {
-                                d.cursor_pointer().hover(|s| s.bg(rgb(theme::HOVER))).on_click(cx.listener(move |this, _, _, cx| {
+                                d.cursor_pointer().hover(|s| s.bg(rgb(theme::hover()))).on_click(cx.listener(move |this, _, _, cx| {
                                     this.answer_question(agent_id, item, qi, oi, cx)
                                 }))
                             })
                             .child(text)
                     });
                     gate_card("Question")
-                        .border_color(rgb(if answered { theme::BORDER } else { theme::WARN }))
+                        .border_color(rgb(if answered { theme::line() } else { theme::red() }))
                         .child(div().font_weight(FontWeight::MEDIUM).child(q.question.clone()))
-                        .when(!q.why.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(q.why.clone())))
+                        .when(!q.why.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(q.why.clone())))
                         .child(div().flex().flex_wrap().gap_2().children(options))
-                        .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(if answered {
+                        .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(if answered {
                             "Answered."
                         } else {
                             "Pick an option, or type your own answer below."
@@ -693,54 +729,60 @@ impl Monaged {
     }
 }
 
-/// A role brief in the transcript, collapsed to one line.
+/// A role brief in the transcript, collapsed to one quiet line.
 pub(crate) fn render_brief(text: &str) -> AnyElement {
-    let title = text.lines().next().unwrap_or_default().trim_start_matches('#').trim().to_string();
+    let title = text.lines().next().unwrap_or_default().trim_start_matches('#').trim().replace("Monaged brief:", "Monaged brief ·");
     let lines = text.lines().count();
     div()
-        .px_3()
-        .py_2()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(theme::BORDER))
-        .text_size(px(13.))
         .flex()
-        .gap_2()
-        .child(div().font_weight(FontWeight::MEDIUM).child(title))
-        .child(div().text_color(rgb(theme::MUTED)).child(format!("· {lines} lines, sent automatically")))
+        .items_center()
+        .gap(px(10.))
+        .py(px(9.))
+        .border_t_1()
+        .border_b_1()
+        .border_color(rgb(theme::line()))
+        .text_size(px(12.5))
+        .text_color(rgb(theme::text_3()))
+        .child(icon(Icon::Board).size(px(14.)))
+        .child(div().flex_1().child(title))
+        .child(ui::mono(format!("{lines} lines · sent automatically")))
         .into_any_element()
 }
 
+/// A card for a decision or a result: hairline, quiet label.
 fn gate_card(title: &'static str) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_3()
-        .rounded_lg()
-        .bg(rgb(theme::PANEL))
-        .border_1()
-        .border_color(rgb(theme::BORDER))
-        .text_size(px(13.))
-        .child(div().text_size(px(11.)).text_color(rgb(theme::MUTED)).child(title.to_uppercase()))
+    ui::card().text_size(px(13.)).child(ui::label(title))
 }
 
 fn result_card(title: &'static str, body: Option<&str>) -> AnyElement {
-    gate_card(title).children(body.map(|b| div().line_height(px(20.)).child(b.to_string()))).into_any_element()
+    gate_card(title).children(body.map(|b| div().line_height(px(20.)).text_color(rgb(theme::text_body())).child(b.to_string()))).into_any_element()
 }
 
 fn label(text: &'static str) -> AnyElement {
-    div().pt_1().text_size(px(11.)).text_color(rgb(theme::MUTED)).child(text.to_uppercase()).into_any_element()
+    div().pt(px(4.)).child(ui::label(text)).into_any_element()
 }
 
-fn pill(text: &str, color: u32) -> AnyElement {
+/// Mono metadata with a hairline; `attention` only for risks.
+fn pill(text: &str, attention: bool) -> AnyElement {
     div()
-        .px_2()
-        .rounded_sm()
+        .flex_none()
+        .px(px(6.))
+        .rounded(px(4.))
         .border_1()
-        .border_color(rgb(color))
-        .text_color(rgb(color))
+        .border_color(rgb(if attention { theme::red() } else { theme::line_strong() }))
+        .font_family(theme::MONO)
         .text_size(px(11.))
+        .text_color(rgb(if attention { theme::red_text() } else { theme::text_2() }))
         .child(text.to_string())
         .into_any_element()
+}
+
+fn kv(k: &'static str, v: String) -> gpui::Div {
+    div()
+        .flex()
+        .justify_between()
+        .gap(px(10.))
+        .text_size(px(12.5))
+        .child(div().text_color(rgb(theme::text_3())).child(k))
+        .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text())).child(v))
 }

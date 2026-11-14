@@ -1,0 +1,370 @@
+//! The command palette (Ctrl K), after Raycast: type to jump to any project,
+//! subproject or agent, or to run an action. Arrows move, Enter runs, Esc closes.
+
+use gpui::{AnyElement, Context, Entity, Focusable, FontWeight, Subscription, Window, div, prelude::*, px, relative, rgb, rgba};
+
+use crate::icons::{Icon, icon};
+use crate::shell::{InspectorTab, agent_state};
+use crate::text_input::TextInput;
+use crate::ui::{self, State};
+use crate::{Monaged, PaletteDown, PaletteUp, theme};
+
+pub(crate) struct PaletteState {
+    pub input: Entity<TextInput>,
+    pub selected: usize,
+    _changed: Subscription,
+}
+
+#[derive(Clone)]
+pub(crate) enum Command {
+    Project(i64),
+    Sub(i64),
+    Agent(i64),
+    NewProject,
+    NewSub(i64),
+    NewAgent(i64),
+    RunPipeline(i64),
+    OpenInZed(String),
+    Push(i64),
+    Review(i64),
+    Inspector(InspectorTab),
+    Theme(&'static str),
+    Settings,
+    ToggleSidebar,
+    Reconnect,
+    Shortcuts,
+}
+
+#[derive(Clone)]
+pub(crate) struct Entry {
+    pub group: &'static str,
+    pub glyph: Icon,
+    pub title: String,
+    pub detail: String,
+    pub state: Option<State>,
+    pub hint: Option<&'static str>,
+    pub command: Command,
+}
+
+/// Every query character appears in order; earlier and tighter matches score higher.
+fn score(query: &str, text: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let text = text.to_lowercase();
+    if text.starts_with(query) {
+        return Some(300);
+    }
+    if let Some(at) = text.find(query) {
+        return Some(200 - at as i32);
+    }
+    // Letters in order, but close together: "rpip" finds "Run pipeline", "inte" doesn't find "Coordination test".
+    let mut chars = text.char_indices();
+    let mut first = None;
+    let mut last = 0;
+    for q in query.chars() {
+        let (i, _) = chars.find(|(_, c)| *c == q)?;
+        first.get_or_insert(i);
+        last = i;
+    }
+    let span = last - first.unwrap_or(0) + 1;
+    (span <= query.len() * 3).then(|| 100 - span as i32)
+}
+
+/// The detail line only matches as a plain substring.
+fn score_detail(query: &str, text: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    text.to_lowercase().find(query).map(|at| 60 - at.min(50) as i32)
+}
+
+impl Monaged {
+    pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
+        let input = cx.new(|cx| TextInput::new("Search projects, agents and actions", cx).bare());
+        let changed = cx.observe(&input, |this, _, cx| {
+            if let Some(p) = &mut this.palette {
+                p.selected = 0;
+            }
+            cx.notify();
+        });
+        window.focus(&input.focus_handle(cx));
+        self.palette = Some(PaletteState { input, selected: 0, _changed: changed });
+        cx.notify();
+    }
+
+    pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        if let Some(id) = self.sel_agent {
+            self.focus_request = Some(id);
+        } else {
+            window.focus(&self.focus);
+        }
+        cx.notify();
+    }
+
+    fn entries(&self) -> Vec<Entry> {
+        let mut out = Vec::new();
+        let sub = self.sel_sub.and_then(|id| self.subprojects.iter().find(|s| s.id == id));
+        // Actions for where you are, first.
+        if let Some(sub) = sub {
+            let running = self.pipelines.get(&sub.id).is_some_and(|p| !matches!(p.stage, crate::pipeline::Stage::Done | crate::pipeline::Stage::Stopped));
+            if !running {
+                out.push(Entry { group: "Actions", glyph: Icon::Play, title: "Run pipeline".into(), detail: sub.name.clone(), state: None, hint: None, command: Command::RunPipeline(sub.id) });
+            }
+            out.push(Entry { group: "Actions", glyph: Icon::Plus, title: "New agent".into(), detail: sub.name.clone(), state: None, hint: None, command: Command::NewAgent(sub.id) });
+            out.push(Entry { group: "Actions", glyph: Icon::Push, title: "Push branch".into(), detail: sub.branch.clone(), state: None, hint: None, command: Command::Push(sub.id) });
+            out.push(Entry { group: "Actions", glyph: Icon::Flow, title: "Show pipeline".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Pipeline) });
+            out.push(Entry { group: "Actions", glyph: Icon::Board, title: "Show board".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Board) });
+            out.push(Entry { group: "Actions", glyph: Icon::Merge, title: "Show merge".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Merge) });
+        }
+        if let Some(agent) = self.sel_agent.and_then(|id| self.agent(id)) {
+            out.push(Entry { group: "Actions", glyph: Icon::Eye, title: "Review".into(), detail: agent.record.name.clone(), state: None, hint: None, command: Command::Review(agent.record.id) });
+            out.push(Entry { group: "Actions", glyph: Icon::External, title: "Open worktree in Zed".into(), detail: agent.record.name.clone(), state: None, hint: None, command: Command::OpenInZed(agent.record.worktree.clone()) });
+        }
+        if let Some(project) = self.sel_project.and_then(|id| self.projects.iter().find(|p| p.id == id)) {
+            out.push(Entry { group: "Actions", glyph: Icon::Layers, title: "New subproject".into(), detail: project.name.clone(), state: None, hint: None, command: Command::NewSub(project.id) });
+        }
+        out.push(Entry { group: "Actions", glyph: Icon::Folder, title: "Add a project".into(), detail: String::new(), state: None, hint: None, command: Command::NewProject });
+        if matches!(self.conn, crate::Conn::Failed(_)) || self.logged_in == Some(false) {
+            out.push(Entry { group: "Actions", glyph: Icon::Refresh, title: "Reconnect to Claude".into(), detail: String::new(), state: None, hint: None, command: Command::Reconnect });
+        }
+        // Go to: agents (busiest first), subprojects, projects.
+        let mut agents: Vec<_> = self.agents.iter().filter(|a| !a.record.archived).collect();
+        agents.sort_by_key(|a| (agent_state(a) != State::NeedsYou, !a.is_working(), std::cmp::Reverse(a.record.id)));
+        for a in agents {
+            let sub_name = self.subprojects.iter().find(|s| s.id == a.record.subproject_id).map(|s| s.name.clone()).unwrap_or_default();
+            out.push(Entry { group: "Go to", glyph: Icon::Agent, title: a.record.name.clone(), detail: sub_name, state: Some(agent_state(a)), hint: None, command: Command::Agent(a.record.id) });
+        }
+        for s in &self.subprojects {
+            let project = self.projects.iter().find(|p| p.id == s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+            out.push(Entry { group: "Go to", glyph: Icon::Layers, title: s.name.clone(), detail: project, state: None, hint: None, command: Command::Sub(s.id) });
+        }
+        for p in &self.projects {
+            out.push(Entry { group: "Go to", glyph: Icon::Folder, title: p.name.clone(), detail: p.path.clone(), state: None, hint: None, command: Command::Project(p.id) });
+        }
+        // Appearance and app.
+        for t in theme::THEMES {
+            let active = self.theme_key == t.key;
+            out.push(Entry {
+                group: "Theme",
+                glyph: if active { Icon::Check } else { Icon::Sliders },
+                title: format!("Theme: {}", t.name),
+                detail: t.blurb.into(),
+                state: None,
+                hint: None,
+                command: Command::Theme(t.key),
+            });
+        }
+        out.push(Entry { group: "Theme", glyph: Icon::Sliders, title: "Theme: follow Windows".into(), detail: "Carbon in dark mode, Paper in light".into(), state: None, hint: None, command: Command::Theme("system") });
+        out.push(Entry { group: "App", glyph: Icon::Sidebar, title: "Toggle sidebar".into(), detail: String::new(), state: None, hint: Some("Ctrl B"), command: Command::ToggleSidebar });
+        out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: Some("Ctrl ,"), command: Command::Settings });
+        out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: Some("Ctrl /"), command: Command::Shortcuts });
+        out
+    }
+
+    /// The entries matching what's typed, best first within each group.
+    fn filtered(&self, cx: &Context<Self>) -> Vec<Entry> {
+        let Some(p) = &self.palette else { return Vec::new() };
+        let query = p.input.read(cx).text().trim().to_lowercase();
+        let mut scored: Vec<(usize, i32, Entry)> = self
+            .entries()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let best = score(&query, &e.title).max(score_detail(&query, &e.detail));
+                best.map(|s| (i, s, e))
+            })
+            .collect();
+        if !query.is_empty() {
+            scored.sort_by_key(|(i, s, _)| (std::cmp::Reverse(*s), *i));
+        }
+        scored.into_iter().map(|(_, _, e)| e).take(60).collect()
+    }
+
+    pub(crate) fn on_palette_up(&mut self, _: &PaletteUp, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.is_some() {
+            self.menu_move(-1, cx);
+            return;
+        }
+        if let Some(p) = &mut self.palette {
+            p.selected = p.selected.saturating_sub(1);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn on_palette_down(&mut self, _: &PaletteDown, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.is_some() {
+            self.menu_move(1, cx);
+            return;
+        }
+        let count = self.filtered(cx).len();
+        if let Some(p) = &mut self.palette {
+            p.selected = (p.selected + 1).min(count.saturating_sub(1));
+            cx.notify();
+        }
+    }
+
+    /// Enter in the palette.
+    pub(crate) fn run_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.filtered(cx);
+        let Some(entry) = self.palette.as_ref().and_then(|p| entries.get(p.selected).cloned()) else { return };
+        self.run_command(entry.command, window, cx);
+    }
+
+    fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        match command {
+            Command::Project(id) => self.select_project(id, cx),
+            Command::Sub(id) => self.select_sub(id, cx),
+            Command::Agent(id) => self.open_agent(id, cx),
+            Command::NewProject => self.open_project_form(window, cx),
+            Command::NewSub(id) => self.open_sub_form(id, window, cx),
+            Command::NewAgent(id) => self.add_agent(id, cx),
+            Command::RunPipeline(id) => self.open_pipeline_form(id, window, cx),
+            Command::OpenInZed(path) => self.open_in_zed(path, cx),
+            Command::Push(id) => self.push_sub(id, false, cx),
+            Command::Review(id) => self.review_agent(id, cx),
+            Command::Inspector(tab) => {
+                self.inspector_open = true;
+                self.inspector_tab = tab;
+            }
+            Command::Theme(key) => self.set_theme(key, window, cx),
+            Command::Settings => self.open_settings(cx),
+            Command::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            Command::Reconnect => self.reconnect_now(cx),
+            Command::Shortcuts => self.shortcuts_open = true,
+        }
+        if self.form.is_none() && self.palette.is_none() && !self.shortcuts_open {
+            if let Some(id) = self.sel_agent {
+                self.focus_request = Some(id);
+            } else {
+                window.focus(&self.focus);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.palette.as_ref()?;
+        let entries = self.filtered(cx);
+        let selected = p.selected.min(entries.len().saturating_sub(1));
+        let mut list = div().flex().flex_col().py(px(4.));
+        let mut last_group = "";
+        for (i, entry) in entries.iter().enumerate() {
+            if entry.group != last_group {
+                last_group = entry.group;
+                list = list.child(div().px(px(16.)).pt(px(10.)).pb(px(4.)).child(ui::label(entry.group)));
+            }
+            let on = i == selected;
+            let command = entry.command.clone();
+            list = list.child(
+                div()
+                    .id(("palette-row", i))
+                    .h(px(36.))
+                    .mx(px(6.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(13.5))
+                    .text_color(rgb(if on { theme::text() } else { theme::text_2() }))
+                    .when(on, |d| d.bg(rgb(theme::selected())))
+                    .when(!on, |d| d.hover(|s| s.bg(rgb(theme::hover()))))
+                    .child(icon(entry.glyph).text_color(rgb(if on { theme::text() } else { theme::text_3() })))
+                    .child(div().flex_none().when(on, |d| d.font_weight(FontWeight::MEDIUM)).child(entry.title.clone()))
+                    .when(!entry.detail.is_empty(), |d| d.child(div().min_w(px(0.)).truncate().text_color(rgb(theme::text_3())).child(format!("· {}", entry.detail))))
+                    .child(div().flex_1())
+                    .children(entry.state.map(|state| {
+                        let word = match state {
+                            State::Working => "working",
+                            State::NeedsYou => "needs you",
+                            State::Done => "idle",
+                            State::Idle => "not started",
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(12.))
+                            .text_color(rgb(if state == State::NeedsYou { theme::red_text() } else { theme::text_3() }))
+                            .child(ui::status_dot(("palette-dot", i), state))
+                            .child(word)
+                    }))
+                    .children(entry.hint.map(ui::kbd))
+                    .when(on, |d| d.child(ui::kbd("Enter")))
+                    .on_click(cx.listener(move |this, _, window, cx| this.run_command(command.clone(), window, cx))),
+            );
+        }
+        if entries.is_empty() {
+            list = list.child(div().px(px(16.)).py(px(18.)).text_color(rgb(theme::text_3())).child("Nothing matches."));
+        }
+        Some(
+            div()
+                .id("palette-scrim")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(theme::scrim()))
+                .flex()
+                .justify_center()
+                .pt(relative(0.12))
+                .on_click(cx.listener(|this, _, window, cx| this.close_palette(window, cx)))
+                .child(ui::fade_in(
+                    "palette-in",
+                    div()
+                        .id("palette")
+                        .key_context("Palette")
+                        .w(px(640.))
+                        .max_h(px(520.))
+                        .flex()
+                        .flex_col()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(rgb(theme::line_strong()))
+                        .bg(rgb(theme::raised()))
+                        .shadow_lg()
+                        .overflow_hidden()
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .h(px(50.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .px(px(14.))
+                                .border_b_1()
+                                .border_color(rgb(theme::line()))
+                                .child(icon(Icon::Search).text_color(rgb(theme::text_3())))
+                                .child(div().flex_1().child(p.input.clone())),
+                        )
+                        .child(div().id("palette-list").flex_1().min_h(px(0.)).overflow_y_scroll().child(list))
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(14.))
+                                .px(px(16.))
+                                .py(px(9.))
+                                .border_t_1()
+                                .border_color(rgb(theme::line()))
+                                .text_size(px(11.5))
+                                .text_color(rgb(theme::text_3()))
+                                .child(div().flex().items_center().gap(px(4.)).child(ui::kbd("↑")).child(ui::kbd("↓")).child("move"))
+                                .child(div().flex().items_center().gap(px(4.)).child(ui::kbd("Enter")).child("run"))
+                                .child(div().flex().items_center().gap(px(4.)).child(ui::kbd("Esc")).child("close")),
+                        ),
+                ))
+                .into_any_element(),
+        )
+    }
+}

@@ -32,6 +32,10 @@ pub struct TextInput {
     /// How far the text is scrolled left so the cursor stays visible.
     scroll_x: Pixels,
     is_selecting: bool,
+    /// Drawn without its own box (inside the composer or the palette).
+    bare: bool,
+    /// The form says this field is wrong: red outline until you edit it.
+    invalid: bool,
 }
 
 impl TextInput {
@@ -47,7 +51,26 @@ impl TextInput {
             last_bounds: None,
             scroll_x: px(0.),
             is_selecting: false,
+            bare: false,
+            invalid: false,
         }
+    }
+
+    /// No border or background: the surrounding container draws the frame.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
+
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid != invalid {
+            self.invalid = invalid;
+            cx.notify();
+        }
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        self.invalid
     }
 
     pub fn text(&self) -> &str {
@@ -300,6 +323,7 @@ impl EntityInputHandler for TextInput {
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        self.invalid = false;
         cx.notify();
     }
 
@@ -420,7 +444,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), rgb(theme::MUTED).into())
+            (input.placeholder.clone(), rgb(theme::text_3()).into())
         } else {
             (content, style.color)
         };
@@ -470,7 +494,7 @@ impl Element for TextElement {
                 None,
                 Some(fill(
                     Bounds::new(point(left + cursor_pos, bounds.top()), size(px(2.), bounds.bottom() - bounds.top())),
-                    rgb(theme::ACCENT),
+                    rgb(theme::text()),
                 )),
             )
         } else {
@@ -548,14 +572,21 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(if focused { theme::ACCENT } else { theme::BORDER }))
-            .bg(rgb(theme::INPUT_BG))
+            .when(!self.bare, |d| {
+                d.px(px(10.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(match (self.invalid, focused) {
+                        (true, _) => theme::red(),
+                        (false, true) => theme::text_3(),
+                        (false, false) => theme::line_strong(),
+                    }))
+                    .bg(rgb(theme::raised()))
+            })
+            .text_color(rgb(theme::text()))
             .line_height(px(22.))
-            .text_size(px(14.))
+            .text_size(px(if self.bare { 14.5 } else { 13.5 }))
             .child(TextElement { input: cx.entity() })
     }
 }

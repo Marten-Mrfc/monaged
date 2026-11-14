@@ -10,8 +10,9 @@ use crate::agent::Tone;
 use crate::git::{self, BranchState, Cleanup, MergeOutcome};
 use crate::hosting::{self, Remote, Request};
 use crate::pipeline::{Role, Stage};
-use crate::review_ui::score_color;
-use crate::{AgentSpec, Monaged, button, theme, tone_color};
+use crate::icons::{Icon, icon, icon_sized};
+use crate::ui::{self, Kind};
+use crate::{AgentSpec, Monaged, theme, tone_color};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Policy {
@@ -197,7 +198,7 @@ impl Monaged {
                             this.maybe_auto_merge(sub_id, cx);
                         }
                     }
-                    Err(err) => this.banner = Some((Tone::Error, format!("Couldn't read the branches: {err:#}"))),
+                    Err(err) => this.toast_error(format!("Couldn't read the branches: {err:#}"), cx),
                 }
                 cx.notify();
             })
@@ -225,9 +226,9 @@ impl Monaged {
                         if let Some(p) = this.projects.iter_mut().find(|p| p.id == project_id) {
                             p.base_branch = "develop".into();
                         }
-                        this.banner = Some((Tone::Info, format!("Created develop and acceptance from {top}. New subprojects now branch off develop.")));
+                        this.toast(Tone::Info, format!("Created develop and acceptance from {top}. New subprojects now branch off develop."), cx);
                     }
-                    Err(err) => this.banner = Some((Tone::Error, format!("Couldn't create the branches: {err:#}"))),
+                    Err(err) => this.toast_error(format!("Couldn't create the branches: {err:#}"), cx),
                 }
                 this.refresh_branches(project_id, cx);
                 cx.notify();
@@ -284,15 +285,15 @@ impl Monaged {
         cx.notify();
     }
 
-    fn promote(&mut self, project_id: i64, from: String, to: String, cx: &mut Context<Self>) {
-        if self.policy(project_id, &to) == Policy::Confirm
-            && self.promote_confirm.as_ref() != Some(&(project_id, from.clone(), to.clone()))
-        {
-            self.promote_confirm = Some((project_id, from, to));
-            cx.notify();
+    fn promote(&mut self, project_id: i64, from: String, to: String, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if self.policy(project_id, &to) == Policy::Confirm {
+            self.ask_confirm(crate::feedback::ConfirmAction::Promote(project_id, from, to), window, cx);
             return;
         }
-        self.promote_confirm = None;
+        self.promote_confirmed(project_id, from, to, cx);
+    }
+
+    pub(crate) fn promote_confirmed(&mut self, project_id: i64, from: String, to: String, cx: &mut Context<Self>) {
         let message = format!("Promote {from} into {to}");
         self.run_merge(project_id, from, to, message, None, cx);
     }
@@ -304,9 +305,8 @@ impl Monaged {
             state.busy = true;
             state.conflict.clear();
             state.message = Some((Tone::Info, format!("Merging into {target}…")));
-        } else {
-            self.banner = Some((Tone::Info, format!("Merging {source} into {target}…")));
         }
+        self.progress("merge", format!("Merging {source} into {target}…"), cx);
         cx.notify();
         let distro = self.config.distro.clone();
         cx.spawn(async move |view, cx| {
@@ -339,13 +339,14 @@ impl Monaged {
                         let state = this.merge_state(sub_id);
                         state.busy = false;
                         state.conflict = conflict;
-                        state.message = Some((tone, text));
+                        state.message = Some((tone, text.clone()));
                         if let Some(sha) = merged_sha {
                             state.merged = Some((target.clone(), sha));
                         }
                     }
-                    None => this.banner = Some((tone, text)),
+                    None => {}
                 }
+                this.settle("merge", tone, text, cx);
                 this.refresh_branches(project_id, cx);
                 cx.notify();
             })
@@ -386,7 +387,7 @@ impl Monaged {
 
     // ---- Pushing and requests ------------------------------------------------------
 
-    fn push_sub(&mut self, sub_id: i64, then_request: bool, cx: &mut Context<Self>) {
+    pub(crate) fn push_sub(&mut self, sub_id: i64, then_request: bool, cx: &mut Context<Self>) {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
         let Some(project) = self.projects.iter().find(|p| p.id == sub.project_id).cloned() else { return };
         let target = self.merge_target(sub_id).unwrap_or_default();
@@ -533,9 +534,9 @@ impl Monaged {
                 match result {
                     Ok(()) => {
                         this.creds_ok = Some(true);
-                        this.banner = Some((Tone::Info, "Git in WSL now uses your Windows logins (Git Credential Manager) for push and clone.".into()));
+                        this.toast(Tone::Info, "Done: git in WSL now uses your Windows logins (Git Credential Manager).", cx);
                     }
-                    Err(err) => this.banner = Some((Tone::Error, format!("{err:#}"))),
+                    Err(err) => this.toast_error(format!("{err:#}"), cx),
                 }
                 cx.notify();
             })
@@ -559,127 +560,165 @@ impl Monaged {
 
     // ---- Rendering -------------------------------------------------------------------
 
+    /// A branch rule you can click to change: quiet mono text with a hairline.
+    fn policy_chip(&self, project_id: i64, target: &str, cx: &mut Context<Self>) -> AnyElement {
+        let policy = self.policy(project_id, target);
+        let t = target.to_string();
+        div()
+            .id(SharedString::from(format!("policy-{target}")))
+            .flex_none()
+            .whitespace_nowrap()
+            .px(px(6.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(rgb(theme::line_strong()))
+            .font_family(theme::MONO)
+            .text_size(px(11.))
+            .text_color(rgb(theme::text_2()))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text())))
+            .tooltip(crate::shell::tip("Click to change the rule"))
+            .child(policy.short())
+            .on_click(cx.listener(move |this, _, _, cx| this.cycle_policy(project_id, t.clone(), cx)))
+            .into_any_element()
+    }
+
+    /// The project's branch flow: feature/* → develop → acceptance → main, the
+    /// rule on each hop, what's waiting to be promoted, and the remote.
     pub(crate) fn render_branch_panel(&self, project_id: i64, cx: &mut Context<Self>) -> AnyElement {
         let chain = self.chain(project_id);
         let info = self.branch_info.get(&project_id);
         let remote = self.remote(project_id);
+        let feature_count = self.subprojects.iter().filter(|s| s.project_id == project_id).count();
 
-        let mut flow = div().flex().items_center().flex_wrap().gap_2().text_size(px(13.)).child(div().font_family("Consolas").child("feature/*"));
+        let node = |name: String, note: String| {
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().font_family(theme::MONO).text_size(px(12.5)).text_color(rgb(theme::text())).child(name))
+                .child(ui::mono(note))
+        };
+        let mut flow = div().flex().items_center().gap(px(10.)).child(node(
+            "feature/*".into(),
+            format!("{feature_count} subproject{}", if feature_count == 1 { "" } else { "s" }),
+        ));
+        let mut previous = "feature/*".to_string();
         for target in &chain {
-            let policy = self.policy(project_id, target);
-            let t = target.clone();
+            let ahead = info.and_then(|i| i.ahead.get(&(previous.clone(), target.clone()))).copied();
+            let note = match ahead {
+                Some(0) | None if previous == "feature/*" => "base for features".to_string(),
+                Some(0) => "up to date".to_string(),
+                Some(n) => format!("{n} waiting"),
+                None => String::new(),
+            };
             flow = flow
-                .child(div().text_color(rgb(theme::MUTED)).child("→"))
-                .child(div().font_family("Consolas").child(target.clone()))
                 .child(
                     div()
-                        .id(SharedString::from(format!("policy-{target}")))
-                        .px_1p5()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(rgb(policy_color(policy)))
-                        .text_color(rgb(policy_color(policy)))
-                        .text_size(px(11.))
-                        .cursor_pointer()
-                        .child(policy.short())
-                        .on_click(cx.listener(move |this, _, _, cx| this.cycle_policy(project_id, t.clone(), cx))),
-                );
+                        .flex_1()
+                        .min_w(px(40.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(self.policy_chip(project_id, target, cx))
+                        .child(div().w_full().h(px(1.)).bg(rgb(theme::line_strong()))),
+                )
+                .child(node(target.clone(), note));
+            previous = target.clone();
         }
 
-        let hops = chain.windows(2).map(|pair| {
+        let hops = chain.windows(2).filter_map(|pair| {
             let (from, to) = (pair[0].clone(), pair[1].clone());
             let ahead = info.and_then(|i| i.ahead.get(&(from.clone(), to.clone()))).copied().unwrap_or(0);
-            let confirming = self.promote_confirm.as_ref() == Some(&(project_id, from.clone(), to.clone()));
-            let (f, t) = (from.clone(), to.clone());
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .text_size(px(13.))
-                .child(div().w(px(220.)).font_family("Consolas").child(format!("{from} → {to}")))
-                .child(div().w(px(170.)).text_color(rgb(if ahead > 0 { theme::TEXT } else { theme::MUTED })).child(match ahead {
-                    0 => "nothing to promote".to_string(),
-                    1 => "1 commit to promote".to_string(),
-                    n => format!("{n} commits to promote"),
-                }))
-                .when(ahead > 0 && !confirming, |d| {
-                    d.child(button(SharedString::from(format!("promote-{from}-{to}")), format!("Merge into {to}"), theme::INPUT_BG).on_click(
-                        cx.listener(move |this, _, _, cx| this.promote(project_id, f.clone(), t.clone(), cx)),
+            (ahead > 0).then(|| {
+                let (f, t) = (from.clone(), to.clone());
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .py(px(8.))
+                    .border_t_1()
+                    .border_color(rgb(theme::line()))
+                    .child(icon(Icon::Merge).text_color(rgb(theme::text_3())))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(px(13.))
+                            .child(format!("{ahead} commit{} from {from} ready for {to}", if ahead == 1 { "" } else { "s" })),
+                    )
+                    .child(ui::button(SharedString::from(format!("promote-{from}-{to}")), Kind::Secondary, None, format!("Promote to {to}")).on_click(
+                        cx.listener(move |this, _, window, cx| this.promote(project_id, f.clone(), t.clone(), window, cx)),
                     ))
-                })
-                .when(confirming, |d| {
-                    let (f, t) = (from.clone(), to.clone());
-                    d.child(div().text_color(rgb(theme::WARN)).child(format!("Merge {from} into {to}? This is your top branch.")))
-                        .child(button("promote-confirm", format!("Yes, merge into {to}"), theme::DENY_BG).on_click(cx.listener(
-                            move |this, _, _, cx| this.promote(project_id, f.clone(), t.clone(), cx),
-                        )))
-                        .child(button("promote-cancel", "Cancel", theme::INPUT_BG).on_click(cx.listener(|this, _, _, cx| {
-                            this.promote_confirm = None;
-                            cx.notify();
-                        })))
-                })
+            })
         });
 
         let remote_line = match (&remote, info.and_then(|i| i.state.remote_url.as_ref())) {
             (Some(r), _) => format!(
-                "origin: {}/{}{}",
+                "origin {}/{}{}",
                 r.host,
                 r.slug,
                 match r.provider {
                     Some(p) => format!(" · {}s via {}", p.request_name(), if p == hosting::Provider::GitHub { "gh" } else { "glab" }),
-                    None => " · not GitHub/GitLab: push only".into(),
+                    None => " · push only".into(),
                 }
             ),
-            (None, Some(url)) => format!("origin: {url}"),
-            (None, None) => "No remote (origin): pushing and merge requests are off for this project.".into(),
+            (None, Some(url)) => format!("origin {url}"),
+            (None, None) => "No remote: pushing and merge requests are off".into(),
         };
 
         div()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_3()
-            .rounded_lg()
-            .bg(rgb(theme::PANEL))
+            .gap(px(14.))
+            .p(px(16.))
+            .rounded(px(8.))
             .border_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(theme::line()))
+            .bg(rgb(theme::panel()))
+            .child(flow)
+            .children(hops)
+            .when(chain.len() == 1, |d| {
+                d.child(div().text_size(px(12.5)).text_color(rgb(theme::text_3())).child(format!(
+                    "Only {} exists, so features merge straight into it. Set up develop and acceptance for a develop → acceptance → main flow.",
+                    chain.first().cloned().unwrap_or_default()
+                )))
+            })
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(div().text_size(px(11.)).text_color(rgb(theme::MUTED)).child("BRANCHES · CLICK A RULE TO CHANGE IT"))
+                    .gap(px(8.))
+                    .pt(px(2.))
+                    .child(icon_sized(Icon::Branch, 13.).text_color(rgb(theme::text_3())))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(ui::mono(remote_line)))
+                    .when(chain.len() == 1, |d| {
+                        d.child(ui::button("setup-branches", Kind::Secondary, None, "Set up develop and acceptance").on_click(cx.listener(
+                            move |this, _, _, cx| this.setup_branches(project_id, cx),
+                        )))
+                    })
                     .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .when(chain.len() == 1, |d| {
-                                d.child(button("setup-branches", "Set up develop and acceptance", theme::ALLOW_BG).on_click(cx.listener(
-                                    move |this, _, _, cx| this.setup_branches(project_id, cx),
-                                )))
-                            })
-                            .child(
-                                button("refresh-branches", if info.is_some_and(|i| i.loading) { "Refreshing…" } else { "Refresh" }, theme::INPUT_BG)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.refresh_branches(project_id, cx))),
-                            ),
+                        ui::icon_button("refresh-branches", Icon::Refresh)
+                            .tooltip(crate::shell::tip("Read the branches again"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.refresh_branches(project_id, cx))),
                     ),
             )
-            .child(flow)
-            .children(hops)
-            .when(chain.len() == 1, |d| {
-                d.child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(format!(
-                    "Only {} exists, so features merge straight into it. Set up develop and acceptance to use your develop → acceptance → main flow.",
-                    chain.first().cloned().unwrap_or_default()
-                )))
-            })
-            .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(remote_line))
             .into_any_element()
     }
 
-    pub(crate) fn render_merge_card(&self, sub_id: i64, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sub = self.subprojects.iter().find(|s| s.id == sub_id)?;
-        let target = self.merge_target(sub_id)?;
-        let policy = self.policy(sub.project_id, &target);
+    /// The inspector's Merge tab for a subproject.
+    pub(crate) fn render_merge_inspector(&self, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
+        let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id) else { return div().into_any_element() };
+        let Some(target) = self.merge_target(sub_id) else {
+            return ui::panel_section("Merge")
+                .child(ui::skeleton("merge-sk-1", px(180.).into(), 10.))
+                .child(ui::skeleton("merge-sk-2", px(240.).into(), 10.))
+                .child(ui::skeleton("merge-sk-3", px(140.).into(), 10.))
+                .into_any_element();
+        };
+        let project_id = sub.project_id;
         let state = self.merges.get(&sub_id);
         // Before this run touched it, the last merge comes from the database.
         let merged = state.and_then(|s| s.merged.clone()).or_else(|| {
@@ -687,132 +726,148 @@ impl Monaged {
                 .setting(&format!("sub:{sub_id}:merged"))
                 .and_then(|v| v.split_once(' ').map(|(t, s)| (t.to_string(), s.to_string())))
         });
-        let merged = merged.as_ref();
         let busy = state.is_some_and(|s| s.busy);
-        let ahead = self.branch_info.get(&sub.project_id).and_then(|i| i.ahead.get(&(sub.branch.clone(), target.clone()))).copied();
-        let remote = self.remote(sub.project_id);
+        let ahead = self.branch_info.get(&project_id).and_then(|i| i.ahead.get(&(sub.branch.clone(), target.clone()))).copied();
+        let remote = self.remote(project_id);
         let provider = remote.as_ref().and_then(|r| r.provider);
-        // Any origin can be pushed to; only GitHub/GitLab get merge/pull requests.
-        let has_origin = self.branch_info.get(&sub.project_id).is_some_and(|i| i.state.remote_url.is_some());
+        let has_origin = self.branch_info.get(&project_id).is_some_and(|i| i.state.remote_url.is_some());
         let confidence = self.sub_confidence(sub_id);
         let conflict = state.map(|s| s.conflict.clone()).unwrap_or_default();
 
-        let status = match (merged, ahead) {
-            (Some((t, sha)), Some(0) | None) if !sha.is_empty() => format!("Merged into {t} ({sha})."),
+        let status = match (&merged, ahead) {
+            (Some((t, sha)), Some(0) | None) if !sha.is_empty() => format!("Merged into {t} at {sha}."),
             (Some((t, _)), Some(0) | None) => format!("Already in {t}."),
             (_, Some(0)) => "Nothing to merge yet.".to_string(),
             (_, Some(n)) => format!("{n} commit{} ready to merge.", if n == 1 { "" } else { "s" }),
             (_, None) => "Checking…".to_string(),
         };
+        let kv = |k: &str, v: AnyElement| {
+            div().flex().items_center().justify_between().gap(px(10.)).text_size(px(12.5)).child(div().text_color(rgb(theme::text_3())).child(k.to_string())).child(v)
+        };
 
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1p5()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(rgb(theme::BORDER))
-                .text_size(px(13.))
+        let mut col = div().flex().flex_col();
+        col = col.child(
+            ui::panel_section("Merge")
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(div().text_size(px(11.)).text_color(rgb(theme::MUTED)).child("MERGE"))
-                        .child(div().font_family("Consolas").child(format!("{} → {target}", sub.branch)))
-                        .child(
-                            div()
-                                .px_1p5()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(policy_color(policy)))
-                                .text_color(rgb(policy_color(policy)))
-                                .text_size(px(11.))
-                                .child(policy.short()),
-                        )
-                        .children(confidence.map(|(score, from)| {
-                            div().text_color(rgb(score_color(score))).child(format!("confidence {score}/5 ({from})"))
-                        }))
-                        .child(div().text_color(rgb(theme::MUTED)).child(status)),
+                        .gap(px(8.))
+                        .font_family(theme::MONO)
+                        .text_size(px(12.))
+                        .child(div().min_w(px(0.)).truncate().child(sub.branch.clone()))
+                        .child(icon_sized(Icon::ChevronRight, 12.).text_color(rgb(theme::text_3())))
+                        .child(target.clone()),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .when(!busy && ahead.unwrap_or(0) > 0, |d| {
-                            d.child(button("merge-sub", format!("Merge into {target}"), theme::ALLOW_BG).on_click(cx.listener(
-                                move |this, _, _, cx| this.merge_subproject(sub_id, cx),
-                            )))
-                        })
-                        .when(!busy && !conflict.is_empty(), |d| {
-                            d.child(button("resolve", "Resolve conflicts with an agent", theme::INPUT_BG).on_click(cx.listener(
-                                move |this, _, _, cx| this.resolve_conflicts(sub_id, cx),
-                            )))
-                        })
-                        .when(!busy && has_origin, |d| {
-                            d.child(button("push-sub", "Push branch", theme::INPUT_BG).on_click(cx.listener(move |this, _, _, cx| this.push_sub(sub_id, false, cx))))
-                        })
-                        .when(!busy && provider.is_some() && state.and_then(|s| s.request.as_ref()).is_none(), |d| {
-                            let name = provider.map(|p| p.request_name()).unwrap_or("request");
-                            d.child(button("open-request", format!("Open {name}"), theme::INPUT_BG).on_click(cx.listener(
-                                move |this, _, _, cx| this.push_sub(sub_id, true, cx),
-                            )))
-                        })
-                        .when(!busy, |d| {
-                            d.child(button("cleanup", "Clean up worktrees", theme::INPUT_BG).on_click(cx.listener(
-                                move |this, _, _, cx| this.cleanup_worktrees(sub_id, cx),
-                            )))
-                        }),
-                )
-                .when(!conflict.is_empty(), |d| {
-                    d.child(div().text_color(rgb(theme::WARN)).child(format!("Conflicts in: {}", conflict.join(", "))))
-                })
-                .children(state.and_then(|s| s.request.as_ref()).map(|r| {
-                    let url = r.url.clone();
+                .child(kv("Rule", self.policy_chip(project_id, &target, cx)))
+                .child(kv(
+                    "Confidence",
+                    match confidence {
+                        Some((score, from)) => div().flex().items_center().gap(px(8.)).child(ui::mono(from)).child(ui::score_meter(score)).into_any_element(),
+                        None => ui::mono("not reviewed").into_any_element(),
+                    },
+                ))
+                .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(status)),
+        );
+        let mut actions = div().flex().flex_col().gap(px(8.));
+        // Nothing to merge: keep the button where it'll be, greyed, with the reason.
+        if !busy && ahead == Some(0) {
+            actions = actions.child(
+                div()
+                    .id("merge-sub-idle")
+                    .tooltip(crate::shell::tip("Nothing to merge yet: the branch has no new commits"))
+                    .child(ui::disabled_button("merge-sub-off", Kind::Primary, Some(Icon::Merge), format!("Merge into {target}"))),
+            );
+        }
+        if !busy && ahead.unwrap_or(0) > 0 {
+            actions = actions.child(
+                ui::button("merge-sub", Kind::Primary, Some(Icon::Merge), format!("Merge into {target}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.merge_subproject(sub_id, cx))),
+            );
+        }
+        if !busy && !conflict.is_empty() {
+            actions = actions.child(
+                ui::button("resolve", Kind::Secondary, Some(Icon::Agent), "Resolve conflicts with an agent")
+                    .on_click(cx.listener(move |this, _, _, cx| this.resolve_conflicts(sub_id, cx))),
+            );
+        }
+        if !busy && has_origin {
+            actions = actions.child(
+                ui::button("push-sub", Kind::Secondary, Some(Icon::Push), "Push branch").on_click(cx.listener(move |this, _, _, cx| this.push_sub(sub_id, false, cx))),
+            );
+        }
+        if !busy && provider.is_some() && state.and_then(|s| s.request.as_ref()).is_none() {
+            let name = provider.map(|p| p.request_name()).unwrap_or("request");
+            actions = actions.child(
+                ui::button("open-request", Kind::Secondary, Some(Icon::External), format!("Open {name}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.push_sub(sub_id, true, cx))),
+            );
+        }
+        if !busy {
+            actions = actions.child(
+                ui::button("cleanup", Kind::Ghost, Some(Icon::Archive), "Clean up worktrees")
+                    .on_click(cx.listener(move |this, _, window, cx| this.ask_confirm(crate::feedback::ConfirmAction::CleanupWorktrees(sub_id), window, cx))),
+            );
+        }
+        if busy {
+            let doing = state
+                .and_then(|s| s.message.as_ref())
+                .filter(|(tone, _)| matches!(tone, Tone::Info))
+                .map(|(_, text)| text.clone())
+                .unwrap_or_else(|| "Working…".into());
+            actions = actions.child(ui::busy_button("merge-busy", Kind::Secondary, doing));
+        }
+        col = col.child(div().px(px(16.)).py(px(14.)).border_b_1().border_color(rgb(theme::line())).child(actions));
+        if !conflict.is_empty() {
+            col = col.child(
+                ui::panel_section("Conflicts")
+                    .child(div().flex().flex_col().gap(px(4.)).children(conflict.iter().map(|f| {
+                        div().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::red_text())).child(f.clone())
+                    }))),
+            );
+        }
+        if let Some(r) = state.and_then(|s| s.request.as_ref()) {
+            let url = r.url.clone();
+            col = col.child(
+                ui::panel_section(provider.map(|p| p.request_name()).unwrap_or("request")).child(
                     div()
                         .id("request-link")
-                        .text_color(rgb(theme::ACCENT))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
                         .cursor_pointer()
-                        .child(format!("#{} · {} · {}", r.number, r.state, r.url))
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
-                }))
-                .children(state.and_then(|s| s.message.as_ref()).map(|(tone, text)| {
-                    div().text_color(rgb(tone_color(*tone))).child(text.clone())
-                }))
-                .into_any_element(),
-        )
+                        .text_size(px(13.))
+                        .hover(|s| s.text_color(rgb(theme::text())))
+                        .child(format!("#{} · {}", r.number, r.state))
+                        .child(icon_sized(Icon::External, 13.))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+                ),
+            );
+        }
+        if let Some((tone, text)) = state.and_then(|s| s.message.as_ref()) {
+            col = col.child(div().px(px(16.)).py(px(12.)).text_size(px(12.5)).text_color(rgb(tone_color(*tone))).child(text.clone()));
+        }
+        col.into_any_element()
     }
 
     pub(crate) fn render_credentials_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let status = match self.creds_ok {
             Some(true) => "On: git in WSL uses your Windows logins (Git Credential Manager).",
-            Some(false) => "Off: git in WSL has no credentials, so pushing to GitLab/GitHub and cloning private repos will fail.",
+            Some(false) => "Off: git in WSL has no credentials, so pushing to GitLab or GitHub and cloning private repos will fail.",
             None => "Checking…",
         };
         div()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Git credentials in WSL"))
-            .child(div().text_size(px(13.)).text_color(rgb(theme::MUTED)).child(status))
+            .gap(px(8.))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Git credentials in WSL"))
+            .child(div().text_size(px(13.)).text_color(rgb(theme::text_3())).child(status))
             .when(self.creds_ok == Some(false), |d| {
                 d.child(div().flex().child(
-                    button("use-gcm", "Use my Windows Git credentials in WSL", theme::INPUT_BG)
+                    ui::button("use-gcm", Kind::Secondary, Some(Icon::Key), "Use my Windows Git credentials in WSL")
                         .on_click(cx.listener(|this, _, _, cx| this.enable_windows_credentials(cx))),
                 ))
             })
             .into_any_element()
-    }
-}
-
-fn policy_color(policy: Policy) -> u32 {
-    match policy {
-        Policy::Auto => theme::GOOD,
-        Policy::Ask => theme::WARN,
-        Policy::Confirm => theme::BAD,
     }
 }

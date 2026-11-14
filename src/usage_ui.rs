@@ -353,10 +353,10 @@ impl Monaged {
             .w_full()
             .h(px(height))
             .rounded_full()
-            .bg(rgb(theme::BORDER))
+            .bg(rgb(theme::line()))
             .relative()
-            .child(div().absolute().left_0().top_0().h_full().rounded_full().bg(rgb(theme::MUTED)).w(gpui::relative(week / 100.0)))
-            .child(div().absolute().left_0().top_0().h_full().rounded_full().bg(rgb(theme::ACCENT)).w(gpui::relative(mine / 100.0)))
+            .child(div().absolute().left_0().top_0().h_full().rounded_full().bg(rgb(theme::text_3())).w(gpui::relative(week / 100.0)))
+            .child(div().absolute().left_0().top_0().h_full().rounded_full().bg(rgb(theme::text())).w(gpui::relative(mine / 100.0)))
             .when(self.budget.share_pct < 100, |d| {
                 d.child(
                     div()
@@ -364,44 +364,10 @@ impl Monaged {
                         .top_0()
                         .h_full()
                         .w(px(2.))
-                        .bg(rgb(theme::WARN))
+                        .bg(rgb(theme::red_text()))
                         .left(gpui::relative(self.budget.share_pct as f32 / 100.0)),
                 )
             })
-    }
-
-    /// The sidebar's usage line; click for details.
-    pub(crate) fn render_usage_meter(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let week = self.week_pct()?;
-        let mine = self.meter.live_share() * 100.0;
-        let blocked = self.budget_block();
-        let cap = if self.budget.share_pct >= 100 { "no cap".to_string() } else { format!("of {}%", self.budget.share_pct) };
-        Some(
-            div()
-                .id("usage-meter")
-                .px_4()
-                .py_2()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .border_t_1()
-                .border_color(rgb(theme::BORDER))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::HOVER)))
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .text_size(px(11.))
-                        .text_color(rgb(if blocked.is_some() { theme::WARN } else { theme::MUTED }))
-                        .child(format!("Week {week:.0}%"))
-                        .child(format!("Monaged ≈{mine:.1}% {cap}")),
-                )
-                .child(self.usage_bar(4.))
-                .when(blocked.is_some(), |d| d.child(div().text_size(px(11.)).text_color(rgb(theme::WARN)).child("Automatic work paused")))
-                .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
-                .into_any_element(),
-        )
     }
 
     /// Shown above the content while agents wait on the budget.
@@ -418,19 +384,19 @@ impl Monaged {
                 .gap_3()
                 .px_4()
                 .py_2()
-                .bg(rgb(theme::PANEL))
+                .bg(rgb(theme::panel()))
                 .border_b_1()
-                .border_color(rgb(theme::WARN))
+                .border_color(rgb(theme::red_text()))
                 .text_size(px(13.))
                 .child(div().flex_1().min_w(px(0.)).child(format!(
                     "{paused} agent{} paused. {message}",
                     if paused == 1 { "" } else { "s" }
                 )))
-                .child(button("resume-anyway", "Resume anyway", theme::INPUT_BG).on_click(cx.listener(|this, _, _, cx| {
+                .child(button("resume-anyway", "Resume anyway", theme::raised()).on_click(cx.listener(|this, _, _, cx| {
                     this.resume_paused(true);
                     cx.notify();
                 })))
-                .child(button("budget-settings", "Budget", theme::INPUT_BG).on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))))
+                .child(button("budget-settings", "Budget", theme::raised()).on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))))
                 .into_any_element(),
         )
     }
@@ -447,14 +413,8 @@ impl Monaged {
         }
     }
 
-    /// "$3.10 this week · ≈0.6%" for a subproject header.
-    pub(crate) fn sub_usage_label(&self, sub_id: i64) -> Option<String> {
-        let cost = *self.sub_costs.get(&sub_id)?;
-        (cost > 0.0).then(|| format!("${cost:.2} this week · ≈{:.1}% of it", cost * self.meter.share_per_usd() * 100.0))
-    }
-
     pub(crate) fn render_usage_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = |text: String| div().text_size(px(13.)).text_color(rgb(theme::MUTED)).child(text);
+        let muted = |text: String| div().text_size(px(13.)).text_color(rgb(theme::text_3())).child(text);
         let mut col = div().flex().flex_col().gap_3();
         match &self.plan_usage.week {
             Some(week) => {
@@ -501,11 +461,11 @@ impl Monaged {
                     .gap_3()
                     .text_size(px(13.))
                     .child(div().w(px(220.)).flex_none().child(name))
-                    .child(div().text_color(rgb(theme::MUTED)).child(format!("${cost:.2} · ≈{:.1}%", cost * k * 100.0))),
+                    .child(div().text_color(rgb(theme::text_3())).child(format!("${cost:.2} · ≈{:.1}%", cost * k * 100.0))),
             );
         }
         if let Some(block) = self.budget_block() {
-            col = col.child(div().text_size(px(13.)).text_color(rgb(theme::WARN)).child(block.message()));
+            col = col.child(div().text_size(px(13.)).text_color(rgb(theme::red_text())).child(block.message()));
         }
 
         let chips = |id: &'static str, values: &[u32], current: u32, label: fn(u32) -> String, ceiling: bool, cx: &mut Context<Self>| {
@@ -518,10 +478,10 @@ impl Monaged {
                     .rounded_md()
                     .border_1()
                     .text_size(px(13.))
-                    .border_color(rgb(if selected { theme::ACCENT } else { theme::BORDER }))
-                    .when(selected, |d| d.bg(rgb(theme::SELECTED)))
+                    .border_color(rgb(if selected { theme::text() } else { theme::line() }))
+                    .when(selected, |d| d.bg(rgb(theme::selected())))
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(theme::HOVER)))
+                    .hover(|s| s.bg(rgb(theme::hover())))
                     .child(label(v))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if ceiling { this.set_budget(None, Some(v), cx) } else { this.set_budget(Some(v), None, cx) }
@@ -548,7 +508,7 @@ impl Monaged {
             .filter(|v| self.models.is_empty() || self.models.iter().any(|(m, _)| m == v))
             .collect();
         let mut col = div().flex().flex_col().gap_2();
-        col = col.child(div().text_size(px(13.)).text_color(rgb(theme::MUTED)).child(
+        col = col.child(div().text_size(px(13.)).text_color(rgb(theme::text_3())).child(
             "Which model each role uses. Cheaper models stretch your weekly usage: reading, checking and merging \
              rarely need the strongest one. Applies to agents started (or reopened) from now on.",
         ));
@@ -565,10 +525,10 @@ impl Monaged {
                     .rounded_md()
                     .border_1()
                     .text_size(px(12.))
-                    .border_color(rgb(if selected { theme::ACCENT } else { theme::BORDER }))
-                    .when(selected, |d| d.bg(rgb(theme::SELECTED)))
+                    .border_color(rgb(if selected { theme::text() } else { theme::line() }))
+                    .when(selected, |d| d.bg(rgb(theme::selected())))
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(theme::HOVER)))
+                    .hover(|s| s.bg(rgb(theme::hover())))
                     .child(name)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_model_for(key, &value, cx)))
             });

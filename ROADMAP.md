@@ -208,6 +208,96 @@ Found while testing:
 - Switching an existing conversation to another model rebuilds its prompt cache once. It's cheap for new agents, more for long conversations.
 - The share is an estimate. Your own Claude use at the same time pushes it up, never down.
 
+### Design overhaul (done 2026-11-14)
+Researched against Claude desktop, Zed, Nothing OS, IntelliJ (New UI), Raycast and Resend, plus UI-psychology basics (pre-attentive cues, von Restorff, Gestalt grouping, progressive disclosure, 50–75 character lines, motion as feedback). The mockup is in `design/mockup.html` next to the app folder.
+
+- [x] **Rules:**
+  - monochrome first, with one accent, red, that only ever means "needs you";
+  - two font weights;
+  - hairlines instead of boxes, and shadows only on floating layers;
+  - small radii (4–8);
+  - the machine's real data (branches, IDs, costs) in mono;
+  - dot-matrix numerals only for the few numbers that matter.
+- [x] **Themes:** Carbon (near-black, default), Graphite (dim grey), Clay (warm, like the Claude app), Paper (light), or follow Windows' light/dark mode. Every colour is a role in `theme.rs`, switched live from Settings → Appearance or the palette.
+- [x] **Shell:**
+  - **Title bar:** Monaged's own, with breadcrumbs, a centred search that opens the palette, and native minimize, maximize and close (snap layouts work).
+  - **Sidebar tree:** projects › subprojects › agents with status dots and score meters, under a "Needs you" inbox.
+  - **Inspector:** Pipeline, Board and Merge tabs.
+  - **Status bar:** connection, distro, agents working, branch, weekly usage and Monaged's share.
+- [x] **Wide screens:** the agent area splits into panes of at least 600px:
+  - the focused agent, plus agents that are working or waiting on you;
+  - Ctrl-click in the tree opens one beside it;
+  - spare room shows the focused agent's Changes next to its conversation.
+  - 3440px at 125% scaling gives three panes plus the inspector. A narrow window shows one agent with a Conversation/Changes switch.
+- [x] **Reading:** a 680px column (about 72 characters), Markdown at 14/22, your messages as quiet bubbles, tool calls as one mono line with an icon each.
+- [x] **Command palette (Ctrl K):** jump to any project, subproject or agent, or run an action or switch theme; arrows to move, Enter to run.
+- [x] **Shortcuts:** Ctrl B sidebar, Ctrl Alt B inspector, Ctrl , settings.
+- [x] **Icons:** 40 line icons drawn for Monaged (16px, 1.4px stroke), embedded in the binary.
+- [x] **Motion:** working agents and the current pipeline stage pulse slowly, and the palette fades in over 140ms. Everything else is instant, and nothing moves when Windows' "Show animations" is off.
+
+**Not done yet:** a combined diff for a whole subproject.
+
+### UX pass (done 2026-11-14)
+One rule for where a message goes:
+- an **event** (something happened) is a toast, bottom right: information fades after a few seconds, errors stay until closed and have a Copy button;
+- a **condition** (offline, not logged in, paused by the budget) is a bar above the content until it's fixed;
+- a **problem with a field** shows under that field.
+
+- [x] **Toasts** replace the single banner. Long jobs (merging, copying the git identity) show a spinner toast that turns into the result. A toast can carry one action: Open, Retry, Reconnect, Fix in Settings, Copy.
+- [x] **Background agents tell you:** a free agent you aren't looking at says when it finished; any hidden agent says when it asks for permission. A failed session offers Retry.
+- [x] **Connection:** when the Claude process dies, Monaged reconnects by itself after 2, 6 and 15 seconds, with a countdown in a bar and the status bar, then waits for **Reconnect now**. The bar has **Copy details**.
+- [x] **Loading:**
+  - a spinner wherever something runs for seconds (making a worktree, reviewing, reading a diff, summaries);
+  - skeletons where content is about to appear (reopening a conversation, the diff, the Merge tab), so nothing jumps;
+  - in agent panes, the session's own state: waiting for Claude, starting, reopening, failed with **Try again**.
+- [x] **Working line:** while a turn runs, the end of the conversation says what the agent is doing (thinking, writing, running a tool, waiting for your answer) and for how long, with Esc to stop.
+- [x] **Latest:** scrolled up while an agent writes? A **Latest** button takes you back down.
+- [x] **Menus:** right-click any project, subproject or agent in the tree, or use the ⋯ that appears when you point at a row or in an agent's header: open, open beside, show changes, review, open in Zed, copy path or branch, stop, restart the session, pipeline/board/merge, clean up. Arrows and Enter work in menus.
+- [x] **Confirm dialogs** for steps that can't be undone: stopping a pipeline, removing the API key, cleaning up worktrees, promoting into the top branch. Enter confirms, Esc cancels.
+- [x] **Buttons:** pressed states, a busy state with a spinner that keeps the button's size, a disabled state with the reason in a tooltip (for example "Merge" with nothing to merge), and primary and danger colours that hold in every theme.
+- [x] **Forms:** the field that's wrong turns red with the problem under it, and both clear as you type. Submitting shows "Cloning…" or "Setting up…" on the button.
+- [x] **Settings:** a section list on the left that jumps to a section and follows your scrolling.
+- [x] **Keyboard:** Ctrl / shows every shortcut, Alt ↑/↓ moves between agents, Ctrl N makes an agent in the current subproject. Tooltips show the shortcut for their button.
+- [x] **Window:** Monaged remembers its size, position and maximized state, and whether the sidebar was open.
+- [x] **Fixed:** long replies were measured narrower than they're drawn, so their last lines (and the notes under them) sat past the end of the scroll area. The conversation column now gets an exact width.
+
+### Next ideas
+Grouped by what they'd change. Nothing here is started.
+
+**Working with agents**
+- Shift+Enter for multi-line messages, and a message history (↑ in an empty box).
+- Attach files or a screenshot to a message; paste an image.
+- Slash commands in the message box (`/review`, `/stop`, `/model sonnet`).
+- Per-agent model and effort switch in the header.
+- Search inside a conversation (Ctrl F) and across all agents.
+- Pin, rename, archive and restore agents from the menu.
+- Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
+
+**Seeing what happened**
+- A combined diff for a whole subproject, and inline comments on diff lines that go back to the agent.
+- A timeline per subproject: turns, merges, reviews and costs on one line.
+- Notifications in the Windows notification centre when the window isn't focused.
+- A morning summary: what finished overnight, what waits for you, what it cost.
+
+**Pipeline and merging**
+- Edit the plan before approving it (drag workstreams, change file ownership).
+- Re-run a single stage or builder instead of the whole pipeline.
+- Merge-queue view across subprojects; CI status from GitHub/GitLab next to each branch.
+
+**Layout and looks**
+- Drag to resize the sidebar, inspector and panes; drag an agent into a pane.
+- Saved layouts per project (which agents sit side by side).
+- Zen mode: one conversation, no chrome.
+- Command palette that also searches files in worktrees and opens them in Zed.
+- Accent per project (still never red), compact density option.
+
+**Reliability**
+- Crash-safe queued messages (survive a restart).
+- A health page: WSL, the adapter, Claude login, git identity, GCM, disk space of worktrees.
+- Auto-update and a signed installer.
+
+### Later
+
 ### Later
 - Standing subprojects on a schedule (for example a weekly security pass)
 - Recording conversations into Delta threads (the Delta CLI has a producer API: `thread create/append/capture`)

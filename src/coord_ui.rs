@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 use crate::agent::Tone;
 use crate::coord::{self, ToolReply, ToolRequest};
 use crate::pipeline::{self, Directive, Role};
+use crate::icons::{Icon, icon};
 use crate::review_ui::render_markdown;
 use crate::store::BoardEntry;
-use crate::{Monaged, llm, theme};
+use crate::{Monaged, llm, theme, ui};
 
 /// A question from one agent to another that hasn't been answered yet.
 pub(crate) struct Ask {
@@ -499,30 +500,38 @@ impl Monaged {
         cx.notify();
     }
 
+    /// The inspector's Board tab: questions in flight, who owns which files,
+    /// and every entry, newest first.
     pub(crate) fn render_board(&self, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
-        let mut column = div().flex().flex_col().gap_3().p_4();
+        let mut column = div().flex().flex_col();
         column = column.child(
-            div()
-                .text_size(px(13.))
-                .text_color(rgb(theme::MUTED))
-                .child("Agents post contracts, decisions and answers here with Monaged's tools. Each agent gets new contracts and decisions (and notes that touch its files) with its next message; questions go to Monaged's librarian first."),
+            div().px(px(16.)).py(px(12.)).border_b_1().border_color(rgb(theme::line())).text_size(px(12.5)).line_height(px(18.)).text_color(rgb(theme::text_3())).child(
+                "Agents post contracts, decisions and answers here. Each gets new contracts and decisions with its next message; questions go to the librarian first.",
+            ),
         );
 
         // Questions in flight.
         let open: Vec<&Ask> = self.asks.iter().filter(|a| self.sub_of(a.to) == Some(sub_id)).collect();
         if !open.is_empty() {
-            let rows = open.iter().map(|a| {
+            column = column.child(ui::panel_section("Open questions").children(open.iter().map(|a| {
                 let secs = a.at.elapsed().as_secs();
-                let state = if a.waiting() { format!("waiting {}m{:02}s", secs / 60, secs % 60) } else { "timed out; the answer will go on the board".into() };
+                let state = if a.waiting() { format!("waiting {}m{:02}s", secs / 60, secs % 60) } else { "timed out, answer goes on the board".into() };
                 div()
                     .flex()
-                    .gap_2()
-                    .text_size(px(13.))
-                    .child(div().font_family("Consolas").child(format!("{} → {}", self.agent_name(a.from), self.agent_name(a.to))))
-                    .child(div().flex_1().min_w(px(0.)).child(crate::review::clip(&a.question, 160)))
-                    .child(div().text_color(rgb(theme::MUTED)).child(state))
-            });
-            column = column.child(section("Open questions").children(rows));
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(ui::status_dot(("ask-dot", a.id as usize), if a.waiting() { ui::State::Working } else { ui::State::Idle }))
+                            .child(ui::mono(format!("{} → {}", self.agent_name(a.from), self.agent_name(a.to))))
+                            .child(div().flex_1())
+                            .child(ui::mono(state)),
+                    )
+                    .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(crate::review::clip(&a.question, 200)))
+            })));
         }
 
         // Who owns what.
@@ -533,89 +542,93 @@ impl Monaged {
             .filter_map(|a| {
                 let owned = self.owned_paths(a.record.id);
                 (!owned.is_empty()).then(|| {
-                    let paths = owned.iter().map(|(p, how)| if *how == "claimed" { format!("{p} (claimed)") } else { p.clone() }).collect::<Vec<_>>().join(", ");
                     div()
                         .flex()
-                        .gap_2()
-                        .text_size(px(13.))
-                        .child(div().font_family("Consolas").min_w(px(140.)).child(a.record.name.clone()))
-                        .child(div().flex_1().min_w(px(0.)).font_family("Consolas").text_color(rgb(theme::MUTED)).child(paths))
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(div().text_size(px(12.5)).text_color(rgb(theme::text())).child(a.record.name.clone()))
+                        .child(div().flex().flex_wrap().gap(px(4.)).children(owned.into_iter().map(|(p, how)| {
+                            div()
+                                .px(px(5.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(rgb(theme::line_strong()))
+                                .font_family(theme::MONO)
+                                .text_size(px(11.))
+                                .text_color(rgb(if how == "claimed" { theme::text_3() } else { theme::text_2() }))
+                                .child(if how == "claimed" { format!("{p} (claimed)") } else { p })
+                        })))
                         .into_any_element()
                 })
             })
             .collect();
         if !owners.is_empty() {
-            column = column.child(section("Files").children(owners));
+            column = column.child(ui::panel_section("Files").children(owners));
         }
 
         let entries: Vec<&BoardEntry> = self.board.iter().filter(|e| e.subproject_id == sub_id).rev().collect();
         if entries.is_empty() {
             column = column.child(
                 div()
-                    .py_6()
-                    .text_color(rgb(theme::MUTED))
+                    .px(px(16.))
+                    .py(px(18.))
+                    .text_size(px(13.))
+                    .text_color(rgb(theme::text_3()))
                     .child("Nothing on the board yet. Builders post here when they settle a contract or ask each other something."),
             );
         }
         for e in entries {
             let id = e.id;
-            let color = match e.kind.as_str() {
-                "contract" => theme::ACCENT,
-                "decision" => theme::WARN,
-                "answer" => theme::GOOD,
-                _ => theme::MUTED,
-            };
             column = column.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1p5()
-                    .p_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
+                    .gap(px(6.))
+                    .px(px(16.))
+                    .py(px(14.))
+                    .border_b_1()
+                    .border_color(rgb(theme::line()))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .child(div().text_size(px(11.)).text_color(rgb(color)).font_weight(FontWeight::MEDIUM).child(e.kind.to_uppercase()))
-                            .child(div().flex_1().min_w(px(0.)).font_weight(FontWeight::MEDIUM).child(e.title.clone()))
-                            .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(format!("#{} · {} · {}", e.id, e.author, ago(e.at))))
+                            .gap(px(8.))
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("board-remove-{id}")))
-                                    .text_size(px(12.))
-                                    .text_color(rgb(theme::MUTED))
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(rgb(theme::TEXT)))
-                                    .child("Remove")
+                                    .font_family(theme::MONO)
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(if e.kind == "contract" { theme::text() } else { theme::text_3() }))
+                                    .child(e.kind.to_uppercase()),
+                            )
+                            .child(ui::mono(format!("#{} · {} · {}", e.id, e.author, ago(e.at))))
+                            .child(div().flex_1())
+                            .child(
+                                ui::icon_button(SharedString::from(format!("board-remove-{id}")), Icon::X)
+                                    .size(px(22.))
+                                    .tooltip(crate::shell::tip("Remove from the board"))
                                     .on_click(cx.listener(move |this, _, _, cx| this.remove_board_entry(id, cx))),
                             ),
                     )
-                    .when(!e.paths.is_empty(), |d| {
-                        d.child(div().font_family("Consolas").text_size(px(12.)).text_color(rgb(theme::MUTED)).child(e.paths.join(", ")))
-                    })
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())).child(e.title.clone()))
+                    .when(!e.paths.is_empty(), |d| d.child(ui::mono(e.paths.join(", "))))
                     .child(div().text_size(px(13.)).child(render_markdown(&e.body))),
             );
         }
-        div().id("board-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().child(column).into_any_element()
+        column.into_any_element()
     }
 }
 
 /// A message Monaged sent on an agent's behalf: another agent's question, or
 /// a message with board updates attached (shown folded).
 pub(crate) fn render_user_message(text: &str) -> AnyElement {
-    let card = || div().px_3().py_2().rounded_lg().text_size(px(13.)).flex().flex_col().gap_1();
     if text.starts_with("[monaged-ask #") {
         let first = text.lines().next().unwrap_or_default();
         let asker = first.split("] ").nth(1).and_then(|r| r.split(" asks").next()).unwrap_or("Another agent");
         let question: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("> ").or_else(|| (l == ">").then_some(""))).collect();
-        return card()
-            .border_1()
-            .border_color(rgb(theme::BORDER))
-            .child(div().text_color(rgb(theme::MUTED)).child(format!("Question from {asker}, via Monaged")))
-            .child(div().child(question.join("\n")))
+        return ui::card()
+            .gap(px(6.))
+            .child(div().flex().items_center().gap(px(8.)).child(icon(Icon::Ask).size(px(14.))).child(ui::label(format!("Question from {asker}"))))
+            .child(div().text_size(px(13.5)).text_color(rgb(theme::text())).child(question.join("\n")))
             .into_any_element();
     }
     let (message, digest) = text.split_once(&format!("\n\n---\n{}", coord::DIGEST_HEADER)).unwrap_or((text, ""));
@@ -623,28 +636,36 @@ pub(crate) fn render_user_message(text: &str) -> AnyElement {
     div()
         .flex()
         .flex_col()
-        .gap_1()
-        .child(div().px_3().py_2().rounded_lg().bg(rgb(theme::USER_BG)).child(message.to_string()))
-        .child(div().pl_3().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(format!(
-            "+ {entries} board update{} attached by Monaged",
-            if entries == 1 { "" } else { "s" }
-        )))
+        .items_end()
+        .gap(px(4.))
+        .child(
+            div()
+                .max_w(gpui::relative(0.85))
+                .px(px(13.))
+                .py(px(9.))
+                .rounded(px(10.))
+                .bg(rgb(theme::raised()))
+                .border_1()
+                .border_color(rgb(theme::line()))
+                .text_size(px(14.))
+                .line_height(px(21.))
+                .child(message.to_string()),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(11.5))
+                .text_color(rgb(theme::text_3()))
+                .child(icon(Icon::Board).size(px(12.)).text_color(rgb(theme::text_3())))
+                .child(format!("{entries} board update{} attached by Monaged", if entries == 1 { "" } else { "s" })),
+        )
         .into_any_element()
 }
 
 fn agent_id_sub(this: &Monaged, agent_id: i64) -> i64 {
     this.agent(agent_id).map(|a| a.record.subproject_id).unwrap_or_default()
-}
-
-fn section(title: &str) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1p5()
-        .p_3()
-        .rounded_lg()
-        .bg(rgb(theme::PANEL))
-        .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).font_weight(FontWeight::MEDIUM).child(title.to_uppercase()))
 }
 
 fn ago(at: i64) -> String {

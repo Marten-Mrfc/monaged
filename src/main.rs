@@ -9,45 +9,54 @@ mod agent;
 mod coord;
 mod coord_ui;
 mod diff;
+mod dots;
+mod feedback;
 mod git;
 mod hosting;
+mod icons;
 mod llm;
 mod markdown;
+mod menu;
 mod merge_ui;
+mod palette;
 mod pipeline;
 mod pipeline_ui;
 mod review;
 mod review_ui;
 mod secrets;
+mod shell;
 mod store;
 #[cfg(test)]
 mod tests;
 mod text_input;
 mod theme;
+mod ui;
 mod usage;
 mod usage_ui;
 mod wsl;
 mod zed;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use futures::StreamExt;
 use gpui::{
-    AnyElement, App, AppContext, Application, Bounds, ClipboardItem, Context, ElementId, Entity,
-    FocusHandle, Focusable, FontWeight, KeyBinding, ScrollHandle, SharedString, Stateful,
-    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, rgb, size,
+    App, AppContext, Application, Bounds, Context, ElementId, Entity, FocusHandle, Focusable, KeyBinding, ScrollHandle,
+    SharedString, Stateful, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+    prelude::*, px, size,
 };
 use serde_json::{Value, json};
 
 use acp::{AgentConfig, AgentEvent, AgentWriter};
-use agent::{AgentTab, AgentView, Item, Status, Tone, Turn};
+use agent::{AgentView, Item, Status, Tone, Turn};
 use pipeline::{Pipeline, Role};
 use store::{Project, Store, Subproject};
 use text_input::TextInput;
 
-actions!(monaged, [Submit, Cancel]);
+actions!(
+    monaged,
+    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent]
+);
 
 /// Quoted so neither PowerShell nor cmd rewrites the `~`; bash expands it.
 const LOGIN_COMMAND: &str = r#"wsl -d Ubuntu -- bash -lc "~/.local/share/claude-agent-acp/current/claude""#;
@@ -98,6 +107,8 @@ enum Form {
         folder: Entity<TextInput>,
         busy: bool,
         error: Option<String>,
+        /// The field the error is about (its label), shown under that field.
+        invalid: Option<&'static str>,
     },
     NewSubproject {
         project_id: i64,
@@ -109,12 +120,14 @@ enum Form {
         auto_mode: bool,
         busy: bool,
         error: Option<String>,
+        invalid: Option<&'static str>,
     },
     StartPipeline {
         sub_id: i64,
         request: Entity<TextInput>,
         auto_mode: bool,
         error: Option<String>,
+        invalid: Option<&'static str>,
     },
     Settings {
         error: Option<String>,
@@ -143,8 +156,8 @@ struct Monaged {
     sel_sub: Option<i64>,
     sel_agent: Option<i64>,
     form: Option<Form>,
-    banner: Option<(Tone, String)>,
-    creating_agent: bool,
+    /// The subproject an agent is being created in (its worktree is on the way).
+    creating_agent: Option<i64>,
     // Review (Phase 2).
     api_key: Option<String>,
     cli_fallback: bool,
@@ -159,8 +172,6 @@ struct Monaged {
     // Merging (Phase 5).
     branch_info: HashMap<i64, merge_ui::BranchInfo>,
     merges: HashMap<i64, merge_ui::MergeState>,
-    /// A promotion into the top branch waiting for its second click.
-    promote_confirm: Option<(i64, String, String)>,
     /// Git in WSL uses Windows' credential manager.
     creds_ok: Option<bool>,
     // Coordination (Phase 4).
@@ -169,8 +180,6 @@ struct Monaged {
     claims: Vec<(i64, String)>,
     asks: Vec<coord_ui::Ask>,
     next_ask: u64,
-    /// The subproject view shows the board instead of an agent.
-    board_open: bool,
     _bridge: Task<()>,
     // Usage (Phase 6).
     meter: usage::Meter,
@@ -193,9 +202,34 @@ struct Monaged {
     sessions: HashMap<String, i64>,
     logged_in: Option<bool>,
     // UI.
-    input: Entity<TextInput>,
     focus: FocusHandle,
-    scroll: ScrollHandle,
+    sidebar_open: bool,
+    inspector_open: bool,
+    inspector_tab: shell::InspectorTab,
+    /// Projects folded shut in the sidebar tree.
+    collapsed: HashSet<i64>,
+    /// Agents opened beside the focused one (wide windows).
+    pinned: Vec<i64>,
+    /// One message box and scroll position per agent pane.
+    inputs: HashMap<i64, Entity<TextInput>>,
+    scrolls: HashMap<i64, ScrollHandle>,
+    /// Put the cursor in this agent's message box on the next frame.
+    focus_request: Option<i64>,
+    palette: Option<palette::PaletteState>,
+    menu: Option<menu::MenuState>,
+    confirm: Option<feedback::Confirm>,
+    shortcuts_open: bool,
+    toasts: Vec<feedback::Toast>,
+    next_toast: u64,
+    /// Toasts raised while handling a message (no `cx` there); shown right after.
+    queued_toasts: Vec<(Tone, String, Option<(&'static str, feedback::ToastAction)>)>,
+    reconnect: feedback::Reconnect,
+    settings_scroll: ScrollHandle,
+    _clock: Task<()>,
+    /// "system" or a theme key.
+    theme_key: String,
+    _appearance: Option<Subscription>,
+    _bounds: Subscription,
     _events: Task<()>,
     _quit: Subscription,
 }
@@ -244,8 +278,19 @@ impl Monaged {
                 (None, Task::ready(()))
             }
         };
-        let input = cx.new(|cx| TextInput::new("Message this agent. Enter to send, Esc to stop.", cx));
-        window.focus(&input.focus_handle(cx));
+        let theme_key = store.setting("theme").unwrap_or_else(|| "carbon".into());
+        let sidebar_open = store.setting("ui:sidebar").is_none_or(|v| v == "1");
+        // Remember the window's place and size (restored at the next start).
+        let bounds_watch = cx.observe_window_bounds(window, |this: &mut Self, window, _cx| {
+            let _ = this.store.set_setting("ui:window", &format_bounds(window.window_bounds()));
+        });
+        let inspector_open = store.setting("ui:inspector").map_or(f32::from(window.viewport_size().width) >= 1500., |v| v == "1");
+        let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+            if this.theme_key == "system" {
+                this.apply_theme(window);
+                cx.notify();
+            }
+        });
         let quit = cx.on_app_quit(|this: &mut Self, _cx| {
             if let Some(writer) = &this.writer {
                 writer.kill();
@@ -275,8 +320,7 @@ impl Monaged {
             sel_sub: None,
             sel_agent: None,
             form: None,
-            banner: None,
-            creating_agent: false,
+            creating_agent: None,
             api_key: secrets::load_api_key(),
             cli_fallback,
             auto_review,
@@ -286,14 +330,12 @@ impl Monaged {
             identity_missing: false,
             branch_info: HashMap::new(),
             merges: HashMap::new(),
-            promote_confirm: None,
             creds_ok: None,
             bridge,
             board,
             claims,
             asks: Vec::new(),
             next_ask: 1,
-            board_open: false,
             _bridge: bridge_task,
             meter: usage_state.meter,
             budget: usage_state.budget,
@@ -309,9 +351,28 @@ impl Monaged {
             pending: HashMap::new(),
             sessions: HashMap::new(),
             logged_in: None,
-            input,
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            sidebar_open,
+            inspector_open,
+            inspector_tab: shell::InspectorTab::Pipeline,
+            collapsed: HashSet::new(),
+            pinned: Vec::new(),
+            inputs: HashMap::new(),
+            scrolls: HashMap::new(),
+            focus_request: None,
+            palette: None,
+            menu: None,
+            confirm: None,
+            shortcuts_open: false,
+            toasts: Vec::new(),
+            next_toast: 1,
+            queued_toasts: Vec::new(),
+            reconnect: feedback::Reconnect::default(),
+            settings_scroll: ScrollHandle::new(),
+            _clock: Self::start_clock(cx),
+            theme_key,
+            _appearance: Some(appearance),
+            _bounds: bounds_watch,
             _events: Task::ready(()),
             _quit: quit,
         };
@@ -320,6 +381,8 @@ impl Monaged {
             agent.cost_seen = this.store.setting(&format!("agent:{}:cost_seen", agent.record.id)).and_then(|v| v.parse().ok());
         }
         this.reload_sub_costs();
+        this.apply_theme(window);
+        window.focus(&this.focus);
         this.connect(cx);
         this.check_credentials(cx);
         if let Some(project_id) = this.sel_project {
@@ -334,6 +397,7 @@ impl Monaged {
             writer.kill();
         }
         self.conn = Conn::Starting;
+        self.reconnect.at = None;
         self.drop_live_sessions();
         let mut events = acp::launch(self.config.clone());
         self._events = cx.spawn(async move |view, cx| {
@@ -364,6 +428,14 @@ impl Monaged {
 
     fn agent(&self, id: i64) -> Option<&AgentView> {
         self.agents.iter().find(|agent| agent.record.id == id)
+    }
+
+    /// Roughly: is this agent in a pane you can see right now?
+    fn agent_on_screen(&self, id: i64) -> bool {
+        let Some(agent) = self.agent(id) else { return false };
+        self.form.is_none()
+            && self.sel_sub == Some(agent.record.subproject_id)
+            && (self.sel_agent == Some(id) || self.pinned.contains(&id) || agent.is_working())
     }
 
     // ---- JSON-RPC plumbing ------------------------------------------------
@@ -417,18 +489,26 @@ impl Monaged {
                 self.conn = Conn::Failed(err);
                 self.writer = None;
                 self.drop_live_sessions();
+                self.schedule_reconnect(cx);
             }
             AgentEvent::Exited(code) => {
                 let code = code.map_or("unknown".into(), |c| c.to_string());
                 self.conn = Conn::Failed(format!("The Claude process stopped (exit code {code})."));
                 self.writer = None;
                 self.drop_live_sessions();
+                self.schedule_reconnect(cx);
             }
         }
         for agent_id in std::mem::take(&mut self.finished_turns) {
             self.after_turn(agent_id, cx);
         }
-        self.scroll.scroll_to_bottom();
+        for (tone, text, action) in std::mem::take(&mut self.queued_toasts) {
+            match action {
+                Some((label, action)) => self.toast_action(tone, text, label, action, cx),
+                None => self.toast(tone, text, cx),
+            }
+        }
+        self.follow_all();
         cx.notify();
     }
 
@@ -454,6 +534,12 @@ impl Monaged {
                     if let Some(agent) = self.agent_mut(agent_id) {
                         agent.status = Status::Failed(text.clone());
                         agent.notice(Tone::Error, format!("Couldn't start a session: {text}"));
+                        let name = agent.record.name.clone();
+                        self.queued_toasts.push((
+                            Tone::Error,
+                            format!("Couldn't start {name}'s session: {text}"),
+                            Some(("Retry", feedback::ToastAction::RetrySession(agent_id))),
+                        ));
                     }
                 }
                 Pending::LoadSession(agent_id) => {
@@ -471,7 +557,7 @@ impl Monaged {
                     self.flush_queued_prompt(agent_id);
                 }
                 Pending::Prompt(agent_id) => {
-                    let hint = if self.logged_in == Some(false) { " You're not logged in yet (see the banner)." } else { "" };
+                    let hint = if self.logged_in == Some(false) { " You're not logged in yet (see the bar at the top)." } else { "" };
                     if let Some(agent) = self.agent_mut(agent_id) {
                         agent.turn = None;
                         agent.notice(Tone::Error, format!("Claude couldn't answer: {text}.{hint}"));
@@ -485,6 +571,7 @@ impl Monaged {
         match kind {
             Pending::Initialize => {
                 self.conn = Conn::Ready;
+                self.reconnect.attempts = 0;
                 // The selected agent, plus any agent with a message waiting (e.g. a role brief).
                 let mut open: Vec<i64> = self.agents.iter().filter(|a| a.queued_prompt.is_some()).map(|a| a.record.id).collect();
                 open.extend(self.sel_agent);
@@ -591,6 +678,14 @@ impl Monaged {
                 && let Some(agent) = self.agent_mut(agent_id)
             {
                 agent.add_permission_request(id, params);
+                let (name, sub_id) = (agent.record.name.clone(), agent.record.subproject_id);
+                if !self.agent_on_screen(agent_id) {
+                    self.queued_toasts.push((
+                        Tone::Warn,
+                        format!("{name} asks for permission"),
+                        Some(("Open", feedback::ToastAction::Open { sub_id, agent_id: Some(agent_id) })),
+                    ));
+                }
                 return;
             }
         }
@@ -652,28 +747,32 @@ impl Monaged {
         self.sel_agent = first_agent;
         if let Some(agent_id) = first_agent {
             self.ensure_session(agent_id);
+            self.focus_request = Some(agent_id);
+            if let Some(handle) = self.scrolls.get(&agent_id) {
+                handle.scroll_to_bottom();
+            }
         }
-        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
     fn select_agent(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         self.sel_agent = Some(agent_id);
-        self.board_open = false;
+        self.focus_request = Some(agent_id);
         self.ensure_session(agent_id);
-        self.scroll.scroll_to_bottom();
+        if let Some(handle) = self.scrolls.get(&agent_id) {
+            handle.scroll_to_bottom();
+        }
         cx.notify();
     }
 
     fn open_in_zed(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(user) = self.linux_user.clone() else {
-            self.banner = Some((Tone::Warn, "Still finding your WSL user name; try again in a second.".into()));
-            cx.notify();
+            self.toast(Tone::Warn, "Still finding your WSL user name; try again in a second.", cx);
             return;
         };
-        if let Err(err) = zed::open(&self.config.distro, &user, &path) {
-            self.banner = Some((Tone::Error, format!("{err:#}")));
-            cx.notify();
+        match zed::open(&self.config.distro, &user, &path) {
+            Ok(()) => self.toast(Tone::Info, format!("Opening {} in Zed", last_segment(&path)), cx),
+            Err(err) => self.toast_error(format!("Couldn't open Zed: {err:#}"), cx),
         }
     }
 
@@ -684,7 +783,7 @@ impl Monaged {
         let url = cx.new(|cx| TextInput::new("git@gitlab.com:team/hr-app.git  or  https://github.com/you/repo.git", cx));
         let folder = cx.new(|cx| TextInput::new("Leave empty for ~/code/<name>", cx));
         window.focus(&name.focus_handle(cx));
-        self.form = Some(Form::NewProject { source: SourceKind::Clone, name, url, folder, busy: false, error: None });
+        self.form = Some(Form::NewProject { source: SourceKind::Clone, name, url, folder, busy: false, error: None, invalid: None });
         cx.notify();
     }
 
@@ -702,6 +801,7 @@ impl Monaged {
             auto_mode: false,
             busy: false,
             error: None,
+            invalid: None,
         });
         cx.notify();
     }
@@ -709,14 +809,14 @@ impl Monaged {
     fn open_pipeline_form(&mut self, sub_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let request = cx.new(|cx| TextInput::new("What should be built?", cx));
         window.focus(&request.focus_handle(cx));
-        self.form = Some(Form::StartPipeline { sub_id, request, auto_mode: false, error: None });
+        self.form = Some(Form::StartPipeline { sub_id, request, auto_mode: false, error: None, invalid: None });
         cx.notify();
     }
 
     fn submit_form(&mut self, cx: &mut Context<Self>) {
         let distro = self.config.distro.clone();
         match &mut self.form {
-            Some(Form::NewProject { source, name, url, folder, busy, error }) => {
+            Some(Form::NewProject { source, name, url, folder, busy, error, invalid }) => {
                 if *busy {
                     return;
                 }
@@ -728,16 +828,19 @@ impl Monaged {
                     name_text = last_segment(from);
                 }
                 let problem = match source {
-                    SourceKind::Clone if url_text.is_empty() => Some("Paste the Git URL to clone."),
-                    SourceKind::Existing if folder_text.is_empty() => Some("Enter the WSL folder, e.g. ~/code/hr-app."),
-                    _ if name_text.is_empty() => Some("Give the project a name."),
+                    SourceKind::Clone if url_text.is_empty() => Some(("Git URL", "Paste the Git URL to clone.", url.clone())),
+                    SourceKind::Existing if folder_text.is_empty() => Some(("Folder in WSL", "Enter the WSL folder, e.g. ~/code/hr-app.", folder.clone())),
+                    _ if name_text.is_empty() => Some(("Name", "Give the project a name.", name.clone())),
                     _ => None,
                 };
-                if let Some(problem) = problem {
+                if let Some((field, problem, input)) = problem {
                     *error = Some(problem.into());
+                    *invalid = Some(field);
+                    input.update(cx, |input, cx| input.set_invalid(true, cx));
                     cx.notify();
                     return;
                 }
+                *invalid = None;
                 let folder_path = if folder_text.is_empty() { format!("~/code/{}", git::slug(&name_text)) } else { folder_text };
                 let git_source = match source {
                     SourceKind::Clone => git::Source::Clone(url_text),
@@ -757,13 +860,16 @@ impl Monaged {
                                 this.projects.push(project);
                                 this.projects.sort_by_key(|p| p.name.to_lowercase());
                                 this.select_project(id, cx);
+                                this.toast(Tone::Info, format!("Added {name_text}"), cx);
                                 if identity_missing {
-                                    this.banner = Some((
+                                    this.identity_missing = true;
+                                    this.toast_action(
                                         Tone::Warn,
-                                        "Git inside WSL has no name/email yet, so agents can't commit. Run in WSL: \
-                                         git config --global user.name \"Your Name\" && git config --global user.email you@example.com"
-                                            .into(),
-                                    ));
+                                        "Git inside WSL has no name or email yet, so agents can't commit.",
+                                        "Fix in Settings",
+                                        feedback::ToastAction::OpenSettings,
+                                        cx,
+                                    );
                                 }
                             }
                             Err(err) => {
@@ -779,7 +885,7 @@ impl Monaged {
                 })
                 .detach();
             }
-            Some(Form::NewSubproject { project_id, kind, name, request, run_pipeline, auto_mode, busy, error }) => {
+            Some(Form::NewSubproject { project_id, kind, name, request, run_pipeline, auto_mode, busy, error, invalid }) => {
                 if *busy {
                     return;
                 }
@@ -788,6 +894,8 @@ impl Monaged {
                 let sub_name = name.read(cx).text().trim().to_string();
                 if sub_name.is_empty() {
                     *error = Some("Give the subproject a name.".into());
+                    *invalid = Some("Name");
+                    name.update(cx, |input, cx| input.set_invalid(true, cx));
                     cx.notify();
                     return;
                 }
@@ -826,10 +934,12 @@ impl Monaged {
                 })
                 .detach();
             }
-            Some(Form::StartPipeline { sub_id, request, auto_mode, error }) => {
+            Some(Form::StartPipeline { sub_id, request, auto_mode, error, invalid }) => {
                 let text = request.read(cx).text().trim().to_string();
                 if text.is_empty() {
                     *error = Some("Describe what should be built.".into());
+                    *invalid = Some("What should be built?");
+                    request.update(cx, |input, cx| input.set_invalid(true, cx));
                     cx.notify();
                     return;
                 }
@@ -850,11 +960,11 @@ impl Monaged {
 
     /// "+ Agent": a free agent in its own worktree.
     fn add_agent(&mut self, sub_id: i64, cx: &mut Context<Self>) {
-        if self.creating_agent {
+        if self.creating_agent.is_some() {
             return;
         }
         let number = self.agents.iter().filter(|a| a.record.subproject_id == sub_id).count() + 1;
-        self.creating_agent = true;
+        self.creating_agent = Some(sub_id);
         let spec = AgentSpec { name: format!("agent-{number}"), role: Role::Free, on_feature_branch: false, brief: None, select: true };
         self.spawn_agent(sub_id, spec, cx);
     }
@@ -869,17 +979,16 @@ impl Monaged {
         let worktree = git::worktree_path(&project.path, &sub_slug, &name);
         let branch = if spec.on_feature_branch { sub.branch.clone() } else { format!("agent/{sub_slug}/{name}") };
         let role = spec.role.to_db();
-        self.banner = Some((Tone::Info, format!("Creating a worktree for {name}…")));
+        self.creating_agent = Some(sub_id);
         cx.notify();
         cx.spawn(async move |view, cx| {
             let (distro, repo, wt, br, from) =
                 (project.distro.clone(), project.path.clone(), worktree.clone(), branch.clone(), sub.branch.clone());
             let added = cx.background_spawn(async move { git::add_worktree(&distro, &repo, &wt, &br, &from) }).await;
             view.update(cx, |this, cx| {
-                this.creating_agent = false;
+                this.creating_agent = None;
                 match added.and_then(|_| this.store.add_agent(sub_id, &name, &branch, &worktree, &role)) {
                     Ok(record) => {
-                        this.banner = None;
                         let id = record.id;
                         let mut agent = AgentView::new(record);
                         agent.queued_prompt = spec.brief;
@@ -890,7 +999,7 @@ impl Monaged {
                             this.ensure_session(id);
                         }
                     }
-                    Err(err) => this.banner = Some((Tone::Error, format!("Couldn't create {name}'s worktree: {err:#}"))),
+                    Err(err) => this.toast_error(format!("Couldn't create {name}'s worktree: {err:#}"), cx),
                 }
                 cx.notify();
             })
@@ -928,7 +1037,9 @@ impl Monaged {
             json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": text }] }),
             Pending::Prompt(agent_id),
         );
-        self.scroll.scroll_to_bottom();
+        if let Some(handle) = self.scrolls.get(&agent_id) {
+            handle.scroll_to_bottom();
+        }
     }
 
     fn flush_queued_prompt(&mut self, agent_id: i64) {
@@ -938,24 +1049,44 @@ impl Monaged {
         }
     }
 
-    fn on_submit(&mut self, _: &Submit, _window: &mut Window, cx: &mut Context<Self>) {
+    /// The agent whose message box has the cursor (else the focused pane).
+    fn composer_agent(&self, window: &Window, cx: &Context<Self>) -> Option<i64> {
+        self.inputs.iter().find(|(_, input)| input.focus_handle(cx).is_focused(window)).map(|(id, _)| *id).or(self.sel_agent)
+    }
+
+    fn on_submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.is_some() {
+            self.accept_confirm(window, cx);
+            return;
+        }
+        if self.menu.is_some() {
+            self.run_menu_selection(window, cx);
+            return;
+        }
+        if self.shortcuts_open {
+            self.toggle_shortcuts(window, cx);
+            return;
+        }
+        if self.palette.is_some() {
+            self.run_palette_selection(window, cx);
+            return;
+        }
         if self.form.is_some() {
             self.submit_form(cx);
             return;
         }
-        let Some(agent_id) = self.sel_agent else { return };
-        let text = self.input.read(cx).text().trim().to_string();
+        let Some(agent_id) = self.composer_agent(window, cx) else { return };
+        let Some(input) = self.inputs.get(&agent_id).cloned() else { return };
+        let text = input.read(cx).text().trim().to_string();
         if text.is_empty() {
             return;
         }
         let Some(agent) = self.agent(agent_id) else { return };
         if agent.is_working() {
-            self.banner = Some((Tone::Warn, "This agent is still working. Press Esc to stop it first.".into()));
-            cx.notify();
+            self.toast(Tone::Warn, format!("{} is still working. Press Esc to stop it first.", agent.record.name), cx);
             return;
         }
-        self.banner = None;
-        self.input.update(cx, |input, cx| input.clear(cx));
+        input.update(cx, |input, cx| input.clear(cx));
         // Typing your own answer replaces any half-answered question cards.
         if let Some(agent) = self.agent_mut(agent_id) {
             agent.answers.clear();
@@ -966,31 +1097,130 @@ impl Monaged {
         cx.notify();
     }
 
+    /// Esc closes the innermost thing first: a dialog, a menu, the palette, a
+    /// form; otherwise it stops the agent you're typing to.
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.is_some() {
+            self.close_confirm(window, cx);
+            return;
+        }
+        if self.menu.is_some() {
+            self.close_menu(window, cx);
+            return;
+        }
+        if self.shortcuts_open {
+            self.toggle_shortcuts(window, cx);
+            return;
+        }
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
         if self.form.take().is_some() {
-            window.focus(&self.input.focus_handle(cx));
+            self.focus_request = self.sel_agent;
+            window.focus(&self.focus);
             cx.notify();
             return;
         }
-        let Some(agent_id) = self.sel_agent else { return };
-        let Some(agent) = self.agent(agent_id) else { return };
-        if !agent.is_working() {
+        let Some(agent_id) = self.composer_agent(window, cx) else { return };
+        self.stop_agent(agent_id, cx);
+    }
+
+    fn on_show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_shortcuts(window, cx);
+    }
+
+    fn on_new_agent_here(&mut self, _: &NewAgentHere, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sub_id) = self.sel_sub {
+            self.form = None;
+            self.add_agent(sub_id, cx);
+        }
+    }
+
+    fn on_prev_agent(&mut self, _: &PrevAgent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_agent(-1, cx);
+    }
+
+    fn on_next_agent(&mut self, _: &NextAgent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_agent(1, cx);
+    }
+
+    /// Alt Up / Alt Down: the previous or next agent in this subproject.
+    fn step_agent(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(sub_id) = self.sel_sub else { return };
+        let ids: Vec<i64> =
+            self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived).map(|a| a.record.id).collect();
+        if ids.is_empty() {
             return;
         }
-        let session_id = agent.record.session_id.clone();
-        // ACP: open permission requests must be answered with "cancelled".
-        let open: Vec<usize> = agent
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, item)| matches!(item, Item::Permission { chosen: None, .. }).then_some(i))
-            .collect();
-        if let Some(session_id) = session_id {
-            self.notify_agent("session/cancel", json!({ "sessionId": session_id }));
+        let at = self.sel_agent.and_then(|id| ids.iter().position(|&i| i == id));
+        let next = match at {
+            Some(at) => (at as isize + delta).rem_euclid(ids.len() as isize) as usize,
+            None => 0,
+        };
+        self.form = None;
+        self.select_agent(ids[next], cx);
+    }
+
+    /// Opens a failed agent's session again, or restarts a live one (its
+    /// conversation is reloaded from Claude's saved history).
+    pub(crate) fn retry_session(&mut self, agent_id: i64, cx: &mut Context<Self>) {
+        if !matches!(self.conn, Conn::Ready) {
+            self.toast_action(Tone::Warn, "Claude isn't connected yet.", "Reconnect", feedback::ToastAction::Reconnect, cx);
+            return;
         }
-        for index in open {
-            self.choose_permission(agent_id, index, None, cx);
+        let Some(agent) = self.agent(agent_id) else { return };
+        if agent.is_working() {
+            return;
         }
+        if let Some(session_id) = agent.record.session_id.clone() {
+            self.sessions.remove(&session_id);
+        }
+        let Some(agent) = self.agent_mut(agent_id) else { return };
+        agent.live = false;
+        agent.status = Status::Idle;
+        self.ensure_session(agent_id);
+        cx.notify();
+    }
+
+    fn on_toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(window, cx);
+    }
+
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        let _ = self.store.set_setting("ui:sidebar", if self.sidebar_open { "1" } else { "0" });
+        cx.notify();
+    }
+
+    fn on_toggle_inspector(&mut self, _: &ToggleInspector, _window: &mut Window, cx: &mut Context<Self>) {
+        self.inspector_open = !self.inspector_open;
+        let _ = self.store.set_setting("ui:inspector", if self.inspector_open { "1" } else { "0" });
+        cx.notify();
+    }
+
+    fn on_open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(cx);
+    }
+
+    /// Picks the palette for `theme_key` ("system" follows Windows' light/dark mode).
+    fn apply_theme(&self, window: &mut Window) {
+        let key = if self.theme_key == "system" {
+            match window.appearance() {
+                gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => "paper",
+                _ => "carbon",
+            }
+        } else {
+            self.theme_key.as_str()
+        };
+        theme::set(key);
+        window.refresh();
+    }
+
+    pub(crate) fn set_theme(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_key = key.to_string();
+        let _ = self.store.set_setting("theme", key);
+        self.apply_theme(window);
         cx.notify();
     }
 
@@ -1017,934 +1247,54 @@ impl Monaged {
         }
         cx.notify();
     }
-
-    // ---- Rendering --------------------------------------------------------
-
-    fn conn_label(&self) -> (u32, SharedString) {
-        match &self.conn {
-            Conn::Starting => (theme::WARN, "Starting WSL…".into()),
-            Conn::Handshaking => (theme::WARN, "Connecting to Claude…".into()),
-            Conn::Ready if self.logged_in == Some(false) => (theme::WARN, "Not logged in".into()),
-            Conn::Ready => (theme::GOOD, "Claude connected".into()),
-            Conn::Failed(reason) => {
-                let short: String = reason.chars().take(40).collect();
-                (theme::BAD, format!("Disconnected: {short}").into())
-            }
-        }
-    }
-
-    fn sub_activity(&self, sub_id: i64) -> Option<u32> {
-        if self.pipeline_needs_you(sub_id) {
-            return Some(theme::WARN);
-        }
-        let agents = self.agents.iter().filter(|a| a.record.subproject_id == sub_id);
-        let mut color = None;
-        for agent in agents {
-            if agent.needs_attention() {
-                return Some(theme::WARN);
-            }
-            if agent.is_working() {
-                color = Some(theme::ACCENT);
-            }
-        }
-        color
-    }
-
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (dot, label) = self.conn_label();
-        let mut list = div().flex().flex_col().gap_0p5().px_2().pb_4();
-        for project in &self.projects {
-            let pid = project.id;
-            let selected = self.sel_project == Some(pid) && self.sel_sub.is_none() && self.form.is_none();
-            list = list.child(
-                nav_row(("project", pid as usize), selected, 0.)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(div().text_color(rgb(theme::MUTED)).child("▣"))
-                    .child(div().flex_1().child(project.name.clone()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_project(pid, cx))),
-            );
-            for sub in self.subprojects.iter().filter(|s| s.project_id == pid) {
-                let sid = sub.id;
-                let selected = self.sel_sub == Some(sid) && self.form.is_none();
-                let mark = if sub.kind == "standing" { "◇" } else { "◆" };
-                list = list.child(
-                    nav_row(("sub", sid as usize), selected, 1.)
-                        .child(div().text_color(rgb(theme::MUTED)).child(mark))
-                        .child(div().flex_1().child(sub.name.clone()))
-                        .children(self.sub_activity(sid).map(|color| div().size_2().rounded_full().bg(rgb(color))))
-                        .on_click(cx.listener(move |this, _, _, cx| this.select_sub(sid, cx))),
-                );
-            }
-            list = list.child(
-                nav_row(("new-sub", pid as usize), false, 1.)
-                    .text_color(rgb(theme::MUTED))
-                    .child("+ New subproject")
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_sub_form(pid, window, cx))),
-            );
-        }
-
-        div()
-            .w(px(260.))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(theme::SIDEBAR))
-            .border_r_1()
-            .border_color(rgb(theme::BORDER))
-            .text_size(px(13.))
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child("monaged"))
-                    .child(div().size_2().rounded_full().bg(rgb(dot))),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .pb_1()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(11.))
-                    .text_color(rgb(theme::MUTED))
-                    .child("PROJECTS")
-                    .child(
-                        div()
-                            .id("add-project")
-                            .px_1p5()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(theme::HOVER)))
-                            .child("+ Add")
-                            .on_click(cx.listener(|this, _, window, cx| this.open_project_form(window, cx))),
-                    ),
-            )
-            .child(div().id("sidebar-list").flex_1().min_h(px(0.)).overflow_y_scroll().child(list))
-            .children(self.render_usage_meter(cx))
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(rgb(theme::BORDER))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(12.))
-                    .text_color(rgb(theme::MUTED))
-                    .child(div().flex_1().min_w(px(0.)).child(label))
-                    .children(matches!(self.conn, Conn::Failed(_)).then(|| {
-                        button("reconnect", "Reconnect", theme::ALLOW_BG).on_click(cx.listener(|this, _, _, cx| this.connect(cx)))
-                    }))
-                    .child(
-                        div()
-                            .id("open-settings")
-                            .px_1p5()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(theme::HOVER)))
-                            .child("Settings")
-                            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
-                    ),
-            )
-    }
-
-    fn render_login_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.logged_in != Some(false) {
-            return None;
-        }
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_4()
-                .py_2()
-                .bg(rgb(0x3a3222))
-                .border_b_1()
-                .border_color(rgb(theme::WARN))
-                .text_size(px(13.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child("Claude isn't logged in inside WSL. Run this once in a terminal, type /login, then click Reconnect:")
-                        .child(div().font_family("Consolas").text_color(rgb(theme::WARN)).child(LOGIN_COMMAND)),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .gap_2()
-                        .child(button("copy-login", "Copy command", theme::INPUT_BG).on_click(cx.listener(|_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(LOGIN_COMMAND.to_string()))
-                        })))
-                        .child(button("login-reconnect", "Reconnect", theme::ALLOW_BG).on_click(cx.listener(|this, _, _, cx| this.connect(cx)))),
-                )
-                .into_any_element(),
-        )
-    }
-
-    fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (tone, text) = self.banner.as_ref()?;
-        let color = tone_color(*tone);
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(rgb(theme::BORDER))
-                .text_size(px(13.))
-                .text_color(rgb(color))
-                .child(div().flex_1().min_w(px(0.)).child(text.clone()))
-                .child(
-                    div()
-                        .id("dismiss-banner")
-                        .cursor_pointer()
-                        .text_color(rgb(theme::MUTED))
-                        .child("✕")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.banner = None;
-                            cx.notify();
-                        })),
-                )
-                .into_any_element(),
-        )
-    }
-
-    fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(Form::Settings { error }) = &self.form {
-            return self.render_settings(error.as_ref(), cx);
-        }
-        if let Some(form) = &self.form {
-            return self.render_form(form, cx);
-        }
-        if let Some(sub_id) = self.sel_sub {
-            return self.render_subproject(sub_id, cx);
-        }
-        if let Some(project_id) = self.sel_project {
-            return self.render_project(project_id, cx);
-        }
-        self.render_welcome(cx)
-    }
-
-    fn render_welcome(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .p_8()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .max_w(px(620.))
-            .child(div().text_size(px(22.)).font_weight(FontWeight::BOLD).child("Welcome to Monaged"))
-            .child(div().text_color(rgb(theme::MUTED)).child(
-                "One place per project. Add a project (a git repo inside WSL), split it into subprojects, \
-                 and let Claude agents work on them side by side, each in its own git worktree.",
-            ))
-            .child(
-                div().flex().child(
-                    button("welcome-add", "Add your first project", theme::ALLOW_BG)
-                        .on_click(cx.listener(|this, _, window, cx| this.open_project_form(window, cx))),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_project(&self, project_id: i64, cx: &mut Context<Self>) -> AnyElement {
-        let Some(project) = self.projects.iter().find(|p| p.id == project_id) else { return div().into_any_element() };
-        let subs: Vec<&Subproject> = self.subprojects.iter().filter(|s| s.project_id == project_id).collect();
-        let path = project.path.clone();
-        let mut cards = div().flex().flex_col().gap_2();
-        if subs.is_empty() {
-            cards = cards.child(div().text_color(rgb(theme::MUTED)).child(
-                "No subprojects yet. A subproject is a feature (it gets its own branch) or a standing concern such as security.",
-            ));
-        }
-        for sub in subs {
-            let sid = sub.id;
-            let agent_count = self.agents.iter().filter(|a| a.record.subproject_id == sid).count();
-            let working = self.agents.iter().filter(|a| a.record.subproject_id == sid && a.is_working()).count();
-            cards = cards.child(
-                div()
-                    .id(("card", sid as usize))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_3()
-                    .rounded_lg()
-                    .bg(rgb(theme::PANEL))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(rgb(theme::ACCENT)))
-                    .child(div().flex_1().font_weight(FontWeight::MEDIUM).child(sub.name.clone()))
-                    .child(badge(&sub.kind))
-                    .child(div().font_family("Consolas").text_size(px(12.)).text_color(rgb(theme::MUTED)).child(sub.branch.clone()))
-                    .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(match working {
-                        0 => format!("{agent_count} agent{}", if agent_count == 1 { "" } else { "s" }),
-                        n => format!("{n} working"),
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_sub(sid, cx))),
-            );
-        }
-        div()
-            .id("project-view")
-            .flex_1()
-            .overflow_y_scroll()
-            .p_6()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_size(px(22.)).font_weight(FontWeight::BOLD).child(project.name.clone()))
-                            .child(
-                                div()
-                                    .font_family("Consolas")
-                                    .text_size(px(12.))
-                                    .text_color(rgb(theme::MUTED))
-                                    .child(format!("{} · {} · base branch {}", project.distro, project.path, project.base_branch)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(button("project-zed", "Open in Zed", theme::INPUT_BG).on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_in_zed(path.clone(), cx)
-                            })))
-                            .child(button("project-new-sub", "+ New subproject", theme::ALLOW_BG).on_click(cx.listener(
-                                move |this, _, window, cx| this.open_sub_form(project_id, window, cx),
-                            ))),
-                    ),
-            )
-            .child(self.render_branch_panel(project_id, cx))
-            .child(switch_like(
-                "project-auto-start",
-                "Auto-start small, low-risk plans with confidence 4–5 (in subprojects with auto mode on). \
-                 Large features, migrations, auth and data changes always wait for you.",
-                self.project_auto_start(project_id),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_project_auto_start(project_id, cx))))
-            .child(div().text_size(px(11.)).text_color(rgb(theme::MUTED)).child("SUBPROJECTS"))
-            .child(cards)
-            .into_any_element()
-    }
-
-    fn render_subproject(&self, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
-        let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id) else { return div().into_any_element() };
-        let project_path = self.projects.iter().find(|p| p.id == sub.project_id).map(|p| p.path.clone()).unwrap_or_default();
-        let selected = self.sel_agent.and_then(|id| self.agent(id)).filter(|a| a.record.subproject_id == sub_id);
-        let zed_path = selected.map(|a| a.record.worktree.clone()).unwrap_or(project_path);
-        let zed_label = if selected.is_some() { "Open worktree in Zed" } else { "Open in Zed" };
-
-        let mut tabs = div().flex().items_center().gap_1().px_4().py_2().border_b_1().border_color(rgb(theme::BORDER));
-        let archived = self.agents.iter().filter(|a| a.record.subproject_id == sub_id && a.record.archived).count();
-        let board_count = self.board_count(sub_id);
-        tabs = tabs.child(
-            div()
-                .id("board-tab")
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .text_size(px(13.))
-                .cursor_pointer()
-                .when(self.board_open, |d| d.bg(rgb(theme::SELECTED)))
-                .hover(|s| s.bg(rgb(theme::HOVER)))
-                .child("Board")
-                .when(board_count > 0, |d| d.child(div().text_size(px(11.)).text_color(rgb(theme::MUTED)).child(board_count.to_string())))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.board_open = true;
-                    cx.notify();
-                })),
-        );
-        tabs = tabs.child(div().w(px(1.)).h(px(16.)).mx_1().bg(rgb(theme::BORDER)));
-        for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived) {
-            let aid = agent.record.id;
-            let is_selected = Some(aid) == self.sel_agent && !self.board_open;
-            let color = agent_color(agent);
-            tabs = tabs.child(
-                div()
-                    .id(("agent-tab", aid as usize))
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .when(is_selected, |d| d.bg(rgb(theme::SELECTED)))
-                    .hover(|s| s.bg(rgb(theme::HOVER)))
-                    .child(div().size_2().rounded_full().bg(rgb(color)))
-                    .child(agent.record.name.clone())
-                    .children(agent.confidence.as_ref().map(|c| {
-                        div().text_size(px(11.)).text_color(rgb(review_ui::score_color(c.score))).child(format!("{}/5", c.score))
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_agent(aid, cx))),
-            );
-        }
-        tabs = tabs.child(
-            div()
-                .id("add-agent")
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .text_size(px(13.))
-                .text_color(rgb(theme::MUTED))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::HOVER)))
-                .child(if self.creating_agent { "Creating…" } else { "+ Agent" })
-                .on_click(cx.listener(move |this, _, _, cx| this.add_agent(sub_id, cx))),
-        );
-
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(rgb(theme::BORDER))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .min_w(px(0.))
-                    .child(div().text_size(px(17.)).font_weight(FontWeight::BOLD).child(sub.name.clone()))
-                    .child(badge(&sub.kind))
-                    .child(div().font_family("Consolas").text_size(px(12.)).text_color(rgb(theme::MUTED)).child(sub.branch.clone()))
-                    .children(self.sub_usage_label(sub_id).map(|l| div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(l))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .when(
-                        self.pipelines.get(&sub_id).is_none_or(|p| matches!(p.stage, pipeline::Stage::Done | pipeline::Stage::Stopped)),
-                        |d| {
-                            d.child(button("run-pipeline", "Run pipeline", theme::ALLOW_BG).on_click(cx.listener(
-                                move |this, _, window, cx| this.open_pipeline_form(sub_id, window, cx),
-                            )))
-                        },
-                    )
-                    .child(button("sub-zed", zed_label, theme::INPUT_BG).on_click(cx.listener(move |this, _, _, cx| this.open_in_zed(zed_path.clone(), cx)))),
-            );
-        let panel = self.render_pipeline_panel(sub_id, cx);
-
-        let body: AnyElement = match selected {
-            _ if self.board_open => self.render_board(sub_id, cx),
-            Some(agent) => self.render_agent(agent, cx),
-            None => div()
-                .flex_1()
-                .p_8()
-                .text_color(rgb(theme::MUTED))
-                .child("No agents yet. Click \"+ Agent\" to start one in its own worktree.")
-                .into_any_element(),
-        };
-
-        let tabs = tabs.when(archived > 0, |d| {
-            d.child(div().pl_2().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(format!("{archived} cleaned up")))
-        });
-        let merge = self.render_merge_card(sub_id, cx);
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .flex_col()
-            .child(header)
-            .children(panel)
-            .children(merge)
-            .child(tabs)
-            .child(body)
-            .into_any_element()
-    }
-
-    fn render_agent(&self, agent: &AgentView, cx: &mut Context<Self>) -> AnyElement {
-        let body = match agent.tab {
-            AgentTab::Conversation => self.render_conversation(agent, cx),
-            AgentTab::Changes => self.render_changes(agent, cx),
-        };
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .flex_col()
-            .child(self.render_agent_bar(agent, cx))
-            .child(body)
-            .into_any_element()
-    }
-
-    fn render_conversation(&self, agent: &AgentView, cx: &mut Context<Self>) -> AnyElement {
-        let agent_id = agent.record.id;
-        let busy = agent.is_working();
-        let status_line = match &agent.status {
-            Status::Idle => Some((Tone::Info, "Not connected yet.".to_string())),
-            Status::Starting => Some((Tone::Info, "Starting a Claude session in this worktree…".to_string())),
-            Status::Loading => Some((Tone::Info, "Reopening the saved conversation…".to_string())),
-            Status::Failed(err) => Some((Tone::Error, format!("Failed: {err}"))),
-            Status::Ready => None,
-        };
-        let items: Vec<AnyElement> = agent.items.iter().enumerate().map(|(i, item)| self.render_item(agent_id, i, item, cx)).collect();
-        let action_button = if busy {
-            button("stop", "Stop", theme::DENY_BG).on_click(cx.listener(|this, _, window, cx| this.on_cancel(&Cancel, window, cx)))
-        } else {
-            button("send", "Send", theme::ALLOW_BG).on_click(cx.listener(|this, _, window, cx| this.on_submit(&Submit, window, cx)))
-        };
-
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .flex_col()
-            .child(
-                div().id("transcript").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.scroll).child(
-                    div().flex().flex_col().items_center().child(
-                        div()
-                            .w_full()
-                            .max_w(px(900.))
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .p_4()
-                            .children(items)
-                            .children(status_line.map(|(tone, text)| {
-                                div().text_size(px(12.)).text_color(rgb(tone_color(tone))).child(text)
-                            })),
-                    ),
-                ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_3()
-                    .bg(rgb(theme::PANEL))
-                    .border_t_1()
-                    .border_color(rgb(theme::BORDER))
-                    .child(div().flex_1().child(self.input.clone()))
-                    .child(action_button),
-            )
-            .into_any_element()
-    }
-
-    fn render_item(&self, agent_id: i64, index: usize, item: &Item, cx: &mut Context<Self>) -> AnyElement {
-        match item {
-            Item::User(text) if text.starts_with(pipeline::BRIEF_HEADER) => pipeline_ui::render_brief(text),
-            Item::User(text) if text.starts_with("[monaged-ask #") || text.contains(coord::DIGEST_HEADER) => coord_ui::render_user_message(text),
-            Item::User(text) => div().px_3().py_2().rounded_lg().bg(rgb(theme::USER_BG)).child(text.clone()).into_any_element(),
-            Item::Agent(text) if pipeline::contains_directive(text) => self.render_agent_reply(agent_id, index, text, cx),
-            Item::Agent(text) => review_ui::render_markdown(text),
-            Item::Thought(text) => div()
-                .pl_3()
-                .border_l_2()
-                .border_color(rgb(theme::BORDER))
-                .text_size(px(13.))
-                .text_color(rgb(theme::MUTED))
-                .italic()
-                .child(text.clone())
-                .into_any_element(),
-            Item::Tool { title, kind, status, .. } => {
-                let (icon, color) = match status.as_str() {
-                    "completed" => ("●", theme::GOOD),
-                    "failed" => ("✕", theme::BAD),
-                    "in_progress" => ("◐", theme::ACCENT),
-                    _ => ("○", theme::MUTED),
-                };
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgb(theme::PANEL))
-                    .text_size(px(13.))
-                    .child(div().text_color(rgb(color)).child(icon))
-                    .child(div().font_family("Consolas").flex_1().child(match title.strip_prefix("mcp__monaged__") {
-                        Some(tool) => format!("Monaged · {}", tool.replace('_', " ")),
-                        None => title.clone(),
-                    }))
-                    .child(div().text_color(rgb(theme::MUTED)).child(if title.starts_with("mcp__monaged__") {
-                        "coordination".to_string()
-                    } else {
-                        kind.clone()
-                    }))
-                    .into_any_element()
-            }
-            Item::Plan(entries) => div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(theme::BORDER))
-                .text_size(px(13.))
-                .child(div().text_color(rgb(theme::MUTED)).child("Plan"))
-                .children(entries.iter().map(|entry| {
-                    let (mark, color) = match entry.status.as_str() {
-                        "completed" => ("☑", theme::GOOD),
-                        "in_progress" => ("◐", theme::ACCENT),
-                        _ => ("☐", theme::MUTED),
-                    };
-                    div().flex().gap_2().child(div().text_color(rgb(color)).child(mark)).child(entry.content.clone())
-                }))
-                .into_any_element(),
-            Item::Permission { title, options, chosen, .. } => {
-                let card = div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(if chosen.is_some() { theme::BORDER } else { theme::WARN }))
-                    .child(format!("Claude wants to: {title}"));
-                match chosen {
-                    Some(answer) => card
-                        .child(div().text_size(px(13.)).text_color(rgb(theme::MUTED)).child(format!("→ {answer}")))
-                        .into_any_element(),
-                    None => card
-                        .child(div().flex().gap_2().children(options.iter().enumerate().map(|(j, option)| {
-                            let bg = if option.kind.starts_with("allow") { theme::ALLOW_BG } else { theme::DENY_BG };
-                            let option_id = option.id.clone();
-                            button(("perm", (agent_id as usize) * 4096 + index * 16 + j), option.name.clone(), bg).on_click(cx.listener(
-                                move |this, _, _, cx| this.choose_permission(agent_id, index, Some(option_id.clone()), cx),
-                            ))
-                        })))
-                        .into_any_element(),
-                }
-            }
-            Item::Notice(tone, text) => {
-                div().text_size(px(12.)).text_color(rgb(tone_color(*tone))).child(text.clone()).into_any_element()
-            }
-        }
-    }
-
-    fn render_form(&self, form: &Form, cx: &mut Context<Self>) -> AnyElement {
-        let (title, body, busy, error, submit_label): (&str, AnyElement, bool, Option<String>, &str) = match form {
-            Form::NewProject { source, name, url, folder, busy, error } => {
-                let source = *source;
-                let choice = |id: &'static str, label: &'static str, kind: SourceKind, cx: &mut Context<Self>| {
-                    chip(id, label, source == kind).on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(Form::NewProject { source, name, url, .. }) = &mut this.form {
-                            *source = kind;
-                            // The fields shift when the source changes; put the cursor where typing makes sense.
-                            let target = if kind == SourceKind::Clone { url } else { name };
-                            window.focus(&target.focus_handle(cx));
-                        }
-                        cx.notify();
-                    }))
-                };
-                let folder_hint = match source {
-                    SourceKind::Existing => "The folder inside WSL, e.g. ~/code/hr-app. It becomes a git repo if it isn't one yet.",
-                    SourceKind::Clone => "Where to clone it. Leave empty for ~/code/<name>. Uses your git/SSH setup inside WSL.",
-                    SourceKind::Empty => "Where to create the new repo. Leave empty for ~/code/<name>.",
-                };
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(choice("src-clone", "Clone from GitLab / GitHub", SourceKind::Clone, cx))
-                            .child(choice("src-existing", "Existing WSL folder", SourceKind::Existing, cx))
-                            .child(choice("src-empty", "New empty repo", SourceKind::Empty, cx)),
-                    )
-                    .when(source == SourceKind::Clone, |d| d.child(field("Git URL", None, url.clone())))
-                    .child(field("Name", Some("Leave empty to use the repo or folder name."), name.clone()))
-                    .child(field("Folder in WSL", Some(folder_hint), folder.clone()))
-                    .into_any_element();
-                ("Add a project", body, *busy, error.clone(), if *busy { "Working…" } else { "Add project" })
-            }
-            Form::NewSubproject { kind, name, request, run_pipeline, auto_mode, busy, error, .. } => {
-                let (kind, run, auto) = (*kind, *run_pipeline, *auto_mode);
-                let choice = |id: &'static str, label: &'static str, value: SubKind, cx: &mut Context<Self>| {
-                    chip(id, label, kind == value).on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(Form::NewSubproject { kind, name, .. }) = &mut this.form {
-                            *kind = value;
-                            window.focus(&name.focus_handle(cx));
-                        }
-                        cx.notify();
-                    }))
-                };
-                let hint = match kind {
-                    SubKind::Feature => "A goal like \"company car reservation\". Gets the branch feature/<name>; its agents branch off it.",
-                    SubKind::Standing => "A long-running concern like \"security\". Gets the branch standing/<name>.",
-                };
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(choice("kind-feature", "Feature", SubKind::Feature, cx))
-                            .child(choice("kind-standing", "Standing", SubKind::Standing, cx)),
-                    )
-                    .child(field("Name", Some(hint), name.clone()))
-                    .child(switch_row("toggle-run-pipeline", "Run the pipeline: research → verify → plan → build", run, cx, |form| {
-                        if let Form::NewSubproject { run_pipeline, .. } = form {
-                            *run_pipeline = !*run_pipeline;
-                        }
-                    }))
-                    .when(run, |d| {
-                        d.child(field("What should be built?", Some("The researcher starts from this. Leave empty to use the name."), request.clone()))
-                            .child(switch_row(
-                                "toggle-auto-mode",
-                                "Auto mode: agents' questions get their recommended answer, confident small plans start by themselves",
-                                auto,
-                                cx,
-                                |form| {
-                                    if let Form::NewSubproject { auto_mode, .. } = form {
-                                        *auto_mode = !*auto_mode;
-                                    }
-                                },
-                            ))
-                    })
-                    .into_any_element();
-                let label = match (*busy, run) {
-                    (true, _) => "Creating…",
-                    (false, true) => "Create and start the research",
-                    (false, false) => "Create and start an agent",
-                };
-                ("New subproject", body, *busy, error.clone(), label)
-            }
-            Form::StartPipeline { request, auto_mode, error, .. } => {
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(field("What should be built?", Some("A researcher starts from this, then two verifiers, a planner and the builders."), request.clone()))
-                    .child(switch_row(
-                        "toggle-auto-mode",
-                        "Auto mode: agents' questions get their recommended answer, confident small plans start by themselves",
-                        *auto_mode,
-                        cx,
-                        |form| {
-                            if let Form::StartPipeline { auto_mode, .. } = form {
-                                *auto_mode = !*auto_mode;
-                            }
-                        },
-                    ))
-                    .into_any_element();
-                ("Run the pipeline", body, false, error.clone(), "Start the research")
-            }
-            Form::Settings { error } => return self.render_settings(error.as_ref(), cx),
-        };
-
-        div()
-            .p_8()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .max_w(px(680.))
-            .child(div().text_size(px(20.)).font_weight(FontWeight::BOLD).child(title))
-            .child(body)
-            .children(error.map(|e| div().text_size(px(13.)).text_color(rgb(theme::BAD)).child(e)))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        button("form-submit", submit_label, if busy { theme::INPUT_BG } else { theme::ALLOW_BG })
-                            .on_click(cx.listener(|this, _, _, cx| this.submit_form(cx))),
-                    )
-                    .child(button("form-cancel", "Cancel", theme::INPUT_BG).on_click(cx.listener(|this, _, window, cx| this.on_cancel(&Cancel, window, cx)))),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for Monaged {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .key_context("Monaged")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::on_submit))
-            .on_action(cx.listener(Self::on_cancel))
-            .size_full()
-            .flex()
-            .bg(rgb(theme::BG))
-            .text_color(rgb(theme::TEXT))
-            .text_size(px(14.))
-            .child(self.render_sidebar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .children(self.render_login_banner(cx))
-                    .children(self.render_paused_bar(cx))
-                    .children(self.render_banner(cx))
-                    .child(self.render_content(cx)),
-            )
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_shell(window, cx)
     }
 }
 
 // ---- Small UI helpers ------------------------------------------------------
 
+/// Older call sites pick a button by its background; map them onto the kit.
 fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, bg: u32) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .px_3()
-        .py_1p5()
-        .rounded_md()
-        .bg(rgb(bg))
-        .text_size(px(13.))
-        .cursor_pointer()
-        .hover(|style| style.opacity(0.85))
-        .child(label.into())
-}
-
-fn chip(id: &'static str, label: &'static str, selected: bool) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .px_3()
-        .py_1p5()
-        .rounded_md()
-        .border_1()
-        .text_size(px(13.))
-        .cursor_pointer()
-        .border_color(rgb(if selected { theme::ACCENT } else { theme::BORDER }))
-        .when(selected, |d| d.bg(rgb(theme::SELECTED)))
-        .hover(|s| s.bg(rgb(theme::HOVER)))
-        .child(label)
-}
-
-fn nav_row(id: impl Into<ElementId>, selected: bool, indent: f32) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_2()
-        .pl(px(8. + indent * 16.))
-        .pr_2()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(theme::SELECTED)))
-        .hover(|s| s.bg(rgb(theme::HOVER)))
-}
-
-fn field(label: &'static str, hint: Option<&'static str>, input: Entity<TextInput>) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(label))
-        .child(input)
-        .children(hint.map(|h| div().text_size(px(12.)).text_color(rgb(theme::MUTED)).child(h)))
-}
-
-/// A labelled on/off switch; the caller attaches the click handler.
-fn switch_like(id: &'static str, label: &'static str, on: bool) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_3()
-        .cursor_pointer()
-        .text_size(px(13.))
-        .child(
-            div()
-                .flex_none()
-                .w(px(34.))
-                .h(px(18.))
-                .rounded_full()
-                .p(px(2.))
-                .flex()
-                .when(on, |d| d.justify_end().bg(rgb(theme::ALLOW_BG)))
-                .when(!on, |d| d.bg(rgb(theme::BORDER)))
-                .child(div().size(px(14.)).rounded_full().bg(rgb(theme::TEXT))),
-        )
-        .child(label)
-}
-
-/// A switch that flips a field of the open form.
-fn switch_row(
-    id: &'static str,
-    label: &'static str,
-    on: bool,
-    cx: &mut Context<Monaged>,
-    flip: impl Fn(&mut Form) + 'static,
-) -> Stateful<gpui::Div> {
-    switch_like(id, label, on).on_click(cx.listener(move |this, _, _, cx| {
-        if let Some(form) = &mut this.form {
-            flip(form);
-        }
-        cx.notify();
-    }))
-}
-
-fn badge(kind: &str) -> impl IntoElement {
-    let color = if kind == "standing" { theme::WARN } else { theme::ACCENT };
-    div()
-        .px_2()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(color))
-        .text_color(rgb(color))
-        .text_size(px(11.))
-        .child(kind.to_string())
+    let kind = if bg == theme::PRIMARY_BG {
+        ui::Kind::Primary
+    } else if bg == theme::red_soft() {
+        ui::Kind::Danger
+    } else {
+        ui::Kind::Secondary
+    };
+    ui::button(id, kind, None, label)
 }
 
 fn tone_color(tone: Tone) -> u32 {
     match tone {
-        Tone::Info => theme::MUTED,
-        Tone::Warn => theme::WARN,
-        Tone::Error => theme::BAD,
+        Tone::Info => theme::text_3(),
+        Tone::Warn => theme::red_text(),
+        Tone::Error => theme::red_text(),
     }
 }
 
-fn agent_color(agent: &AgentView) -> u32 {
-    if agent.needs_attention() {
-        return theme::WARN;
+/// "x,y,w,h" in logical pixels, with "max:" in front when maximized.
+fn parse_bounds(text: &str) -> Option<WindowBounds> {
+    let maximized = text.starts_with("max:");
+    let numbers: Vec<f32> = text.trim_start_matches("max:").split(',').filter_map(|n| n.trim().parse().ok()).collect();
+    let [x, y, w, h] = numbers[..] else { return None };
+    if w < 640. || h < 400. {
+        return None;
     }
-    if agent.is_working() {
-        return theme::ACCENT;
-    }
-    match agent.status {
-        Status::Ready => theme::GOOD,
-        Status::Failed(_) => theme::BAD,
-        Status::Starting | Status::Loading => theme::WARN,
-        Status::Idle => theme::MUTED,
-    }
+    let bounds = Bounds { origin: gpui::point(px(x), px(y)), size: size(px(w), px(h)) };
+    Some(if maximized { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) })
+}
+
+fn format_bounds(bounds: WindowBounds) -> String {
+    let (prefix, b) = match bounds {
+        WindowBounds::Maximized(b) | WindowBounds::Fullscreen(b) => ("max:", b),
+        WindowBounds::Windowed(b) => ("", b),
+    };
+    format!("{prefix}{},{},{},{}", f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height))
 }
 
 /// "git@gitlab.com:team/hr-app.git" or "~/code/hr-app" -> "hr-app"
@@ -1985,13 +1335,26 @@ fn main() {
             std::process::exit(1);
         }
     };
-    Application::new().run(move |cx: &mut App| {
+    let saved_bounds = store.setting("ui:window").and_then(|v| parse_bounds(&v));
+    Application::new().with_assets(icons::Assets).run(move |cx: &mut App| {
         cx.bind_keys(text_input::key_bindings());
         cx.bind_keys([
             KeyBinding::new("enter", Submit, Some("TextInput")),
             // Enter also submits a form when focus isn't in a text field.
             KeyBinding::new("enter", Submit, Some("Monaged")),
             KeyBinding::new("escape", Cancel, None),
+            KeyBinding::new("ctrl-k", TogglePalette, None),
+            KeyBinding::new("ctrl-b", ToggleSidebar, None),
+            KeyBinding::new("ctrl-alt-b", ToggleInspector, None),
+            KeyBinding::new("ctrl-,", OpenSettings, None),
+            KeyBinding::new("ctrl-/", ShowShortcuts, None),
+            KeyBinding::new("ctrl-n", NewAgentHere, None),
+            KeyBinding::new("alt-up", PrevAgent, None),
+            KeyBinding::new("alt-down", NextAgent, None),
+            KeyBinding::new("up", PaletteUp, Some("Palette")),
+            KeyBinding::new("down", PaletteDown, Some("Palette")),
+            KeyBinding::new("up", PaletteUp, Some("Menu")),
+            KeyBinding::new("down", PaletteDown, Some("Menu")),
         ]);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -2000,11 +1363,14 @@ fn main() {
         })
         .detach();
 
-        let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
+        // Where you left the window last time (maximized, or its size and place).
+        let window_bounds =
+            saved_bounds.unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1480.), px(920.)), cx)));
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions { title: Some("Monaged".into()), ..Default::default() }),
+                window_bounds: Some(window_bounds),
+                // Monaged draws its own title bar (with Windows' snap-aware controls).
+                titlebar: Some(TitlebarOptions { title: Some("Monaged".into()), appears_transparent: true, ..Default::default() }),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Monaged::new(store, config, window, cx)),

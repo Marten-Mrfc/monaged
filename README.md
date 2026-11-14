@@ -19,6 +19,16 @@ cargo run --manifest-path O:\Projects\projectwithoutaname\app\Cargo.toml
 
 Options: `--distro Ubuntu`, and `--agent <path to claude-agent-acp in WSL>`.
 
+## Using it
+
+- **The window:** the sidebar tree on the left (with a **Needs you** inbox on top), agents in the middle, and the inspector (Pipeline, Board, Merge) on the right. The status bar shows the connection, weekly usage and Monaged's share.
+- **Wide screens** show several agents side by side; Ctrl-click an agent in the tree to open it beside the current one.
+- **Ctrl K** opens the command palette: jump anywhere, run an action, switch theme.
+- **Right-click** a project, subproject or agent (or use its ⋯) for everything you can do with it.
+- **Other shortcuts:** Ctrl B toggles the sidebar, Ctrl Alt B the inspector, Ctrl , opens Settings, Ctrl / lists every shortcut, Alt ↑/↓ moves between agents, Ctrl N starts an agent; Enter sends, Esc stops an agent or closes whatever is open.
+- **Messages:** things that happened appear bottom right and fade (errors stay); things that are true right now (offline, not logged in, paused) sit in a bar at the top until fixed.
+- **Themes** (Settings → Appearance): Carbon, Graphite, Clay, Paper, or follow Windows.
+
 ## How it works
 
 1. **Add a project:** clone from GitLab/GitHub, use an existing WSL folder, or start a new empty repo. Monaged makes sure the repo has a commit. It uses `develop` as the base branch when it exists.
@@ -66,7 +76,15 @@ Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a 
 
 | File | What it does |
 |---|---|
-| `src/main.rs` | The `Monaged` view: sidebar, project and subproject views, forms, agent tabs, ACP routing by session id |
+| `src/main.rs` | The `Monaged` state, ACP routing by session id, forms' logic, actions and key bindings |
+| `src/shell.rs` | The window: title bar, sidebar tree and inbox, agent panes, inspector, status bar, overview, forms |
+| `src/palette.rs` | The Ctrl K command palette |
+| `src/menu.rs` | Right-click and ⋯ menus |
+| `src/feedback.rs` | Toasts, confirm dialogs, the keyboard sheet, automatic reconnects |
+| `src/ui.rs` | The component kit: buttons, labels, status dots, meters, rows, cards, switches, fields |
+| `src/theme.rs` | Design tokens and the four themes |
+| `src/icons.rs`, `assets/icons/` | Monaged's own icon set, embedded |
+| `src/dots.rs` | Dot-matrix numerals |
 | `src/agent.rs` | One agent's conversation and review state, built from `session/update`s |
 | `src/coord.rs` | Coordination plumbing: the MCP relay (`--mcp-relay`), the localhost bridge, tool definitions, board text, path/glob overlap (unit-tested) |
 | `src/usage.rs` | Usage logic: rate-limit parsing, Monaged's share and its calibration, budget checks, models per role, cost estimates (unit-tested) |
