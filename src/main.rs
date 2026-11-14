@@ -7,6 +7,7 @@
 mod acp;
 mod agent;
 mod attach;
+mod changes_ui;
 mod coord;
 mod coord_ui;
 mod diff;
@@ -22,9 +23,12 @@ mod llm;
 mod markdown;
 mod menu;
 mod merge_ui;
+mod notify;
 mod palette;
 mod pipeline;
+mod pipeline_edit;
 mod pipeline_ui;
+mod queue_ui;
 mod review;
 mod review_ui;
 mod search;
@@ -143,6 +147,15 @@ enum Form {
     },
     /// The health check page.
     Health,
+    /// Editing the plan before approving it.
+    EditPlan {
+        sub_id: i64,
+        title: Entity<TextInput>,
+        summary: Entity<TextInput>,
+        rows: Vec<pipeline_edit::PlanRow>,
+        error: Option<String>,
+        invalid: Option<&'static str>,
+    },
 }
 
 /// What `spawn_agent` creates.
@@ -253,6 +266,20 @@ struct Monaged {
     input_subs: HashMap<i64, Subscription>,
     /// Text boxes in the agents' question forms: (agent, item, field).
     form_inputs: HashMap<(i64, usize, String), Entity<TextInput>>,
+    /// Your comments on diff lines, per agent, until you send them.
+    comments: Vec<changes_ui::LineComment>,
+    comment_draft: Option<changes_ui::CommentDraft>,
+    /// Subprojects' combined changes, and which one is open instead of the agents.
+    sub_changes: HashMap<i64, changes_ui::SubChanges>,
+    sub_view: Option<i64>,
+    /// Queued messages as last saved (they survive a restart).
+    saved_queue: HashMap<i64, String>,
+    /// The pipeline stage last written to the timeline, per subproject.
+    logged_stage: HashMap<i64, String>,
+    /// Each subproject's latest CI run: (asked at, run).
+    ci: HashMap<i64, (Instant, Option<hosting::Ci>)>,
+    /// Subprojects waiting their turn to merge (Merge ready ones).
+    merge_queue: std::collections::VecDeque<i64>,
     /// Tool calls opened to show their details: (agent, item).
     expanded_tools: HashSet<(i64, usize)>,
     next_toast: u64,
@@ -265,6 +292,12 @@ struct Monaged {
     theme_key: String,
     _appearance: Option<Subscription>,
     _bounds: Subscription,
+    /// Monaged is the window you're using (no Windows notifications then).
+    window_active: bool,
+    _activation: Subscription,
+    /// "Needs you" items already notified about.
+    seen_inbox: HashSet<String>,
+    last_tip: String,
     _events: Task<()>,
     _quit: Subscription,
 }
@@ -333,7 +366,16 @@ impl Monaged {
             if let Some(writer) = &this.writer {
                 writer.kill();
             }
+            notify::shutdown();
             async {}
+        });
+        notify::init();
+        let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            this.window_active = window.is_window_active();
+            if this.window_active {
+                notify::flash(false);
+            }
+            cx.notify();
         });
 
         let distro = config.distro.clone();
@@ -418,6 +460,14 @@ impl Monaged {
             input_subs: HashMap::new(),
             form_inputs: HashMap::new(),
             expanded_tools: HashSet::new(),
+            ci: HashMap::new(),
+            merge_queue: std::collections::VecDeque::new(),
+            comments: Vec::new(),
+            comment_draft: None,
+            sub_changes: HashMap::new(),
+            sub_view: None,
+            saved_queue: HashMap::new(),
+            logged_stage: HashMap::new(),
             next_toast: 1,
             queued_toasts: Vec::new(),
             reconnect: feedback::Reconnect::default(),
@@ -426,13 +476,22 @@ impl Monaged {
             theme_key,
             _appearance: Some(appearance),
             _bounds: bounds_watch,
+            window_active: true,
+            _activation: activation,
+            seen_inbox: HashSet::new(),
+            last_tip: String::new(),
             _events: Task::ready(()),
             _quit: quit,
         };
+        let queued = this.store.queued().unwrap_or_default();
         for agent in &mut this.agents {
+            if let Some(text) = queued.get(&agent.record.id).filter(|_| !agent.record.archived) {
+                agent.queued_prompt = Some(text.clone());
+            }
             agent.cost_total = costs.get(&agent.record.id).copied().unwrap_or(0.0);
             agent.cost_seen = this.store.setting(&format!("agent:{}:cost_seen", agent.record.id)).and_then(|v| v.parse().ok());
         }
+        this.saved_queue = queued;
         this.reload_sub_costs();
         this.apply_theme(window);
         window.focus(&this.focus);
@@ -562,6 +621,7 @@ impl Monaged {
         for agent_id in std::mem::take(&mut self.finished_turns) {
             self.after_turn(agent_id, cx);
         }
+        self.check_notifications();
         for (tone, text, action) in std::mem::take(&mut self.queued_toasts) {
             match action {
                 Some((label, action)) => self.toast_action(tone, text, label, action, cx),
@@ -824,7 +884,9 @@ impl Monaged {
         self.sel_sub = None;
         self.sel_agent = None;
         self.form = None;
+        self.sub_view = None;
         self.refresh_branches(project_id, cx);
+        self.refresh_ci(project_id, cx);
         cx.notify();
     }
 
@@ -1041,6 +1103,10 @@ impl Monaged {
                 self.form = None;
                 self.start_pipeline(sub_id, text, auto_mode, cx);
             }
+            Some(Form::EditPlan { .. }) => {
+                self.save_plan_edit(cx);
+                return;
+            }
             Some(Form::Settings { .. }) | Some(Form::Health) | None => {}
         }
         cx.notify();
@@ -1177,6 +1243,10 @@ impl Monaged {
             self.find_step(1, cx);
             return;
         }
+        if self.comment_focused(window, cx) {
+            self.save_comment(cx);
+            return;
+        }
         if self.form.is_some() {
             self.submit_form(cx);
             return;
@@ -1254,6 +1324,10 @@ impl Monaged {
         }
         if self.palette.is_some() {
             self.close_palette(window, cx);
+            return;
+        }
+        if self.comment_draft.is_some() {
+            self.cancel_comment(cx);
             return;
         }
         if self.find.is_some() {

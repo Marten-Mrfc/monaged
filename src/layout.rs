@@ -178,11 +178,18 @@ impl Monaged {
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 if event.click_count >= 2 {
-                    on_reset(this, cx);
-                    cx.notify();
                     return;
                 }
                 on_down(this, f32::from(event.position.x), cx);
+            }))
+            // A double-click resets: handled on release, after the drag the first click began has ended.
+            .on_mouse_up(MouseButton::Left, cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                if event.click_count >= 2 {
+                    cx.stop_propagation();
+                    this.drag = None;
+                    on_reset(this, cx);
+                    cx.notify();
+                }
             }))
     }
 

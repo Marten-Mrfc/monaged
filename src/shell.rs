@@ -981,6 +981,9 @@ impl Monaged {
             return self.render_form(form, cx);
         }
         if let Some(sub_id) = self.sel_sub {
+            if self.sub_view == Some(sub_id) {
+                return self.render_sub_changes(sub_id, cx);
+            }
             return self.render_columns(sub_id, columns, main_w, cx);
         }
         if let Some(project_id) = self.sel_project {
@@ -1774,6 +1777,8 @@ impl Monaged {
             .flex()
             .flex_col()
             .gap(px(10.))
+            .child(self.render_merge_queue(project_id, cx))
+            .child(div().h(px(14.)))
             .child(ui::label("Branches"))
             .child(self.render_branch_panel(project_id, cx))
             .child(
@@ -1839,7 +1844,10 @@ impl Monaged {
     fn render_form(&self, form: &Form, cx: &mut Context<Self>) -> AnyElement {
         // A problem with one field shows under that field; anything else above the buttons.
         let (invalid, form_error) = match form {
-            Form::NewProject { invalid, error, .. } | Form::NewSubproject { invalid, error, .. } | Form::StartPipeline { invalid, error, .. } => (*invalid, error.clone()),
+            Form::NewProject { invalid, error, .. }
+            | Form::NewSubproject { invalid, error, .. }
+            | Form::StartPipeline { invalid, error, .. }
+            | Form::EditPlan { invalid, error, .. } => (*invalid, error.clone()),
             Form::Settings { .. } | Form::Health => (None, None),
         };
         let problem = |label: &'static str| -> Option<SharedString> {
@@ -1959,6 +1967,10 @@ impl Monaged {
                     ))
                     .into_any_element();
                 ("Run the pipeline", "Research, two verifiers, a plan, then builders in parallel.", body, false, error.clone(), "Start the research")
+            }
+            Form::EditPlan { title, summary, rows, error, .. } => {
+                let body = self.render_plan_editor(title, summary, rows, problem("Workstreams").map(|s| s.to_string()), cx);
+                ("Edit the plan", "Change what the builders do before you approve it.", body, false, error.clone(), "Save plan")
             }
             Form::Settings { .. } | Form::Health => return div().into_any_element(),
         };

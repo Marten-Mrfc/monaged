@@ -64,6 +64,7 @@ pub(crate) enum Command {
     Zen,
     Density(bool),
     Health,
+    SubChanges(i64),
 }
 
 #[derive(Clone)]
@@ -157,6 +158,7 @@ impl Monaged {
                 out.push(Entry { group: "Actions", glyph: Icon::Play, title: "Run pipeline".into(), detail: sub.name.clone(), state: None, hint: None, command: Command::RunPipeline(sub.id) });
             }
             out.push(Entry { group: "Actions", glyph: Icon::Plus, title: "New agent".into(), detail: sub.name.clone(), state: None, hint: None, command: Command::NewAgent(sub.id) });
+            out.push(Entry { group: "Actions", glyph: Icon::Diff, title: "All changes".into(), detail: sub.name.clone(), state: None, hint: None, command: Command::SubChanges(sub.id) });
             out.push(Entry { group: "Actions", glyph: Icon::Push, title: "Push branch".into(), detail: sub.branch.clone(), state: None, hint: None, command: Command::Push(sub.id) });
             out.push(Entry { group: "Actions", glyph: Icon::Flow, title: "Show pipeline".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Pipeline) });
             out.push(Entry { group: "Actions", glyph: Icon::Board, title: "Show board".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Board) });
@@ -333,6 +335,7 @@ impl Monaged {
             Command::Zen => self.toggle_zen(cx),
             Command::Density(compact) => self.set_density(compact, cx),
             Command::Health => self.open_health(cx),
+            Command::SubChanges(id) => self.open_sub_changes(id, cx),
         }
         if self.form.is_none() && self.palette.is_none() && !self.shortcuts_open {
             if let Some(id) = self.sel_agent {

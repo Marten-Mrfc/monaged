@@ -981,6 +981,9 @@ impl Monaged {
             let sub = self.agent(agent_id).map(|a| a.record.subproject_id);
             self.sel_agent = self.agents.iter().find(|a| Some(a.record.subproject_id) == sub && !a.record.archived).map(|a| a.record.id);
         }
+        if let Some(sub_id) = self.agent(agent_id).map(|a| a.record.subproject_id) {
+            let _ = self.store.log_event(sub_id, Some(agent_id), "archive", &format!("Archived {name}"));
+        }
         self.toast_action(Tone::Info, format!("Archived {name}"), "Undo", crate::feedback::ToastAction::Restore(agent_id), cx);
         cx.notify();
     }

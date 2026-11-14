@@ -61,6 +61,8 @@ pub(crate) enum ConfirmAction {
     RemoveApiKey,
     CleanupWorktrees(i64),
     Promote(i64, String, String),
+    Rerun(i64, crate::pipeline::Stage),
+    RerunBuilder(i64, String),
 }
 
 pub(crate) struct Confirm {
@@ -311,6 +313,22 @@ impl Monaged {
                     true,
                 )
             }
+            ConfirmAction::Rerun(_, stage) => (
+                format!("Run {} again?", stage.label().to_lowercase()),
+                match stage {
+                    crate::pipeline::Stage::Research => "A new researcher starts from your request. The verification and the plan after it are done again too.".to_string(),
+                    crate::pipeline::Stage::Build => "New builders start on every workstream of the current plan. The earlier builders and their branches stay.".to_string(),
+                    _ => "A new agent does this stage again; the earlier ones and their work stay.".to_string(),
+                },
+                "Run again".to_string(),
+                false,
+            ),
+            ConfirmAction::RerunBuilder(_, workstream) => (
+                format!("Start a new builder for {workstream}?"),
+                "It gets the same brief and a branch of its own. The earlier builder stays, so you can compare.".to_string(),
+                "Start builder".to_string(),
+                false,
+            ),
             ConfirmAction::Promote(_, from, to) => (
                 format!("Merge {from} into {to}?"),
                 format!("{to} is your top branch, so this asks first. Monaged merges in a clean checkout and stops if there are conflicts."),
@@ -342,6 +360,8 @@ impl Monaged {
             ConfirmAction::RemoveApiKey => self.remove_api_key(cx),
             ConfirmAction::CleanupWorktrees(sub_id) => self.cleanup_worktrees(sub_id, cx),
             ConfirmAction::Promote(project_id, from, to) => self.promote_confirmed(project_id, from, to, cx),
+            ConfirmAction::Rerun(sub_id, stage) => self.rerun_stage(sub_id, stage, cx),
+            ConfirmAction::RerunBuilder(sub_id, workstream) => self.rerun_builder(sub_id, &workstream, cx),
         }
         cx.notify();
     }
@@ -643,6 +663,16 @@ impl Monaged {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let alive = view
                     .update(cx, |this, cx| {
+                        // A Windows notification was clicked: go where it pointed.
+                        if let Some((sub_id, agent_id)) = crate::notify::take_click() {
+                            this.form = None;
+                            this.select_sub(sub_id, cx);
+                            if let Some(agent_id) = agent_id {
+                                this.select_agent(agent_id, cx);
+                            }
+                        }
+                        this.check_notifications();
+                        this.sync_queue();
                         if this.needs_clock() {
                             cx.notify();
                         }
@@ -653,6 +683,74 @@ impl Monaged {
                 }
             }
         })
+    }
+
+    /// Windows notifications for new "Needs you" items while you're in another
+    /// window, the flashing taskbar button, and the tray icon's summary.
+    pub(crate) fn check_notifications(&mut self) {
+        let inbox = self.inbox();
+        let keys: std::collections::HashSet<String> =
+            inbox.iter().map(|i| format!("{}|{}|{:?}", i.title, i.sub_id, i.agent_id)).collect();
+        let os = self.store.setting("notify:os").is_none_or(|v| v == "1");
+        let flash = self.store.setting("notify:flash").is_none_or(|v| v == "1");
+        if !self.window_active {
+            let mut any = false;
+            for item in &inbox {
+                let key = format!("{}|{}|{:?}", item.title, item.sub_id, item.agent_id);
+                if !self.seen_inbox.contains(&key) {
+                    any = true;
+                    if os {
+                        crate::notify::send(&item.title, &item.detail, (item.sub_id, item.agent_id));
+                    }
+                }
+            }
+            if any && flash {
+                crate::notify::flash(true);
+            }
+        }
+        self.seen_inbox = keys;
+        let working = self.agents.iter().filter(|a| a.is_working()).count();
+        let tip = match (working, inbox.len()) {
+            (0, 0) => "Monaged".to_string(),
+            (w, 0) => format!("Monaged · {w} working"),
+            (0, n) => format!("Monaged · {n} need{} you", if n == 1 { "s" } else { "" }),
+            (w, n) => format!("Monaged · {w} working · {n} need{} you", if n == 1 { "s" } else { "" }),
+        };
+        if self.last_tip != tip {
+            crate::notify::set_tip(&tip);
+            self.last_tip = tip;
+        }
+    }
+
+    /// Keeps the queued messages on disk, so they survive a restart.
+    pub(crate) fn sync_queue(&mut self) {
+        let current: std::collections::HashMap<i64, String> =
+            self.agents.iter().filter_map(|a| a.queued_prompt.clone().map(|q| (a.record.id, q))).collect();
+        if current == self.saved_queue {
+            return;
+        }
+        for (id, text) in &current {
+            if self.saved_queue.get(id) != Some(text) {
+                let _ = self.store.save_queued(*id, Some(text));
+            }
+        }
+        for id in self.saved_queue.keys() {
+            if !current.contains_key(id) {
+                let _ = self.store.save_queued(*id, None);
+            }
+        }
+        self.saved_queue = current;
+    }
+
+    /// An agent finished while you're elsewhere (Settings → Notifications).
+    pub(crate) fn notify_finished(&self, agent_id: i64) {
+        if self.window_active || self.store.setting("notify:finished").is_some_and(|v| v == "0") || self.store.setting("notify:os").is_some_and(|v| v == "0") {
+            return;
+        }
+        let Some(agent) = self.agent(agent_id) else { return };
+        let sub = self.subprojects.iter().find(|s| s.id == agent.record.subproject_id).map(|s| s.name.clone()).unwrap_or_default();
+        let preview: String = agent.last_reply().lines().find(|l| !l.trim().is_empty()).unwrap_or_default().chars().take(120).collect();
+        crate::notify::send(&format!("{} finished", agent.record.name), &format!("{sub} · {preview}"), (agent.record.subproject_id, Some(agent_id)));
     }
 
     /// Opens a subproject's inspector on a tab (from menus and toasts).

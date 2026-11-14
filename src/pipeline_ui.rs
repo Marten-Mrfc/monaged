@@ -19,11 +19,19 @@ impl Monaged {
         (2..).map(|n| format!("{base}-{n}")).find(|name| !taken(name)).unwrap_or_else(|| base.to_string())
     }
 
-    fn save_pipeline(&mut self, sub_id: i64) {
+    pub(crate) fn save_pipeline(&mut self, sub_id: i64) {
         if let Some(p) = self.pipelines.get(&sub_id)
             && let Err(err) = self.store.save_pipeline(p)
         {
             eprintln!("[app] could not save pipeline: {err:#}");
+        }
+        // Each new stage goes into the timeline once.
+        if let Some(p) = self.pipelines.get(&sub_id) {
+            let stage = p.stage.label().to_string();
+            if self.logged_stage.get(&sub_id) != Some(&stage) {
+                let _ = self.store.log_event(sub_id, None, "stage", &format!("Pipeline: {stage}"));
+                self.logged_stage.insert(sub_id, stage);
+            }
         }
     }
 
@@ -57,7 +65,7 @@ impl Monaged {
         cx.notify();
     }
 
-    fn role_spec(name: &str, role: Role, brief: String, select: bool) -> AgentSpec {
+    pub(crate) fn role_spec(name: &str, role: Role, brief: String, select: bool) -> AgentSpec {
         let on_feature_branch = role == Role::Integrator;
         AgentSpec { name: name.into(), role, on_feature_branch, brief: Some(brief), select }
     }
@@ -75,7 +83,7 @@ impl Monaged {
         cx.notify();
     }
 
-    fn start_verification(&mut self, sub_id: i64, cx: &mut Context<Self>) {
+    pub(crate) fn start_verification(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
         let (request, research) = (p.request.clone(), p.research.clone().unwrap_or_default());
         p.stage = Stage::Verify;
@@ -152,7 +160,7 @@ impl Monaged {
         }
     }
 
-    fn start_integration(&mut self, sub_id: i64, cx: &mut Context<Self>) {
+    pub(crate) fn start_integration(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let branches: Vec<String> = self
             .agents
             .iter()
@@ -471,21 +479,46 @@ impl Monaged {
                     .child(div().size(px(9.)).rounded_full().border_1().border_color(rgb(theme::text_4())))
                     .into_any_element()
             };
+            let stage = *stage;
+            let rerunnable = done && matches!(stage, Stage::Research | Stage::Verify | Stage::Plan | Stage::Build | Stage::Integrate) && !p.done.is_empty() || (done && matches!(stage, Stage::Research | Stage::Verify | Stage::Plan));
             div()
+                .id(("stage-row", i))
                 .flex()
                 .items_center()
                 .gap(px(10.))
+                .h(px(24.))
                 .text_size(px(13.))
                 .text_color(rgb(if now { theme::text() } else if done { theme::text_3() } else { theme::text_2() }))
+                .group("stage-row")
                 .child(mark)
                 .child(div().flex_1().child(stage.label()))
-                .child(ui::mono(if done || now { meta_for(*stage) } else { String::new() }))
+                .child(ui::mono(if done || now { meta_for(stage) } else { String::new() }))
+                .when(rerunnable, |d| {
+                    d.child(
+                        div()
+                            .id(("stage-rerun", i))
+                            .invisible()
+                            .group_hover("stage-row", |s| s.visible())
+                            .size(px(22.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(theme::hover())))
+                            .tooltip(crate::shell::tip("Run this stage again"))
+                            .child(icon(Icon::Refresh).size(px(13.)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ask_confirm(crate::feedback::ConfirmAction::Rerun(sub_id, stage), window, cx)
+                            })),
+                    )
+                })
         }));
 
         let gate: Option<AnyElement> = match p.stage {
             Stage::Decide => Some(self.render_decide_card(p, sub_id, cx)),
             Stage::Approve => p.plan.as_ref().map(|plan| self.render_plan_card(plan, sub_id, true, cx)),
-            Stage::Build | Stage::Integrate => Some(self.render_build_card(p, sub_id)),
+            Stage::Build | Stage::Integrate => Some(self.render_build_card(p, sub_id, cx)),
             _ => None,
         };
         let spent = self.sub_costs.get(&sub_id).copied().unwrap_or(0.0);
@@ -625,14 +658,20 @@ impl Monaged {
                             button("plan-approve", format!("Approve and build ({builders} builder{})", if builders == 1 { "" } else { "s" }), theme::PRIMARY_BG)
                                 .on_click(cx.listener(move |this, _, _, cx| this.start_build(sub_id, cx))),
                         )
-                        .child(button("plan-stop", "Stop", theme::red_soft()).on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx))))
-                        .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child("Want changes? Reply to the planner; its new plan replaces this one.")),
+                        .child(
+                            ui::button("plan-edit", ui::Kind::Secondary, Some(Icon::Edit), "Edit plan")
+                                .on_click(cx.listener(move |this, _, window, cx| this.open_plan_editor(sub_id, window, cx))),
+                        )
+                        .child(button("plan-stop", "Stop", theme::red_soft()).on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx)))),
+                )
+                .child(
+                    div().text_size(px(12.)).text_color(rgb(theme::text_3())).child("Edit it yourself, or reply to the planner: its new plan replaces this one."),
                 )
             })
             .into_any_element()
     }
 
-    fn render_build_card(&self, p: &Pipeline, sub_id: i64) -> AnyElement {
+    fn render_build_card(&self, p: &Pipeline, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
         let rows = self
             .agents
             .iter()
@@ -654,6 +693,19 @@ impl Monaged {
                     .child(div().flex_1().font_family(theme::MONO).text_size(px(12.)).child(a.record.name.clone()))
                     .child(ui::mono(word))
                     .children(a.confidence.as_ref().map(|c| ui::score_meter(c.score)))
+                    .when(!a.is_working() && matches!(a.role(), Role::Builder(_)), |d| {
+                        let workstream = match a.role() {
+                            Role::Builder(w) => w,
+                            _ => String::new(),
+                        };
+                        d.child(
+                            ui::icon_button(("rerun-builder", a.record.id as usize), Icon::Refresh)
+                                .tooltip(crate::shell::tip("Start a new builder for this workstream"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.ask_confirm(crate::feedback::ConfirmAction::RerunBuilder(sub_id, workstream.clone()), window, cx)
+                                })),
+                        )
+                    })
             });
         gate_card("Builders").children(rows).into_any_element()
     }

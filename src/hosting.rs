@@ -138,3 +138,47 @@ pub fn request_status(remote: &Remote, source: &str) -> Result<Option<Request>> 
         url: first["url"].as_str().or_else(|| first["web_url"].as_str()).unwrap_or_default().to_string(),
     }))
 }
+
+/// The latest CI run on a branch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ci {
+    /// "success", "failure", "running" or "none".
+    pub state: String,
+    pub name: String,
+    pub url: String,
+}
+
+/// The newest CI run (GitHub Actions or a GitLab pipeline) for `branch`.
+pub fn ci_status(remote: &Remote, branch: &str) -> Result<Option<Ci>> {
+    let Some(provider) = remote.provider else { return Ok(None) };
+    let repo = repo_arg(remote);
+    match provider {
+        Provider::GitHub => {
+            let out = cli(provider, remote, &["run", "list", "--repo", &repo, "--branch", branch, "--limit", "1", "--json", "status,conclusion,displayTitle,url"])?;
+            let list: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            let Some(run) = list.as_array().and_then(|a| a.first()) else { return Ok(None) };
+            let state = match (run["status"].as_str().unwrap_or_default(), run["conclusion"].as_str().unwrap_or_default()) {
+                ("completed", "success" | "skipped" | "neutral") => "success",
+                ("completed", _) => "failure",
+                _ => "running",
+            };
+            Ok(Some(Ci {
+                state: state.into(),
+                name: run["displayTitle"].as_str().unwrap_or("workflow").to_string(),
+                url: run["url"].as_str().unwrap_or_default().to_string(),
+            }))
+        }
+        Provider::GitLab => {
+            let path = format!("projects/{}/pipelines?ref={}&per_page=1", remote.slug.replace('/', "%2F"), branch.replace('/', "%2F"));
+            let out = cli(provider, remote, &["api", &path])?;
+            let list: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            let Some(run) = list.as_array().and_then(|a| a.first()) else { return Ok(None) };
+            let state = match run["status"].as_str().unwrap_or_default() {
+                "success" | "skipped" | "manual" => "success",
+                "failed" | "canceled" => "failure",
+                _ => "running",
+            };
+            Ok(Some(Ci { state: state.into(), name: format!("pipeline #{}", run["id"]), url: run["web_url"].as_str().unwrap_or_default().to_string() }))
+        }
+    }
+}

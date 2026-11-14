@@ -57,6 +57,7 @@ pub(crate) enum MenuAction {
     Rename(i64),
     Archive(i64),
     Restore(i64),
+    SubChanges(i64),
 }
 
 pub(crate) enum Entry {
@@ -135,6 +136,7 @@ impl Monaged {
                 let idle_agents = self.agents.iter().any(|a| a.record.subproject_id == sid && !a.record.archived && !a.is_working());
                 vec![
                     item("Open", Icon::Layers, MenuAction::OpenSub(sid)),
+                    item("All changes", Icon::Diff, MenuAction::SubChanges(sid)),
                     item("New agent", Icon::Plus, MenuAction::NewAgent(sid)).hint("Ctrl N"),
                     item(if running { "Pipeline running" } else { "Run the pipeline" }, Icon::Play, MenuAction::RunPipeline(sid)).enabled(!running),
                     Entry::Separator,
@@ -244,6 +246,7 @@ impl Monaged {
             MenuAction::Rename(aid) => self.start_rename(aid, window, cx),
             MenuAction::Archive(aid) => self.archive_agent(aid, cx),
             MenuAction::Restore(aid) => self.restore_agent(aid, cx),
+            MenuAction::SubChanges(sid) => self.open_sub_changes(sid, cx),
         }
         cx.notify();
     }

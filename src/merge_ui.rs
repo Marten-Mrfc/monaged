@@ -131,7 +131,7 @@ impl Monaged {
         cx.notify();
     }
 
-    fn remote(&self, project_id: i64) -> Option<Remote> {
+    pub(crate) fn remote(&self, project_id: i64) -> Option<Remote> {
         self.branch_info.get(&project_id)?.state.remote_url.as_deref().and_then(hosting::parse_remote)
     }
 
@@ -142,7 +142,7 @@ impl Monaged {
     }
 
     /// The integrator's score, else the lowest builder score, else the lowest of any agent.
-    fn sub_confidence(&self, sub_id: i64) -> Option<(u8, String)> {
+    pub(crate) fn sub_confidence(&self, sub_id: i64) -> Option<(u8, String)> {
         let agents: Vec<_> = self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived).collect();
         if let Some(c) = agents.iter().find(|a| a.role() == Role::Integrator).and_then(|a| a.confidence.as_ref()) {
             return Some((c.score, "integrator".into()));
@@ -336,6 +336,8 @@ impl Monaged {
                                 let _ = this.store.save_pipeline(&this.pipelines[&sub_id]);
                             }
                         }
+                        let kind = if merged_sha.is_some() { "merge" } else if !conflict.is_empty() { "conflict" } else { "failed" };
+                        let _ = this.store.log_event(sub_id, None, kind, &text);
                         let state = this.merge_state(sub_id);
                         state.busy = false;
                         state.conflict = conflict;
@@ -347,6 +349,7 @@ impl Monaged {
                     None => {}
                 }
                 this.settle("merge", tone, text, cx);
+                this.advance_merge_queue(cx);
                 this.refresh_branches(project_id, cx);
                 cx.notify();
             })
@@ -421,6 +424,11 @@ impl Monaged {
                 })
                 .await;
             view.update(cx, |this, cx| {
+                match &result {
+                    Ok(Some(url)) => drop(this.store.log_event(sub_id, None, "push", &format!("Pushed {} and opened {url}", sub.branch))),
+                    Ok(None) => drop(this.store.log_event(sub_id, None, "push", &format!("Pushed {} to origin", sub.branch))),
+                    Err(err) => drop(this.store.log_event(sub_id, None, "failed", &format!("Push failed: {err:#}"))),
+                }
                 let state = this.merge_state(sub_id);
                 state.busy = false;
                 state.message = Some(match result {

@@ -285,7 +285,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// The local UTC offset, read once from Windows (falls back to UTC).
-fn local_offset_secs() -> i64 {
+pub fn local_offset_secs() -> i64 {
     use std::sync::OnceLock;
     static OFFSET: OnceLock<i64> = OnceLock::new();
     *OFFSET.get_or_init(|| {

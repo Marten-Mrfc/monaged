@@ -65,6 +65,16 @@ pub struct Store {
     conn: Connection,
 }
 
+/// One line in a subproject's timeline. `kind` is "turn", "review", "agent",
+/// "run", "board:<kind>" or "event:<kind>"; `data` is a few fields joined by '|'.
+#[derive(Clone, Debug)]
+pub struct TimelineEvent {
+    pub at: i64,
+    pub kind: String,
+    pub agent_id: Option<i64>,
+    pub data: String,
+}
+
 const SCHEMA: &str = "
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS projects (
@@ -144,6 +154,19 @@ CREATE TABLE IF NOT EXISTS turns (
     cache_read_tokens INTEGER NOT NULL,
     cache_write_tokens INTEGER NOT NULL,
     cost_usd REAL NOT NULL,
+    at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY,
+    subproject_id INTEGER NOT NULL,
+    agent_id INTEGER,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS queued_prompts (
+    agent_id INTEGER PRIMARY KEY,
+    text TEXT NOT NULL,
     at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -540,6 +563,55 @@ impl Store {
     pub fn runs(&self) -> Result<Vec<crate::usage::Run>> {
         let mut stmt = self.conn.prepare("SELECT size, workstreams, cost_usd FROM pipeline_runs ORDER BY id DESC LIMIT 50")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- Timeline ------------------------------------------------------------
+
+    /// Something worth seeing later in a subproject's timeline (a merge, a push…).
+    pub fn log_event(&self, subproject_id: i64, agent_id: Option<i64>, kind: &str, text: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO events (subproject_id, agent_id, kind, text) VALUES (?1, ?2, ?3, ?4)",
+            params![subproject_id, agent_id, kind, text],
+        )?;
+        Ok(())
+    }
+
+    /// A subproject's history, newest first: turns, board posts, reviews,
+    /// agents created, pipeline runs and logged events.
+    pub fn timeline(&self, subproject_id: i64, limit: usize) -> Result<Vec<TimelineEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT at, 'turn', agent_id, model || '|' || printf('%.4f', cost_usd) || '|' || output_tokens FROM turns WHERE subproject_id = ?1
+             UNION ALL SELECT at, 'board:' || kind, agent_id, author || '|' || title FROM board WHERE subproject_id = ?1
+             UNION ALL SELECT r.updated_at, 'review', r.agent_id, COALESCE(r.score, 0) || '|' || COALESCE(r.verdict, '') FROM reviews r JOIN agents a ON a.id = r.agent_id WHERE a.subproject_id = ?1 AND r.score IS NOT NULL
+             UNION ALL SELECT created_at, 'agent', id, name || '|' || role FROM agents WHERE subproject_id = ?1
+             UNION ALL SELECT at, 'run', NULL, size || '|' || workstreams || '|' || printf('%.2f', cost_usd) FROM pipeline_runs WHERE subproject_id = ?1
+             UNION ALL SELECT at, 'event:' || kind, agent_id, text FROM events WHERE subproject_id = ?1
+             ORDER BY 1 DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![subproject_id, limit as i64], |r| {
+            Ok(TimelineEvent { at: r.get(0)?, kind: r.get(1)?, agent_id: r.get(2)?, data: r.get::<_, Option<String>>(3)?.unwrap_or_default() })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- Queued messages ----------------------------------------------------
+
+    /// A message waiting to go out survives a restart.
+    pub fn save_queued(&self, agent_id: i64, text: Option<&str>) -> Result<()> {
+        match text {
+            Some(text) => self.conn.execute(
+                "INSERT INTO queued_prompts (agent_id, text) VALUES (?1, ?2) ON CONFLICT(agent_id) DO UPDATE SET text = excluded.text, at = strftime('%s','now')",
+                params![agent_id, text],
+            )?,
+            None => self.conn.execute("DELETE FROM queued_prompts WHERE agent_id = ?1", params![agent_id])?,
+        };
+        Ok(())
+    }
+
+    pub fn queued(&self) -> Result<HashMap<i64, String>> {
+        let mut stmt = self.conn.prepare("SELECT agent_id, text FROM queued_prompts")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

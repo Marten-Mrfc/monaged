@@ -7,7 +7,7 @@ use gpui::{AnyElement, Context, FontStyle, FontWeight, HighlightStyle, StyledTex
 
 use crate::agent::{AgentTab, AgentView, Tone};
 use crate::icons::{Icon, icon, icon_sized};
-use crate::diff::{self, LineKind};
+use crate::diff;
 use crate::llm::Backend;
 use crate::markdown::{self, Block, Inline, Style};
 use crate::review::{self, TurnInfo};
@@ -21,8 +21,6 @@ const SETTINGS_SECTIONS: [(&str, Icon); 6] = [
     ("Reviews", Icon::Shield),
     ("Git", Icon::Branch),
 ];
-
-const MAX_DIFF_LINES: usize = 2500;
 
 impl Monaged {
     /// The API key when set; otherwise the Claude CLI (Max plan) if allowed.
@@ -63,6 +61,7 @@ impl Monaged {
             self.pipeline_on_turn(agent_id, cx);
         }
         self.flush_queued_prompt(agent_id);
+        self.notify_finished(agent_id);
         // A free agent you aren't looking at finished: say so, with a way there.
         if let Some(agent) = self.agent(agent_id)
             && agent.role() == crate::pipeline::Role::Free
@@ -654,32 +653,6 @@ impl Monaged {
                             cx.notify();
                         }))
                 }));
-                let shown = file.lines.len().min(MAX_DIFF_LINES);
-                let lines = file.lines[..shown].iter().map(|line| {
-                    let (sign, bg, fg) = match line.kind {
-                        LineKind::Add => ("+", Some(theme::add_bg()), theme::text()),
-                        LineKind::Remove => ("−", Some(theme::del_bg()), theme::text()),
-                        LineKind::Hunk => ("", Some(theme::code_bg()), theme::text_3()),
-                        LineKind::Context => ("", None, theme::text_2()),
-                    };
-                    let sign_color = match line.kind {
-                        LineKind::Add => theme::add(),
-                        LineKind::Remove => theme::del(),
-                        _ => theme::text_4(),
-                    };
-                    let number = |n: Option<u32>| n.map(|n| n.to_string()).unwrap_or_default();
-                    let text = if line.text.is_empty() { " ".to_string() } else { line.text.replace('\t', "    ") };
-                    div()
-                        .flex()
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .line_height(px(19.))
-                        .when_some(bg, |d, bg| d.bg(rgb(bg)))
-                        .child(div().w(px(40.)).flex_none().pr(px(8.)).text_right().text_color(rgb(theme::text_4())).child(number(line.old_no)))
-                        .child(div().w(px(40.)).flex_none().pr(px(8.)).text_right().text_color(rgb(theme::text_4())).child(number(line.new_no)))
-                        .child(div().w(px(16.)).flex_none().text_color(rgb(sign_color)).child(sign))
-                        .child(div().flex_1().min_w(px(0.)).text_color(rgb(fg)).child(text))
-                });
                 let diff_view = div()
                     .flex_1()
                     .min_w(px(0.))
@@ -699,20 +672,8 @@ impl Monaged {
                                     .on_click(cx.listener(move |this, _, _, cx| this.open_in_zed(file_path.clone(), cx))),
                             ),
                     )
-                    .child(
-                        div()
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(rgb(theme::line()))
-                            .bg(rgb(theme::panel()))
-                            .py(px(4.))
-                            .overflow_hidden()
-                            .when(file.binary, |d| d.child(div().p(px(10.)).child(muted("Binary file"))))
-                            .children(lines),
-                    )
-                    .when(file.lines.len() > shown, |d| {
-                        d.child(muted(&format!("{} more lines not shown; open the file in Zed to see everything.", file.lines.len() - shown)))
-                    })
+                    .children(self.render_comments_bar(agent_id, cx))
+                    .child(self.render_diff_body(Some(agent_id), file, cx))
                     .when(agent.changes_truncated, |d| d.child(muted("This diff is very large; only the first part was loaded.")));
                 div().flex().items_start().gap(px(16.)).child(list).child(diff_view).into_any_element()
             }
