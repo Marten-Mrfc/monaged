@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monaged · One window for every Claude Code agent</title>
+<meta name="description" content="Monaged runs Claude Code agents on your projects in parallel, each in its own git worktree inside WSL, and shows you what they did, how sure they are, and what needs you. A native Windows app.">
+<meta name="theme-color" content="#0a0a0a">
+<meta property="og:title" content="Monaged · One window for every Claude Code agent">
+<meta property="og:description" content="Run Claude Code agents side by side on your projects, each in its own worktree. Research, plan, build, review and merge, from one native Windows window.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="img/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0a; --panel: #0f0f0f; --raised: #161616; --line: #1e1e1e; --line-strong: #2f2f2f;
+  --text: #ededed; --body: #d4d4d4; --text-2: #b4b4b4; --text-3: #8a8a8a; --text-4: #4a4a4a;
+  --red: #d71921; --red-text: #ff5a5f; --red-soft: #2a1211;
+  --btn-bg: #ededed; --btn-text: #0a0a0a;
+  --sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #ffffff; --panel: #f6f6f5; --raised: #ffffff; --line: #e9e9e8; --line-strong: #d4d4d2;
+    --text: #111111; --body: #262626; --text-2: #4a4a4a; --text-3: #6b6b6b; --text-4: #c8c8c6;
+    --red-text: #c4141c; --red-soft: #fdeaea; --btn-bg: #111111; --btn-text: #ffffff;
+    color-scheme: light;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+img { max-width: 100%; height: auto; display: block; }
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+.mono { font-family: var(--mono); }
+
+/* Navigation */
+nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+nav .wrap { display: flex; align-items: center; gap: 28px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 500; font-size: 17px; letter-spacing: -0.01em; }
+.brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); }
+nav .links { display: flex; gap: 24px; margin-left: auto; font-size: 14px; color: var(--text-2); }
+nav .links a { text-decoration: none; }
+nav .links a:hover { color: var(--text); }
+
+/* Buttons */
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 20px; border-radius: 8px; font-weight: 500; font-size: 15px; text-decoration: none; border: 1px solid var(--line-strong); color: var(--text); background: transparent; transition: background .15s; }
+.btn:hover { background: var(--raised); }
+.btn.primary { background: var(--btn-bg); color: var(--btn-text); border-color: var(--btn-bg); }
+.btn.primary:hover { opacity: .9; }
+.btn svg { width: 16px; height: 16px; }
+
+/* Hero */
+.hero { padding: 88px 0 40px; text-align: center; }
+.eyebrow { display: inline-flex; align-items: center; gap: 10px; font: 500 12.5px/1 var(--mono); color: var(--text-3); text-transform: uppercase; letter-spacing: .06em; padding: 8px 14px; border: 1px solid var(--line-strong); border-radius: 999px; }
+.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); }
+h1 { font-size: clamp(38px, 6vw, 68px); line-height: 1.04; letter-spacing: -0.035em; font-weight: 600; margin: 26px auto 22px; max-width: 900px; }
+.lede { font-size: clamp(17px, 2vw, 20px); color: var(--text-2); max-width: 720px; margin: 0 auto 34px; }
+.cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.fine { margin-top: 16px; font-size: 13px; color: var(--text-3); }
+.shot { margin: 56px auto 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--line-strong); box-shadow: 0 40px 120px -40px rgba(215, 25, 33, .25), 0 30px 80px -30px rgba(0, 0, 0, .7); }
+
+/* Sections */
+section { padding: 96px 0; border-top: 1px solid var(--line); }
+.kicker { font: 500 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); margin-bottom: 14px; }
+h2 { font-size: clamp(28px, 3.6vw, 42px); line-height: 1.12; letter-spacing: -0.025em; font-weight: 600; margin: 0 0 18px; max-width: 760px; }
+.sub { color: var(--text-2); font-size: 18px; max-width: 700px; margin: 0; }
+
+.problem { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: start; }
+.problem p { color: var(--text-2); font-size: 18px; margin: 0 0 14px; }
+.tree { font: 14px/2 var(--mono); color: var(--text-2); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px 26px; }
+.tree b { color: var(--text); font-weight: 500; }
+.tree .r { color: var(--red-text); }
+.tree .m { color: var(--text-3); }
+
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 48px; }
+.card { background: var(--bg); padding: 28px; }
+.card .ic { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--text); margin-bottom: 18px; }
+.card .ic svg { width: 16px; height: 16px; }
+.card h3 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 8px; }
+.card p { color: var(--text-2); font-size: 15px; margin: 0; }
+
+.feature { display: grid; grid-template-columns: 5fr 7fr; gap: 56px; align-items: center; }
+.feature.flip { grid-template-columns: 7fr 5fr; }
+.feature.flip .text { order: 2; }
+.feature img { border-radius: 10px; border: 1px solid var(--line-strong); }
+.feature ul { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 10px; }
+.feature li { display: flex; gap: 12px; color: var(--body); font-size: 15.5px; }
+.feature li::before { content: ""; flex: none; width: 6px; height: 6px; margin-top: 10px; border-radius: 50%; background: var(--text-3); }
+.feature li.r::before { background: var(--red); }
+
+.arch { margin-top: 44px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 34px; overflow-x: auto; }
+.arch svg { min-width: 760px; width: 100%; height: auto; color: var(--text-3); }
+
+.steps { counter-reset: s; display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; margin-top: 44px; }
+.step { border-top: 1px solid var(--line-strong); padding-top: 18px; }
+.step::before { counter-increment: s; content: "0" counter(s); font: 500 13px var(--mono); color: var(--red-text); }
+.step h3 { font-size: 16px; margin: 10px 0 6px; }
+.step p { margin: 0; color: var(--text-2); font-size: 14.5px; }
+
+.gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 44px; }
+.gallery figure { margin: 0; }
+.gallery img { border-radius: 10px; border: 1px solid var(--line-strong); }
+.gallery figcaption { margin-top: 10px; font-size: 14px; color: var(--text-3); }
+
+.req { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-top: 40px; }
+.req dl { margin: 0; display: grid; gap: 16px; }
+.req dt { font-weight: 600; font-size: 15px; }
+.req dd { margin: 4px 0 0; color: var(--text-2); font-size: 15px; }
+
+details { border-bottom: 1px solid var(--line); padding: 18px 0; }
+details:first-of-type { border-top: 1px solid var(--line); }
+summary { cursor: pointer; font-weight: 500; font-size: 17px; list-style: none; display: flex; justify-content: space-between; gap: 20px; }
+summary::after { content: "+"; color: var(--text-3); font-family: var(--mono); }
+details[open] summary::after { content: "−"; }
+details p { color: var(--text-2); margin: 12px 0 0; max-width: 760px; }
+.faq { margin-top: 36px; }
+
+.final { text-align: center; padding: 120px 0; }
+.final h2 { margin: 0 auto 18px; }
+.final .sub { margin: 0 auto 34px; }
+
+footer { border-top: 1px solid var(--line); padding: 40px 0 56px; color: var(--text-3); font-size: 13.5px; }
+footer .wrap { display: flex; gap: 24px; justify-content: space-between; flex-wrap: wrap; }
+footer p { margin: 0; max-width: 640px; }
+footer a { color: var(--text-2); }
+
+@media (max-width: 900px) {
+  .problem, .feature, .feature.flip, .req, .gallery { grid-template-columns: 1fr; gap: 32px; }
+  .feature.flip .text { order: 0; }
+  .grid { grid-template-columns: 1fr 1fr; }
+  .steps { grid-template-columns: 1fr 1fr; }
+  nav .links a.hide-sm { display: none; }
+}
+@media (max-width: 560px) {
+  .grid, .steps { grid-template-columns: 1fr; }
+  .hero { padding-top: 56px; }
+  section { padding: 72px 0; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top"><span class="dot"></span>Monaged</a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a class="hide-sm" href="#how">How it works</a>
+      <a class="hide-sm" href="#faq">FAQ</a>
+      <a href="https://github.com/Marten-Mrfc/monaged">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot"></span>Windows · Claude Code · WSL</span>
+    <h1>One window for every Claude Code agent.</h1>
+    <p class="lede">Monaged runs Claude Code agents on your projects in parallel, each in its own git worktree, and shows you what they did, how sure they are, and what needs you.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/Marten-Mrfc/monaged/releases/latest"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg>Download for Windows</a>
+      <a class="btn" href="https://github.com/Marten-Mrfc/monaged"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3"/></svg>View on GitHub</a>
+    </div>
+    <p class="fine">Free · Version 0.3.0 · Windows 10 and 11 (x64) · Uses your own Claude account</p>
+    <picture>
+      <source srcset="img/light.png" media="(prefers-color-scheme: light)">
+      <img class="shot" src="img/pipeline-build.png" alt="Monaged's window: a project tree with seven agents, a builder's conversation with its tool calls, and the pipeline at the build stage." width="1600" height="1000">
+    </picture>
+  </div>
+</header>
+
+<section>
+  <div class="wrap problem">
+    <div>
+      <div class="kicker">The problem</div>
+      <h2>Chats in one long list don't scale past one task.</h2>
+      <p>In a chat app, every conversation for every project lands in the same list. Run two agents on one repo and they edit the same files. Ask one to build something big and you're reading a wall of text, hoping it's right.</p>
+      <p>Monaged gives each project its subprojects, each subproject its agents, and each agent its own branch and worktree. They work side by side, and you see the state of everything at a glance.</p>
+    </div>
+    <div class="tree" aria-label="An example project tree">
+      <b>HR app</b><br>
+      &nbsp;&nbsp;▸ <b>Company-car reservations</b> <span class="m">feature/car-reservations</span><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;● research <span class="m">· done</span><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;● build-api <span class="m">· working</span><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;● build-ui <span class="m">· working</span><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="r">●</span> integrator <span class="r">· needs you</span><br>
+      &nbsp;&nbsp;▸ <b>Dashboard</b> <span class="m">feature/dashboard</span><br>
+      &nbsp;&nbsp;▸ <b>Security pass</b> <span class="m">standing/security</span>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <div class="kicker">What it does</div>
+    <h2>Everything around the agent, so you can trust what it did.</h2>
+    <p class="sub">Claude Code does the work. Monaged organizes it, runs it in parallel, checks it, and merges it on your rules.</p>
+    <div class="grid">
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5 14 5.5 8 8.5 2 5.5zM2 8.5l6 3 6-3M2 11l6 3 6-3"/></svg></div><h3>Projects, subprojects, agents</h3><p>A tree for all of it. Each agent gets its own git worktree and branch, so parallel agents never touch each other's files or your checkout.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="3.5" cy="12.5" r="1.5"/><circle cx="12.5" cy="3.5" r="1.5"/><path d="M5 12.5h3.5a2 2 0 0 0 0-4h-1a2 2 0 0 1 0-4H11"/></svg></div><h3>A pipeline that asks first</h3><p>Research, two verifiers, a plan, then up to ten builders in parallel and an integrator. Large or risky plans always wait for you.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg></div><h3>Review with reasons</h3><p>Every turn gets a diff, a short summary and a 1–5 confidence score from your tests plus a skeptical review, always with the why.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="10" height="11" rx="1.5"/><path d="M6 3V2h4v1M5.75 7h4.5M5.75 10h3"/></svg></div><h3>Agents that coordinate cheaply</h3><p>A shared board for contracts and decisions, file claims that warn about overlaps, and a librarian that answers before anyone gets interrupted.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="10.5" r="1.5"/><path d="M4.5 5v6M4.5 5a5.5 5.5 0 0 0 5.5 5.5"/></svg></div><h3>Merges on your rules</h3><p>develop, acceptance, main, each with its own rule. A merge queue with CI status, and pull or merge requests through gh and glab.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0M8 11.5l2.75-2.75"/></svg></div><h3>Budget-aware</h3><p>Your weekly usage and Monaged's share of it, caps per subproject, and cost estimates on plans. Automatic work pauses before your limit.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5h6a3 3 0 0 1 0 6H7M3.5 6.5l2.5-2.5M3.5 6.5 6 9"/></svg></div><h3>Undo anything</h3><p>Every turn is checkpointed. Roll a worktree back to before any message, undo the rollback, or replay an agent's work turn by turn.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="10.5" r="3"/><path d="m7.6 8.4 5.4-5.4M11 5l1.5 1.5"/></svg></div><h3>Secrets stay secret</h3><p>Environment variables encrypted with Windows DPAPI. Agents see names, not values, and values are masked everywhere Monaged shows text.</p></div>
+      <div class="card"><div class="ic"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8.5" rx="1.5"/><path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4.5 10h7"/></svg></div><h3>Native and keyboard-first</h3><p>Built on GPUI, the UI framework behind Zed. Ctrl K for everything, shortcuts you can change, four themes, and Zed one click away.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap feature">
+    <div class="text">
+      <div class="kicker">The pipeline</div>
+      <h2>From a sentence to a merged feature, and you decide when.</h2>
+      <p class="sub">Describe what to build. A researcher reads the code, two verifiers check its report, a planner splits the work into parallel workstreams with contracts between them.</p>
+      <ul>
+        <li>Plans show their size, risk flags, confidence and an estimated cost.</li>
+        <li class="r">Migrations, auth, data, public APIs and security always wait for your approval.</li>
+        <li>Auto mode answers questions and starts small, confident plans by itself.</li>
+        <li>Builders work in parallel; an integrator merges them and runs the tests.</li>
+      </ul>
+    </div>
+    <img src="img/pipeline-plan.png" alt="A plan card waiting for approval: two workstreams, their contracts, the tests, and an Approve and build button." width="1600" height="1000" loading="lazy">
+  </div>
+</section>
+
+<section>
+  <div class="wrap feature flip">
+    <div class="text">
+      <div class="kicker">Review</div>
+      <h2>A score you can argue with.</h2>
+      <p class="sub">Agents are confident by nature. Monaged's score comes from evidence: your project's tests, and a short review asked to find what's broken.</p>
+      <ul>
+        <li>Failing tests cap the score at 2, no tests at 4.</li>
+        <li>Every score lists its reasons and the concrete issues found.</li>
+        <li>Comment on diff lines and send them back to the agent in one go.</li>
+        <li>Summaries and reviews run on Haiku: cheap, and optional.</li>
+      </ul>
+    </div>
+    <img src="img/agent.png" alt="An agent that fixed a bug: its conversation with tool calls, a summary, a 5 out of 5 confidence score with reasons, and the diff." width="1600" height="1000" loading="lazy">
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="kicker">How it works</div>
+    <h2>Your Windows desktop, Linux where the agents run.</h2>
+    <p class="sub">Monaged is a native Windows app. Agents run inside WSL through the Agent Client Protocol, each session in its own worktree. Nothing runs in anyone's cloud but Claude itself.</p>
+    <div class="arch">
+      <svg viewBox="0 0 960 300" role="img" aria-label="Monaged on Windows talks to claude-agent-acp inside WSL over the Agent Client Protocol; each session works in its own worktree; agents reach Monaged's tools through an MCP relay.">
+        <defs>
+          <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+        </defs>
+        <g fill="none" stroke="var(--line-strong)" stroke-width="1.2">
+          <rect x="20" y="40" width="250" height="220" rx="12" fill="var(--bg)"/>
+          <rect x="400" y="40" width="250" height="220" rx="12" fill="var(--bg)"/>
+          <rect x="740" y="30" width="200" height="66" rx="10" fill="var(--bg)"/>
+          <rect x="740" y="117" width="200" height="66" rx="10" fill="var(--bg)"/>
+          <rect x="740" y="204" width="200" height="66" rx="10" fill="var(--bg)"/>
+        </g>
+        <g font-family="var(--sans)" fill="var(--text)">
+          <circle cx="44" cy="68" r="5" fill="var(--red)"/>
+          <text x="58" y="73" font-size="16" font-weight="600">Monaged</text>
+          <text x="40" y="104" font-size="13" fill="var(--text-2)">Windows · GPUI</text>
+          <text x="40" y="140" font-size="13" fill="var(--text-2)">Projects › subprojects › agents</text>
+          <text x="40" y="164" font-size="13" fill="var(--text-2)">Pipeline, reviews, merges</text>
+          <text x="40" y="188" font-size="13" fill="var(--text-2)">Board and usage meter</text>
+          <text x="40" y="236" font-size="12" font-family="var(--mono)" fill="var(--text-3)">%APPDATA%\Monaged</text>
+          <text x="420" y="73" font-size="16" font-weight="600">claude-agent-acp</text>
+          <text x="420" y="104" font-size="13" fill="var(--text-2)">inside WSL (Ubuntu)</text>
+          <text x="420" y="140" font-size="13" fill="var(--text-2)">One process, many sessions</text>
+          <text x="420" y="164" font-size="13" fill="var(--text-2)">Claude Code, your login</text>
+          <text x="420" y="236" font-size="12" font-family="var(--mono)" fill="var(--text-3)">~/.local/share/claude-agent-acp</text>
+          <text x="758" y="58" font-size="14" font-weight="500">research</text>
+          <text x="758" y="80" font-size="11.5" font-family="var(--mono)" fill="var(--text-3)">worktree · agent/…/research</text>
+          <text x="758" y="145" font-size="14" font-weight="500">build-api</text>
+          <text x="758" y="167" font-size="11.5" font-family="var(--mono)" fill="var(--text-3)">worktree · agent/…/build-api</text>
+          <text x="758" y="232" font-size="14" font-weight="500">build-ui</text>
+          <text x="758" y="254" font-size="11.5" font-family="var(--mono)" fill="var(--text-3)">worktree · agent/…/build-ui</text>
+        </g>
+        <g stroke="var(--text-3)" stroke-width="1.4" fill="none" style="color: var(--text-3)">
+          <path d="M272 120H396" marker-end="url(#a)"/>
+          <path d="M396 188H272" marker-end="url(#a)" stroke-dasharray="4 4"/>
+          <path d="M652 150C700 150 700 63 736 63" marker-end="url(#a)"/>
+          <path d="M652 150H736" marker-end="url(#a)"/>
+          <path d="M652 150C700 150 700 237 736 237" marker-end="url(#a)"/>
+        </g>
+        <g font-family="var(--mono)" font-size="11.5" fill="var(--text-3)">
+          <text x="290" y="110">ACP over wsl.exe</text>
+          <text x="290" y="208">MCP tools via relay</text>
+        </g>
+      </svg>
+    </div>
+    <div class="steps">
+      <div class="step"><h3>Install</h3><p>Run the setup file. It installs just for you, without admin rights.</p></div>
+      <div class="step"><h3>Let the guide set up</h3><p>It installs WSL and Ubuntu if you need them, then the Claude agent. It asks before each step.</p></div>
+      <div class="step"><h3>Sign in to Claude</h3><p>With your Pro or Max subscription, or an Anthropic Console account.</p></div>
+      <div class="step"><h3>Add a project</h3><p>Clone a repo, pick a folder, or start empty. Or try the built-in playground first.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="kicker">A closer look</div>
+    <h2>Built to be read at a glance.</h2>
+    <p class="sub">Monochrome, with one red that only ever means "needs you". Hairlines instead of boxes, real data in mono, and nothing that moves without a reason.</p>
+    <div class="gallery">
+      <figure><img src="img/setup.png" alt="The setup guide on a PC without WSL, with an Install WSL button." width="1600" height="1000" loading="lazy"><figcaption>The setup guide checks first, then installs what's missing, asking each time.</figcaption></figure>
+      <figure><img src="img/pipeline-decide.png" alt="The pipeline waiting at the decide gate, with the research report and both verifiers' verdicts." width="1600" height="1000" loading="lazy"><figcaption>Two verifiers check the research before anything gets built.</figcaption></figure>
+      <figure><img src="img/palette.png" alt="The command palette listing actions for the current subproject." width="1600" height="1000" loading="lazy"><figcaption>Ctrl K jumps anywhere and runs anything.</figcaption></figure>
+      <figure><img src="img/pipeline-done.png" alt="A finished pipeline merged into develop, all eight stages checked." width="1600" height="1000" loading="lazy"><figcaption>Finished work merges into develop when the rules and the score allow it.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="kicker">Before you start</div>
+    <h2>What you need.</h2>
+    <div class="req">
+      <dl>
+        <div><dt>Windows 10 (version 2004 or later) or Windows 11, x64</dt><dd>With virtualization turned on, which most PCs have by default.</dd></div>
+        <div><dt>WSL 2 with Ubuntu</dt><dd>The setup guide installs both if they're missing (one administrator prompt and usually a restart).</dd></div>
+        <div><dt>A Claude account</dt><dd>A Claude Pro or Max subscription, or an Anthropic Console account with API billing. Agents use your own account.</dd></div>
+      </dl>
+      <dl>
+        <div><dt>Optional: Zed, gh, glab</dt><dd>Open worktrees in Zed with one click; create pull and merge requests and see CI status on GitHub and GitLab.</dd></div>
+        <div><dt>Optional: an Anthropic API key</dt><dd>Pays for the Haiku summaries and reviews from API credit instead of your plan. Stored in Windows Credential Manager.</dd></div>
+        <div><dt>No account with us</dt><dd>Monaged has no servers, no sign-up and no telemetry. Your projects and settings stay on your PC.</dd></div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <div class="kicker">FAQ</div>
+    <h2>Questions.</h2>
+    <div class="faq">
+      <details><summary>Is Monaged made by Anthropic?</summary><p>No. Monaged is an independent project. It runs Claude Code through the open-source claude-agent-acp adapter and the Agent Client Protocol. Claude and Claude Code are trademarks of Anthropic.</p></details>
+      <details><summary>What does it cost?</summary><p>Monaged is free. Agents use your own Claude subscription or API account, and Monaged shows how much of your week it's using, with a cap you choose (25% by default).</p></details>
+      <details><summary>Why WSL?</summary><p>Claude Code, git worktrees and your toolchains work best on Linux, and WSL gives each agent a real Linux environment while you stay on your Windows desktop. Monaged handles the bridge.</p></details>
+      <details><summary>Does it send my code anywhere?</summary><p>Only to Claude, the same way Claude Code does when you use it directly. Monaged itself has no backend and no analytics. Update checks go to GitHub's release page.</p></details>
+      <details><summary>Windows says it protected my PC when I run the installer.</summary><p>The installer isn't code-signed yet, so SmartScreen warns about it. Click More info, then Run anyway. Every release lists SHA-256 checksums you can compare.</p></details>
+      <details><summary>Can I use it at work?</summary><p>Yes. Monaged is source-available under the MIT license with the Commons Clause: use it for anything, change it and contribute. What you can't do is sell Monaged itself, or a service that's mostly Monaged.</p></details>
+      <details><summary>Other agents than Claude?</summary><p>Monaged speaks the Agent Client Protocol, so other ACP agents can be added as profiles in Settings → Agents. Claude Code is the one it's built and tested with.</p></details>
+    </div>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap">
+    <h2>Give your agents a place to work.</h2>
+    <p class="sub">Download Monaged, let the setup guide do the rest, and try it on the playground project first.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/Marten-Mrfc/monaged/releases/latest"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg>Download for Windows</a>
+      <a class="btn" href="https://github.com/Marten-Mrfc/monaged/blob/main/docs/getting-started.md">Read the guide</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Monaged is an independent project, not affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic. Source-available under the <a href="https://github.com/Marten-Mrfc/monaged/blob/main/LICENSE">MIT license with the Commons Clause</a>.</p>
+    <p><a href="https://github.com/Marten-Mrfc/monaged">GitHub</a> · <a href="https://github.com/Marten-Mrfc/monaged/releases">Releases</a> · <a href="https://github.com/Marten-Mrfc/monaged/blob/main/PRIVACY.md">Privacy</a> · <a href="https://github.com/Marten-Mrfc/monaged/blob/main/SECURITY.md">Security</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

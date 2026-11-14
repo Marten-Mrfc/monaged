@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in Monaged doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security problems go through SECURITY.md instead, please.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest steps that make it happen. The playground project is a good place to try.
+      placeholder: |
+        1. Open …
+        2. Click …
+  - type: input
+    id: version
+    attributes:
+      label: Monaged version
+      description: Settings → Updates.
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows and WSL
+      description: Windows version, your distro, and `wsl --version` if you know it.
+      placeholder: Windows 11 24H2, Ubuntu 24.04, WSL 2.6.1
+  - type: textarea
+    id: health
+    attributes:
+      label: Health check and log
+      description: What Ctrl K → Health check shows, and the end of %APPDATA%\Monaged\monaged.log. Check that it holds nothing private.
+      render: text

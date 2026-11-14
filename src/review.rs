@@ -107,15 +107,16 @@ pub fn summarize(backend: &Backend, turn: &TurnInfo) -> Result<(Summary, Usage)>
 
 // ---- Checks ----------------------------------------------------------------
 
-/// Detects the project's test command in the worktree and runs it (10 min max).
-pub fn run_checks(distro: &str, worktree: &str) -> Checks {
-    // The project's own test command (monaged.json, like the Run tab) wins;
-    // otherwise detect one. Python runs pytest only when it's importable,
-    // else unittest, so a missing pytest isn't counted as failing tests.
+/// Runs the project's tests in the worktree (10 min max): `command` from
+/// Project settings when set, else the one in monaged.json (as the Run tab
+/// does), else a detected one. Python runs pytest only when it's importable,
+/// else unittest, so a missing pytest isn't counted as failing tests.
+pub fn run_checks(distro: &str, worktree: &str, command: Option<&str>) -> Checks {
     let script = format!(
         r#"cd {wt} || exit 1
-cmd=''
-if [ -f monaged.json ] && command -v python3 >/dev/null; then
+cmd={given}
+if [ -n "$cmd" ]; then :
+elif [ -f monaged.json ] && command -v python3 >/dev/null; then
   cmd=$(python3 -c 'import json; print(json.load(open("monaged.json")).get("test", ""))' 2>/dev/null)
 fi
 if [ -n "$cmd" ]; then :
@@ -133,6 +134,7 @@ out=$(timeout 600 bash -lc "$cmd" 2>&1); code=$?
 echo "MONAGED_EXIT $code"
 printf '%s\n' "$out" | tail -n 30"#,
         wt = quote(worktree),
+        given = quote(command.unwrap_or_default()),
     );
     let out = match run(distro, &script) {
         Ok(out) => out,

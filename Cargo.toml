@@ -1,9 +1,12 @@
 [package]
 name = "monaged"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 publish = false
 description = "Monaged: run Claude Code agents on your projects, inside WSL, from one native window"
+license-file = "LICENSE"
+repository = "https://github.com/Marten-Mrfc/monaged"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"
@@ -25,3 +28,8 @@ debug = "limited"
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+
+# Release builds: smaller and a little faster, without slowing CI down much.
+[profile.release]
+codegen-units = 4
+strip = "debuginfo"

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/Marten-Mrfc/monaged/blob/main/docs/troubleshooting.md
+    about: Common problems with WSL, the Claude agent, signing in and updates, and how to fix them.

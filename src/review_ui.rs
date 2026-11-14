@@ -216,6 +216,13 @@ impl Monaged {
     pub(crate) fn review_agent(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         let Some(backend) = self.backend() else { return self.no_backend(agent_id, cx) };
         let Some((distro, worktree, base)) = self.agent_context(agent_id) else { return };
+        // The test command from Project settings → Run, when there is one.
+        let test_command = self
+            .agent(agent_id)
+            .and_then(|a| self.subprojects.iter().find(|s| s.id == a.record.subproject_id))
+            .and_then(|s| self.store.setting(&format!("run:{}", s.project_id)))
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["test"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned));
         let Some(agent) = self.agent_mut(agent_id) else { return };
         if agent.reviewing {
             return;
@@ -232,7 +239,7 @@ impl Monaged {
                     if changes.files.is_empty() {
                         return anyhow::Ok((changes, None));
                     }
-                    let checks = review::run_checks(&distro, &worktree);
+                    let checks = review::run_checks(&distro, &worktree, test_command.as_deref());
                     let reviewed = review::review(&backend, &task, &changes.raw, &checks)?;
                     Ok((changes, Some(reviewed)))
                 })
