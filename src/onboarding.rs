@@ -1147,7 +1147,7 @@ impl Monaged {
                     .child(text(
                         "Agents run inside WSL, the Linux that comes with Windows. Installing it takes a few minutes and one administrator prompt; Windows usually wants a restart afterwards, and Monaged opens again by itself to carry on.".into(),
                     ))
-                    .when_some(p.wsl_error.clone().filter(|e| !e.is_empty()), |d, e| d.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(rgb(theme::text_3())).child(format!("wsl.exe: {e}"))))
+                    .when_some(p.wsl_error.clone().filter(|e| !e.is_empty()), |d, e| d.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(rgb(theme::text_3())).child(e)))
                     .child(
                         div()
                             .flex()

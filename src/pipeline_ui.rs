@@ -620,6 +620,7 @@ impl Monaged {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(button("decide-go", "Write the plan", theme::PRIMARY_BG).on_click(cx.listener(move |this, _, _, cx| this.start_planning(sub_id, cx))))
                     .child(button("decide-stop", "Don't build this", theme::red_soft()).on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx)))),
@@ -637,6 +638,7 @@ impl Monaged {
 
         let mut header = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_2()
             .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())).child(pipeline::plan_title(plan)))
@@ -660,7 +662,15 @@ impl Monaged {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().flex().gap_2().child(div().font_family(theme::MONO).text_size(px(12.)).child(w.name.clone())).child(div().text_color(rgb(theme::text_2())).child(goal)))
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(div().flex_none().font_family(theme::MONO).text_size(px(12.)).child(w.name.clone()))
+                            .child(div().flex_1().min_w(px(120.)).text_color(rgb(theme::text_2())).child(goal)),
+                    )
                     .when(!owns.is_empty(), |d| d.child(div().pl_3().text_size(px(12.)).text_color(rgb(theme::text_3())).child(format!("owns {owns}"))))
             }))
             .when(!strings("contracts").is_empty(), |d| {
@@ -673,6 +683,7 @@ impl Monaged {
                 d.child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap_2()
                         .child(

@@ -167,7 +167,8 @@ fn short_role(role: &Role) -> String {
         Role::Researcher => "research".into(),
         Role::Verifier(n) => format!("verify {n}"),
         Role::Planner => "plan".into(),
-        Role::Builder(ws) => ws.clone(),
+        // Builders are named after their workstream already (build-<workstream>).
+        Role::Builder(_) => "build".into(),
         Role::Integrator => "integrate".into(),
         Role::Free => String::new(),
     }
