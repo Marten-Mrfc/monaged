@@ -1,0 +1,26 @@
+[package]
+name = "monaged"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Monaged: run Claude Code agents on your projects, inside WSL, from one native window"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+gpui = "=0.2.2"
+keyring = "4.2.0"
+pulldown-cmark = { version = "0.13.6", default-features = false }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+serde_json = "1"
+unicode-segmentation = "1"
+ureq = { version = "3.5.2", features = ["json"] }
+
+[profile.dev]
+debug = "limited"
+
+# Dependencies change rarely: build them optimized without debug info so the
+# UI stays smooth in dev builds and linking stays fast.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

@@ -1,0 +1,2 @@
+# Store and check out text files with LF endings (rustfmt's default), regardless of core.autocrlf.
+* text=auto eol=lf
