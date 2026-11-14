@@ -12,15 +12,18 @@ jobs:
     if: contains(github.event.head_commit.message, '[probe]')
     runs-on: ubuntu-latest
     steps:
-      - name: Can this token make a release?
+      - name: Which release call is refused?
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "--- API: draft release"
-          id=$(gh api -X POST repos/$GITHUB_REPOSITORY/releases -f tag_name=probe-$GITHUB_RUN_ID -f target_commitish=$GITHUB_SHA -F draft=true -f name=probe --jq .id) && echo "API DRAFT OK $id" && gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/$id && echo "API DELETE OK" || echo "API DRAFT FAILED"
-          echo "--- API: release with make_latest"
-          id=$(gh api -X POST repos/$GITHUB_REPOSITORY/releases -f tag_name=probe2-$GITHUB_RUN_ID -f target_commitish=$GITHUB_SHA -F draft=true -f make_latest=true -f name=probe2 --jq .id) && echo "API LATEST OK $id" && gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/$id || echo "API LATEST FAILED"
-          echo "--- gh release create (draft)"
-          echo hi > probe.txt
-          gh release create probe3-$GITHUB_RUN_ID probe.txt --repo $GITHUB_REPOSITORY --target $GITHUB_SHA --draft --title probe3 --notes probe && echo "GH CREATE OK" && gh release delete probe3-$GITHUB_RUN_ID --repo $GITHUB_REPOSITORY --yes && echo "GH DELETE OK" || echo "GH CREATE FAILED"
-          for t in probe-$GITHUB_RUN_ID probe2-$GITHUB_RUN_ID probe3-$GITHUB_RUN_ID; do gh api -X DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$t 2>/dev/null || true; done
+          R=$GITHUB_REPOSITORY; N=$GITHUB_RUN_ID
+          echo "--- 1. tag ref matching v*"
+          gh api -X POST repos/$R/git/refs -f ref=refs/tags/v0.0.0-probe$N -f sha=$GITHUB_SHA >/dev/null && echo "V TAG OK" && gh api -X DELETE repos/$R/git/refs/tags/v0.0.0-probe$N || echo "V TAG FAILED"
+          echo "--- 2. published release, probe tag"
+          id=$(gh api -X POST repos/$R/releases -f tag_name=probe-pub-$N -f target_commitish=$GITHUB_SHA -F draft=false -F prerelease=true -f name=probe --jq .id) && echo "PUBLISHED OK" && gh api -X DELETE repos/$R/releases/$id || echo "PUBLISHED FAILED"
+          gh api -X DELETE repos/$R/git/refs/tags/probe-pub-$N 2>/dev/null || true
+          echo "--- 3. draft release, v* tag"
+          id=$(gh api -X POST repos/$R/releases -f tag_name=v0.0.1-probe$N -f target_commitish=$GITHUB_SHA -F draft=true -f name=probe --jq .id) && echo "V DRAFT OK" && gh api -X DELETE repos/$R/releases/$id || echo "V DRAFT FAILED"
+          echo "--- 4. existing release v0.3.0?"
+          gh release view v0.3.0 --repo $R --json tagName,isDraft 2>&1 || true
+          gh api repos/$R/rulesets --jq '.[] | {name, target, enforcement}' 2>&1 || true
