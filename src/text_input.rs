@@ -70,6 +70,8 @@ pub struct TextInput {
     draft: String,
     /// The parent shows suggestions: Up/Down/Tab go to it instead.
     pub suggesting: bool,
+    /// Ctrl+Enter sends and Enter adds a line (Settings → Message box).
+    ctrl_send: bool,
 }
 
 impl TextInput {
@@ -96,7 +98,13 @@ impl TextInput {
             history_pos: None,
             draft: String::new(),
             suggesting: false,
+            ctrl_send: false,
         }
+    }
+
+    pub fn set_ctrl_send(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.ctrl_send = on;
+        cx.notify();
     }
 
     /// No border or background: the surrounding container draws the frame.
@@ -833,7 +841,11 @@ impl Render for TextInput {
         let focused = self.focus_handle.is_focused(window);
         div()
             .flex()
-            .key_context(if self.multiline { "TextInput multiline" } else { "TextInput" })
+            .key_context(match (self.multiline, self.ctrl_send) {
+                (true, true) => "TextInput multiline ctrl_send",
+                (true, false) => "TextInput multiline",
+                _ => "TextInput",
+            })
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))

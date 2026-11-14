@@ -65,6 +65,7 @@ pub(crate) enum Command {
     Density(bool),
     Health,
     SubChanges(i64),
+    CheckUpdates,
 }
 
 #[derive(Clone)]
@@ -209,6 +210,7 @@ impl Monaged {
         out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: Some("F11"), command: Command::Zen });
         let compact = ui::compact();
         out.push(Entry { group: "App", glyph: Icon::Lines, title: if compact { "Comfortable density".into() } else { "Compact density".into() }, detail: String::new(), state: None, hint: None, command: Command::Density(!compact) });
+        out.push(Entry { group: "App", glyph: Icon::ArrowDown, title: "Check for updates".into(), detail: format!("Monaged {}", crate::update::current()), state: None, hint: None, command: Command::CheckUpdates });
         out.push(Entry { group: "App", glyph: Icon::Gauge, title: "Health check".into(), detail: "WSL, the agent, git, logins, disk".into(), state: None, hint: None, command: Command::Health });
         // Saved layouts of the project you're in.
         if let Some(project_id) = self.sel_project {
@@ -336,6 +338,7 @@ impl Monaged {
             Command::Density(compact) => self.set_density(compact, cx),
             Command::Health => self.open_health(cx),
             Command::SubChanges(id) => self.open_sub_changes(id, cx),
+            Command::CheckUpdates => self.check_updates(false, cx),
         }
         if self.form.is_none() && self.palette.is_none() && !self.shortcuts_open {
             if let Some(id) = self.sel_agent {

@@ -19,6 +19,7 @@ mod git_ui;
 mod health;
 mod hosting;
 mod icons;
+mod install;
 mod layout;
 mod llm;
 mod markdown;
@@ -35,6 +36,7 @@ mod review_ui;
 mod search;
 mod secrets;
 mod session_ui;
+mod settings_ui;
 mod shell;
 mod store;
 #[cfg(test)]
@@ -42,6 +44,7 @@ mod tests;
 mod text_input;
 mod theme;
 mod timeline;
+mod update;
 mod ui;
 mod usage;
 mod usage_ui;
@@ -282,6 +285,14 @@ struct Monaged {
     git_panels: HashMap<i64, git_ui::GitPanel>,
     commit_view: Option<git_ui::CommitView>,
     fetched: HashMap<i64, Instant>,
+    /// Updates from GitHub releases (Settings → Updates).
+    update: update::UpdateState,
+    /// Settings → Agents: the new profile's name and command.
+    profile_inputs: Option<(Entity<TextInput>, Entity<TextInput>)>,
+    /// What the agent said about itself when we connected (agentInfo, agentCapabilities).
+    agent_info: Option<Value>,
+    /// "sub|agent", as last saved for "Open where you left off".
+    last_place: String,
     /// Settings → Git: your identity inside WSL.
     git_identity: Option<(Entity<TextInput>, Entity<TextInput>)>,
     /// Each subproject's latest CI run: (asked at, run).
@@ -473,6 +484,10 @@ impl Monaged {
             commit_view: None,
             fetched: HashMap::new(),
             git_identity: None,
+            profile_inputs: None,
+            update: update::UpdateState::default(),
+            agent_info: None,
+            last_place: String::new(),
             merge_queue: std::collections::VecDeque::new(),
             comments: Vec::new(),
             comment_draft: None,
@@ -512,6 +527,8 @@ impl Monaged {
         if let Some(project_id) = this.sel_project {
             this.refresh_branches(project_id, cx);
         }
+        this.restore_place(cx);
+        this.auto_check_updates(cx);
         this
     }
 
@@ -708,6 +725,7 @@ impl Monaged {
             Pending::Initialize => {
                 self.conn = Conn::Ready;
                 self.reconnect.attempts = 0;
+                self.agent_info = Some(result.clone());
                 // The selected agent, plus any agent with a message waiting (e.g. a role brief).
                 let mut open: Vec<i64> = self.agents.iter().filter(|a| a.queued_prompt.is_some()).map(|a| a.record.id).collect();
                 open.extend(self.sel_agent);
@@ -1128,6 +1146,7 @@ impl Monaged {
         self.refresh_spend();
         self.form = Some(Form::Settings { error: None });
         self.load_git_identity(cx);
+        self.ensure_profile_inputs(cx);
         cx.notify();
     }
 
@@ -1553,6 +1572,7 @@ fn parse_args() -> AgentConfig {
         match arg.as_str() {
             "--distro" => config.distro = args.next().unwrap_or(config.distro),
             "--agent" => config.agent_cmd = args.next().unwrap_or(config.agent_cmd),
+            "--install" | "--uninstall" => {}
             other => eprintln!("ignoring unknown argument {other}"),
         }
     }
@@ -1569,7 +1589,33 @@ fn main() {
         }
         return;
     }
-    let config = parse_args();
+    // The setup file (or --install / --uninstall) shows the small setup window instead.
+    let setup = if args.iter().any(|a| a == "--uninstall") {
+        Some(install::SetupMode::Uninstall)
+    } else if args.iter().any(|a| a == "--install") || install::is_setup_exe() {
+        Some(install::SetupMode::Install)
+    } else {
+        None
+    };
+    if let Some(mode) = setup {
+        Application::new().with_assets(icons::Assets).run(move |cx: &mut App| {
+            let bounds = Bounds::centered(None, size(px(560.), px(300.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions { title: Some("Monaged setup".into()), ..Default::default() }),
+                    is_resizable: false,
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| install::SetupView::new(mode)),
+            )
+            .expect("failed to open the setup window");
+            cx.activate(true);
+        });
+        return;
+    }
+    install::cleanup_old();
+    let mut config = parse_args();
     let store = match Store::open() {
         Ok(store) => store,
         Err(err) => {
@@ -1577,11 +1623,18 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // The agent from Settings → Agents, unless --agent says otherwise.
+    if config.agent_cmd == AgentConfig::default().agent_cmd {
+        config.agent_cmd = settings_ui::active_command(&store);
+    }
     let saved_bounds = store.setting("ui:window").and_then(|v| parse_bounds(&v));
     Application::new().with_assets(icons::Assets).run(move |cx: &mut App| {
         cx.bind_keys(text_input::key_bindings());
         cx.bind_keys([
             KeyBinding::new("enter", Submit, Some("TextInput")),
+            // Settings → Message box: Ctrl+Enter sends, Enter adds a line.
+            KeyBinding::new("enter", text_input::Newline, Some("ctrl_send")),
+            KeyBinding::new("ctrl-enter", Submit, Some("multiline")),
             // Enter also submits a form when focus isn't in a text field.
             KeyBinding::new("enter", Submit, Some("Monaged")),
             KeyBinding::new("escape", Cancel, None),

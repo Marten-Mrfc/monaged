@@ -52,6 +52,8 @@ pub(crate) enum ToastAction {
     Open { sub_id: i64, agent_id: Option<i64> },
     /// Undo an archive.
     Restore(i64),
+    /// Download and install the newer release.
+    Update,
 }
 
 /// Steps that can't be undone ask first.
@@ -187,6 +189,7 @@ impl Monaged {
             }
             ToastAction::RetrySession(agent_id) => self.retry_session(agent_id, cx),
             ToastAction::Restore(agent_id) => self.restore_agent(agent_id, cx),
+            ToastAction::Update => self.install_update(cx),
             ToastAction::Open { sub_id, agent_id } => {
                 self.form = None;
                 self.select_sub(sub_id, cx);
@@ -686,6 +689,7 @@ impl Monaged {
                         this.check_notifications();
                         this.sync_queue();
                         this.maybe_autofetch(cx);
+                        this.remember_place();
                         if this.needs_clock() {
                             cx.notify();
                         }

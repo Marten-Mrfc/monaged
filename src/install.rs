@@ -1,0 +1,261 @@
+//! Installing Monaged just for you: no admin rights, no registry. The setup
+//! file (the same exe, named Monaged-Setup-<version>.exe) copies itself to
+//! %LOCALAPPDATA%\Programs\Monaged and adds Start menu shortcuts, one of
+//! them to uninstall. Projects and settings live in %APPDATA%\Monaged and
+//! are never touched by installing, updating or uninstalling.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context as _, Result};
+use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px, rgb};
+
+use crate::icons::Icon;
+use crate::ui::{self, Kind};
+use crate::theme;
+
+pub fn install_dir() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    PathBuf::from(base).join("Programs").join("Monaged")
+}
+
+pub fn installed_exe() -> PathBuf {
+    install_dir().join("monaged.exe")
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Monaged runs from its installed place (updates replace this file).
+pub fn running_installed() -> bool {
+    std::env::current_exe().is_ok_and(|exe| same_file(&exe, &installed_exe()))
+}
+
+/// The exe was started as the setup file.
+pub fn is_setup_exe() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .is_some_and(|n| n.starts_with("monaged-setup"))
+}
+
+/// Removes the copy an update or install moved aside (it was still running then).
+pub fn cleanup_old() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let _ = std::fs::remove_file(dir.join("monaged.old.exe"));
+    }
+}
+
+/// Puts `new` where `target` is, even while `target` is running (Windows lets
+/// a running exe be renamed, not overwritten).
+pub fn replace_exe(new: &Path, target: &Path) -> Result<()> {
+    if target.exists() {
+        let old = target.with_file_name("monaged.old.exe");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(target, &old).with_context(|| format!("couldn't move {} aside", target.display()))?;
+    }
+    std::fs::copy(new, target).with_context(|| format!("couldn't write {}", target.display()))?;
+    Ok(())
+}
+
+fn start_menu() -> PathBuf {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+    PathBuf::from(base).join("Microsoft").join("Windows").join("Start Menu").join("Programs")
+}
+
+/// A .lnk through Windows Script Host (PowerShell is always there).
+fn shortcut(link: &Path, target: &Path, args: &str, description: &str) -> Result<()> {
+    let ps = |s: &str| s.replace('\'', "''");
+    let script = format!(
+        "$s = New-Object -ComObject WScript.Shell; $l = $s.CreateShortcut('{link}'); $l.TargetPath = '{target}'; $l.Arguments = '{args}'; \
+         $l.WorkingDirectory = '{dir}'; $l.IconLocation = '{target},0'; $l.Description = '{description}'; $l.Save()",
+        link = ps(&link.display().to_string()),
+        target = ps(&target.display().to_string()),
+        args = ps(args),
+        dir = ps(&target.parent().map(|p| p.display().to_string()).unwrap_or_default()),
+        description = ps(description),
+    );
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::wsl::CREATE_NO_WINDOW);
+    }
+    let output = command.output().context("couldn't run PowerShell to make a shortcut")?;
+    if !output.status.success() {
+        anyhow::bail!("couldn't make the shortcut: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
+fn desktop() -> PathBuf {
+    let base = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+    PathBuf::from(base).join("Desktop")
+}
+
+/// Installs the running exe; returns where it went.
+pub fn install(desktop_shortcut: bool) -> Result<PathBuf> {
+    let src = std::env::current_exe().context("couldn't find this program's file")?;
+    let dst = installed_exe();
+    std::fs::create_dir_all(install_dir()).with_context(|| format!("couldn't create {}", install_dir().display()))?;
+    if !same_file(&src, &dst) {
+        replace_exe(&src, &dst)?;
+    }
+    std::fs::create_dir_all(start_menu()).ok();
+    shortcut(&start_menu().join("Monaged.lnk"), &dst, "", "Run Claude agents on your projects")?;
+    shortcut(&start_menu().join("Uninstall Monaged.lnk"), &dst, "--uninstall", "Remove Monaged (your projects and settings stay)")?;
+    if desktop_shortcut {
+        shortcut(&desktop().join("Monaged.lnk"), &dst, "", "Run Claude agents on your projects")?;
+    }
+    Ok(dst)
+}
+
+/// Removes the shortcuts and, once this process ends, the program folder.
+pub fn uninstall() -> Result<()> {
+    for link in [start_menu().join("Monaged.lnk"), start_menu().join("Uninstall Monaged.lnk"), desktop().join("Monaged.lnk")] {
+        let _ = std::fs::remove_file(link);
+    }
+    let dir = install_dir();
+    let mut command = Command::new("cmd.exe");
+    command.args(["/C", &format!("timeout /t 2 /nobreak >nul & rmdir /s /q \"{}\"", dir.display())]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::wsl::CREATE_NO_WINDOW);
+    }
+    command.spawn().context("couldn't schedule removing the program folder")?;
+    Ok(())
+}
+
+// ---- The setup window ---------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SetupMode {
+    Install,
+    Uninstall,
+}
+
+enum SetupState {
+    Ready,
+    Working,
+    Done(Option<PathBuf>),
+    Failed(String),
+}
+
+pub struct SetupView {
+    mode: SetupMode,
+    desktop: bool,
+    state: SetupState,
+}
+
+impl SetupView {
+    pub fn new(mode: SetupMode) -> Self {
+        Self { mode, desktop: false, state: SetupState::Ready }
+    }
+
+    fn run(&mut self, cx: &mut Context<Self>) {
+        self.state = SetupState::Working;
+        let (mode, desktop) = (self.mode, self.desktop);
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    match mode {
+                        SetupMode::Install => install(desktop).map(Some),
+                        SetupMode::Uninstall => uninstall().map(|_| None),
+                    }
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                this.state = match result {
+                    Ok(path) => SetupState::Done(path),
+                    Err(err) => SetupState::Failed(format!("{err:#}")),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for SetupView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let version = env!("CARGO_PKG_VERSION");
+        let (title, body) = match self.mode {
+            SetupMode::Install => (
+                format!("Install Monaged {version}"),
+                format!(
+                    "Monaged goes into {} (just for you, no admin needed) with Start menu shortcuts. Your projects and settings in %APPDATA%\\Monaged stay as they are.",
+                    install_dir().display()
+                ),
+            ),
+            SetupMode::Uninstall => (
+                "Uninstall Monaged".to_string(),
+                "Removes the program and its shortcuts. Your projects, settings and agent worktrees stay, so installing again picks up where you were.".to_string(),
+            ),
+        };
+        let actions = match &self.state {
+            SetupState::Ready => div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .when(self.mode == SetupMode::Install, |d| {
+                    let on = self.desktop;
+                    d.child(ui::switch("setup-desktop", "Desktop shortcut", on).on_click(cx.listener(move |this, _, _, cx| {
+                        this.desktop = !on;
+                        cx.notify();
+                    })))
+                })
+                .child(div().flex_1())
+                .child(ui::button("setup-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|_, _, _, cx| cx.quit())))
+                .child(
+                    ui::button("setup-go", if self.mode == SetupMode::Install { Kind::Primary } else { Kind::Danger }, None, if self.mode == SetupMode::Install { "Install" } else { "Uninstall" })
+                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
+                ),
+            SetupState::Working => div().flex().child(div().flex_1()).child(ui::busy_button("setup-busy", Kind::Primary, if self.mode == SetupMode::Install { "Installing…" } else { "Removing…" })),
+            SetupState::Done(path) => {
+                let path = path.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child(if self.mode == SetupMode::Install { "Installed." } else { "Removed. You can close this window." }))
+                    .child(ui::button("setup-close", Kind::Ghost, None, "Close").on_click(cx.listener(|_, _, _, cx| cx.quit())))
+                    .children(path.map(|p| {
+                        ui::button("setup-open", Kind::Primary, Some(Icon::Play), "Open Monaged").on_click(cx.listener(move |_, _, _, cx| {
+                            let _ = Command::new(&p).spawn();
+                            cx.quit();
+                        }))
+                    }))
+            }
+            SetupState::Failed(err) => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(ui::callout(crate::agent::Tone::Error, err.clone()))
+                .child(div().flex().gap(px(8.)).child(div().flex_1()).child(ui::button("setup-retry", Kind::Secondary, None, "Try again").on_click(cx.listener(|this, _, _, cx| this.run(cx))))),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .p(px(28.))
+            .bg(rgb(theme::bg()))
+            .text_color(rgb(theme::text()))
+            .font_family(theme::SANS)
+            .text_size(px(13.))
+            .child(div().flex().items_center().gap(px(10.)).child(div().size(px(10.)).rounded_full().bg(rgb(theme::red()))).child(ui::title(title)))
+            .child(div().line_height(px(20.)).text_color(rgb(theme::text_2())).child(body))
+            .child(div().flex_1())
+            .child(actions)
+    }
+}

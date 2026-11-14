@@ -13,13 +13,18 @@ use crate::markdown::{self, Block, Inline, Style};
 use crate::review::{self, TurnInfo};
 use crate::{Form, Monaged, dots, secrets, theme, tone_color, ui};
 
-const SETTINGS_SECTIONS: [(&str, Icon); 6] = [
+const SETTINGS_SECTIONS: [(&str, Icon); 11] = [
     ("Appearance", Icon::Eye),
+    ("Agents", Icon::Agent),
+    ("Message box", Icon::Send),
     ("Usage and budget", Icon::Gauge),
-    ("Models", Icon::Agent),
+    ("Models", Icon::Layers),
     ("API key", Icon::Key),
     ("Reviews", Icon::Shield),
     ("Git", Icon::Branch),
+    ("Notifications", Icon::Alert),
+    ("General", Icon::Sliders),
+    ("Updates", Icon::ArrowDown),
 ];
 
 impl Monaged {
@@ -487,6 +492,10 @@ impl Monaged {
                     .pb(px((window_h - 260.).max(240.)))
                         .child(column(div().pb(px(22.)).child(ui::title("Settings"))))
                         .child(column(section("Appearance", Some("Every theme keeps one rule: red only means something needs you.")).child(themes)))
+                        .child(column(
+                            section("Agents", Some("The AI agent Monaged runs your sessions with, and others you can switch to.")).child(self.render_agent_settings(cx)),
+                        ))
+                        .child(column(section("Message box", None).child(self.render_message_box_settings(cx))))
                         .child(column(section("Usage and budget", None).child(self.render_usage_settings(cx))))
                         .child(column(section("Models", None).child(self.render_model_settings(cx))))
                         .child(column(
@@ -525,7 +534,10 @@ impl Monaged {
                                             .on_click(cx.listener(|this, _, _, cx| this.copy_git_identity(cx))),
                                     ),
                                 ),
-                        )),
+                        ))
+                        .child(column(section("Notifications", None).child(self.render_notification_settings(cx))))
+                        .child(column(section("General", Some("Density, where Monaged opens, and where it keeps its data.")).child(self.render_general_settings(cx))))
+                        .child(column(section("Updates", None).child(self.render_update_settings(cx)))),
             )
             .into_any_element()
     }

@@ -10,3 +10,6 @@ Thumbs.db
 
 # Local logs
 *.log
+
+# Release files (scripts/release.ps1)
+/dist/
