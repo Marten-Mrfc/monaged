@@ -184,6 +184,54 @@ fn short(text: &str) -> String {
     text.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).collect::<Vec<_>>().join(" ")
 }
 
+/// Whether WSL is installed, without running wsl.exe: on a PC without WSL,
+/// Windows' wsl.exe stub may offer to install it by itself, and Monaged only
+/// installs things when you click. Looks for the WSL package, its services,
+/// and distros registered for this user.
+pub fn wsl_present() -> bool {
+    let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+    if std::path::Path::new(&program_files).join("WSL").join("wsl.exe").exists() {
+        return true;
+    }
+    let key_exists = |key: &str| quiet("reg.exe").args(["query", key]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    key_exists(r"HKLM\SYSTEM\CurrentControlSet\Services\WSLService")
+        || key_exists(r"HKLM\SYSTEM\CurrentControlSet\Services\LxssManager")
+        || !registered_distros().is_empty()
+}
+
+/// Distros registered for this user (from the registry), with their default user id.
+pub fn registered_distros() -> Vec<(String, Option<u32>)> {
+    let Ok(out) = quiet("reg.exe").args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss", "/s"]).output() else { return Vec::new() };
+    parse_lxss(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `reg query …\Lxss /s` output: one block per distro key.
+fn parse_lxss(text: &str) -> Vec<(String, Option<u32>)> {
+    let mut found = Vec::new();
+    let mut name: Option<String> = None;
+    let mut uid: Option<u32> = None;
+    let flush = |name: &mut Option<String>, uid: &mut Option<u32>, found: &mut Vec<(String, Option<u32>)>| {
+        if let Some(n) = name.take() {
+            found.push((n, uid.take()));
+        }
+        *uid = None;
+    };
+    for line in text.lines() {
+        if line.starts_with("HKEY_") {
+            flush(&mut name, &mut uid, &mut found);
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match parts.as_slice() {
+            ["DistributionName", "REG_SZ", rest @ ..] if !rest.is_empty() => name = Some(rest.join(" ")),
+            ["DefaultUid", "REG_DWORD", value] => uid = u32::from_str_radix(value.trim_start_matches("0x"), 16).ok(),
+            _ => {}
+        }
+    }
+    flush(&mut name, &mut uid, &mut found);
+    found
+}
+
 /// Distros WSL has, without the ones container tools install for themselves.
 pub fn list_distros() -> Vec<String> {
     match wsl_exe(&["--list", "--quiet"]) {
@@ -275,6 +323,14 @@ fn works(program: &str) -> bool {
 /// Checks everything the guide needs to know. Slow (WSL may have to start).
 pub fn probe(preferred: &str, agent_cmd: &str) -> Probe {
     let mut p = Probe::default();
+    p.win_git = windows_git("user.name").zip(windows_git("user.email"));
+    p.zed = works("zed");
+    p.gh = works("gh");
+    p.glab = works("glab");
+    if !wsl_present() {
+        p.wsl_error = Some("WSL isn't installed on this PC.".into());
+        return p;
+    }
     let status = wsl_exe(&["--status"]);
     let version = wsl_exe(&["--version"]);
     if let Ok((true, text)) = &version {
@@ -326,10 +382,6 @@ true"#,
             Err(err) => p.distro_error = Some(format!("{err:#}")),
         }
     }
-    p.win_git = windows_git("user.name").zip(windows_git("user.email"));
-    p.zed = works("zed");
-    p.gh = works("gh");
-    p.glab = works("glab");
     p
 }
 
@@ -1308,6 +1360,15 @@ mod tests {
         assert_eq!(pick_distro("Ubuntu", &list(&["Debian", "Ubuntu-24.04"])).as_deref(), Some("Ubuntu-24.04"));
         assert_eq!(pick_distro("Ubuntu", &list(&["Debian"])).as_deref(), Some("Debian"));
         assert_eq!(pick_distro("Ubuntu", &[]), None);
+    }
+
+    #[test]
+    fn reads_distros_from_the_registry() {
+        let text = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\r\n    DefaultDistribution    REG_SZ    {a}\r\n\r\n\
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{a}\r\n    State    REG_DWORD    0x1\r\n    DistributionName    REG_SZ    Ubuntu\r\n    DefaultUid    REG_DWORD    0x3e8\r\n\r\n\
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{b}\r\n    DistributionName    REG_SZ    docker-desktop\r\n    DefaultUid    REG_DWORD    0x0\r\n";
+        assert_eq!(parse_lxss(text), vec![("Ubuntu".to_string(), Some(1000)), ("docker-desktop".to_string(), Some(0))]);
+        assert!(parse_lxss("").is_empty());
     }
 
     #[test]

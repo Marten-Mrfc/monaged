@@ -454,17 +454,6 @@ impl Monaged {
             cx.notify();
         });
 
-        let distro = config.distro.clone();
-        cx.spawn(async move |view, cx| {
-            let user = cx.background_spawn(async move { git::linux_user(&distro) }).await;
-            view.update(cx, |this, cx| {
-                this.linux_user = user.ok();
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-
         let mut this = Self {
             store,
             config,
@@ -611,9 +600,7 @@ impl Monaged {
         if this.setup_needed(std::env::args().any(|a| a == "--setup")) {
             this.open_setup(cx);
         } else {
-            this.check_sandbox(cx);
-            this.connect(cx);
-            this.check_credentials(cx);
+            this.after_setup(cx);
         }
         if let Some(project_id) = this.sel_project {
             this.refresh_branches(project_id, cx);
@@ -631,6 +618,12 @@ impl Monaged {
         self.conn = Conn::Starting;
         self.reconnect.at = None;
         self.drop_live_sessions();
+        // Without WSL, wsl.exe could offer to install it by itself: say so instead.
+        if !onboarding::wsl_present() {
+            self.conn = Conn::Failed("WSL isn't installed on this PC. The setup guide installs it.".into());
+            cx.notify();
+            return;
+        }
         let mut events = acp::launch(self.config.clone());
         self._events = cx.spawn(async move |view, cx| {
             while let Some(event) = events.next().await {
