@@ -12,13 +12,15 @@ jobs:
     if: contains(github.event.head_commit.message, '[probe]')
     runs-on: ubuntu-latest
     steps:
-      - name: Can this token write?
+      - name: Can this token make a release?
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api repos/$GITHUB_REPOSITORY --jq '.permissions, .visibility' || true
-          echo "--- create a throwaway tag"
-          gh api -X POST repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/probe-$GITHUB_RUN_ID -f sha=$GITHUB_SHA && \
-            gh api -X DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/probe-$GITHUB_RUN_ID && echo "TAG WRITE OK" || echo "TAG WRITE FAILED"
-          echo "--- list releases"
-          gh api repos/$GITHUB_REPOSITORY/releases --jq 'length' || echo "RELEASE READ FAILED"
+          echo "--- API: draft release"
+          id=$(gh api -X POST repos/$GITHUB_REPOSITORY/releases -f tag_name=probe-$GITHUB_RUN_ID -f target_commitish=$GITHUB_SHA -F draft=true -f name=probe --jq .id) && echo "API DRAFT OK $id" && gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/$id && echo "API DELETE OK" || echo "API DRAFT FAILED"
+          echo "--- API: release with make_latest"
+          id=$(gh api -X POST repos/$GITHUB_REPOSITORY/releases -f tag_name=probe2-$GITHUB_RUN_ID -f target_commitish=$GITHUB_SHA -F draft=true -f make_latest=true -f name=probe2 --jq .id) && echo "API LATEST OK $id" && gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/$id || echo "API LATEST FAILED"
+          echo "--- gh release create (draft)"
+          echo hi > probe.txt
+          gh release create probe3-$GITHUB_RUN_ID probe.txt --repo $GITHUB_REPOSITORY --target $GITHUB_SHA --draft --title probe3 --notes probe && echo "GH CREATE OK" && gh release delete probe3-$GITHUB_RUN_ID --repo $GITHUB_REPOSITORY --yes && echo "GH DELETE OK" || echo "GH CREATE FAILED"
+          for t in probe-$GITHUB_RUN_ID probe2-$GITHUB_RUN_ID probe3-$GITHUB_RUN_ID; do gh api -X DELETE repos/$GITHUB_REPOSITORY/git/refs/tags/$t 2>/dev/null || true; done
