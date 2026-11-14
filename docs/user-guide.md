@@ -89,7 +89,7 @@ Right-click a project → **Project settings**:
 - **Budget** (Settings → Usage and budget): Monaged may use a share of your week (25% by default) and pauses automatic work when the whole week reaches a ceiling (90% by default). Paused work continues by itself; your own messages always go through.
 - **Spending cap**: right-click a subproject → Set a spending cap; its agents pause when they reach it.
 - **Models per role** (Settings → Models): research, verification and integration default to Sonnet; everything else to your default model.
-- **Summaries and reviews** run on Haiku: with an API key (Settings → Reviews, stored in Windows Credential Manager) they're paid from API credit; without one they use your plan through the Claude CLI.
+- **Summaries and reviews** run on Haiku: with an API key (Settings → API key, stored in Windows Credential Manager) they're paid from API credit; without one they use your plan through the Claude CLI.
 
 ## Keyboard
 

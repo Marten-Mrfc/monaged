@@ -1340,7 +1340,7 @@ impl Monaged {
                     .child(row(self.api_key.is_some(),
                         "Anthropic API key",
                         "Optional: pay for Haiku summaries and reviews from API credit instead of your plan.",
-                        Some(ui::button("setup-x-key", Kind::Secondary, None, "Settings").on_click(cx.listener(|this, _, window, cx| this.open_settings_at("Reviews", window, cx))).into_any_element()),
+                        Some(ui::button("setup-x-key", Kind::Secondary, None, "Settings").on_click(cx.listener(|this, _, window, cx| this.open_settings_at("API key", window, cx))).into_any_element()),
                     ))
                     .child(ui::meta("Commands starting with sudo run in WSL (open your distro's terminal); winget commands run in Windows Terminal or PowerShell."));
             }
