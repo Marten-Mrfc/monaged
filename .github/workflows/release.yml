@@ -63,8 +63,9 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "publish=$publish" >> $env:GITHUB_OUTPUT
           Write-Host "Monaged $version"
+      # In release mode, so the tests share their build with the release itself.
       - name: Test
-        run: cargo test --locked
+        run: cargo test --release --locked
       - name: Build
         run: cargo build --release --locked
       - name: Package
