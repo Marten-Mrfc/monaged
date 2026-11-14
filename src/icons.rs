@@ -78,6 +78,12 @@ icons! {
     ArrowDown => "arrow-down",
     Trash => "trash",
     Flag => "flag",
+    Dot => "dot",
+    Paperclip => "paperclip",
+    Image => "image",
+    Lines => "lines",
+    Hash => "hash",
+    ArrowUp => "arrow-up",
 }
 
 /// Serves the embedded icons to GPUI.

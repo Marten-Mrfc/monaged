@@ -16,9 +16,8 @@ use crate::agent::{AgentTab, AgentView, Item, Status, Tone};
 use crate::icons::{Icon, icon, icon_sized};
 use crate::menu::MenuTarget;
 use crate::pipeline::{self, Role, Stage};
-use crate::text_input::TextInput;
 use crate::ui::{self, Kind, State};
-use crate::{Conn, Form, LOGIN_COMMAND, Monaged, SourceKind, SubKind, Submit, coord, coord_ui, dots, pipeline_ui, review_ui, theme};
+use crate::{Conn, Form, LOGIN_COMMAND, Monaged, SourceKind, SubKind, coord, coord_ui, dots, pipeline_ui, review_ui, theme};
 
 pub(crate) const COLUMN_MIN: f32 = 600.;
 const READING_WIDTH: f32 = 680.;
@@ -28,6 +27,8 @@ pub(crate) enum InspectorTab {
     Pipeline,
     Board,
     Merge,
+    Git,
+    Timeline,
 }
 
 /// One pane in the agent area.
@@ -47,6 +48,12 @@ pub(crate) struct Inbox {
 
 /// A tooltip bubble, with the shortcut that does the same when there is one.
 pub(crate) struct Tip(SharedString, Option<&'static str>);
+
+impl Tip {
+    pub(crate) fn new(text: SharedString) -> Self {
+        Tip(text, None)
+    }
+}
 
 impl Render for Tip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -110,7 +117,7 @@ fn on_right_click(target: MenuTarget, cx: &mut Context<Monaged>) -> impl Fn(&Mou
 }
 
 pub(crate) fn agent_state(agent: &AgentView) -> State {
-    if agent.needs_attention() || agent.paused || open_question(agent) || matches!(agent.status, Status::Failed(_)) {
+    if agent.needs_attention() || agent.open_form() || agent.paused || open_question(agent) || matches!(agent.status, Status::Failed(_)) {
         State::NeedsYou
     } else if agent.is_working() || matches!(agent.status, Status::Starting | Status::Loading) {
         State::Working
@@ -179,7 +186,9 @@ impl Monaged {
     pub(crate) fn columns(&self, main_width: f32) -> Vec<Column> {
         let Some(sub_id) = self.sel_sub else { return Vec::new() };
         let max = ((main_width / COLUMN_MIN).floor() as usize).clamp(1, 4);
-        let in_sub = |id: i64| self.agent(id).is_some_and(|a| a.record.subproject_id == sub_id && !a.record.archived);
+        let in_sub = |id: i64| {
+            self.agent(id).is_some_and(|a| a.record.subproject_id == sub_id && (!a.record.archived || self.sel_agent == Some(id)))
+        };
         let mut cols: Vec<Column> = Vec::new();
         let focused = self.sel_agent.filter(|&id| in_sub(id));
         if let Some(id) = focused {
@@ -216,10 +225,10 @@ impl Monaged {
         for column in columns {
             let Column::Agent(id) = *column else { continue };
             if !self.inputs.contains_key(&id) {
-                let name = self.agent(id).map(|a| a.record.name.clone()).unwrap_or_default();
-                let input = cx.new(|cx| TextInput::new(format!("Message {name}"), cx).bare());
+                let input = self.make_composer(id, cx);
                 self.inputs.insert(id, input);
             }
+            self.prepare_form_inputs(id, cx);
             self.scrolls.entry(id).or_insert_with(|| {
                 let handle = ScrollHandle::new();
                 handle.scroll_to_bottom();
@@ -292,7 +301,7 @@ impl Monaged {
             for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub.id && !a.record.archived) {
                 let title = if agent.needs_attention() {
                     Some("Asks for permission".to_string())
-                } else if open_question(agent) {
+                } else if agent.open_form() || open_question(agent) {
                     Some("Has a question".to_string())
                 } else if agent.paused {
                     Some("Paused by the budget".to_string())
@@ -331,10 +340,18 @@ impl Monaged {
 
     pub(crate) fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let width = f32::from(window.viewport_size().width);
-        let sidebar_w = if self.sidebar_open { Self::sidebar_width(width) } else { 0. };
-        let inspector_w = if self.inspector_visible() { Self::inspector_width(width) } else { 0. };
+        let zen = self.zen && self.sel_agent.is_some() && self.form.is_none();
+        let sidebar_w = if self.sidebar_open && !zen { self.sidebar_px(width) } else { 0. };
+        let inspector_w = if self.inspector_visible() && !zen { self.inspector_px(width) } else { 0. };
         let main_w = width - sidebar_w - inspector_w;
-        let columns = if self.form.is_none() { self.columns(main_w) } else { Vec::new() };
+        let columns = match (self.form.is_none(), zen) {
+            (false, _) => Vec::new(),
+            (true, true) => self.sel_agent.map(Column::Agent).into_iter().collect(),
+            (true, false) => self.columns(main_w),
+        };
+        if let Some(sub_id) = self.sel_sub {
+            self.load_pane_weights(sub_id, columns.len());
+        }
         self.prepare_columns(&columns, window, cx);
         // A Changes pane shows the diff without being asked.
         for column in &columns {
@@ -352,7 +369,7 @@ impl Monaged {
             .flex_1()
             .min_h(px(0.))
             .flex()
-            .when(self.sidebar_open, |d| d.child(self.render_sidebar(sidebar_w, cx)))
+            .when(sidebar_w > 0., |d| d.child(self.render_sidebar(sidebar_w, cx)))
             .child(
                 div()
                     .flex_1()
@@ -382,6 +399,13 @@ impl Monaged {
             .on_action(cx.listener(Self::on_new_agent_here))
             .on_action(cx.listener(Self::on_prev_agent))
             .on_action(cx.listener(Self::on_next_agent))
+            .on_action(cx.listener(Self::on_toggle_zen))
+            .on_action(cx.listener(Self::on_find))
+            .on_action(cx.listener(Self::on_search_agents))
+            // Dragging an edge (sidebar, inspector, pane divider).
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| this.drag_move(event, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
+            .when(self.drag.is_some(), |d| d.cursor(gpui::CursorStyle::ResizeLeftRight))
             .size_full()
             .relative()
             .flex()
@@ -392,12 +416,13 @@ impl Monaged {
             .text_size(px(13.))
             .child(self.render_titlebar(window, sidebar_w, cx))
             .child(body)
-            .child(self.render_statusbar(cx))
+            .when(!zen, |d| d.child(self.render_statusbar(cx)))
             // Floating layers, lowest first.
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
             .children(self.render_menu(window, cx))
             .children(self.render_confirm(cx))
+            .children(self.render_text_prompt(cx))
             .children(self.render_shortcuts(cx))
             .into_any_element()
     }
@@ -414,6 +439,12 @@ impl Monaged {
         }
         if matches!(self.form, Some(Form::Settings { .. })) {
             crumbs = vec!["Settings".into()];
+        }
+        if matches!(self.form, Some(Form::Health)) {
+            crumbs = vec!["Health check".into()];
+        }
+        if self.zen && self.form.is_none() {
+            crumbs.push("Zen · F11 to leave".into());
         }
         let last = crumbs.len().saturating_sub(1);
         let crumb_row = div().flex().items_center().gap(px(6.)).min_w(px(0.)).overflow_hidden().children(
@@ -651,9 +682,39 @@ impl Monaged {
                         .group("new-agent-row")
                         .on_click(cx.listener(move |this, _, _, cx| this.add_agent(sid, cx)))
                 });
-                let archived = self.agents.iter().filter(|a| a.record.subproject_id == sid && a.record.archived).count();
-                if archived > 0 {
-                    list = list.child(div().pl(px(56.)).py(px(3.)).child(ui::mono(format!("{archived} cleaned up"))));
+                let archived: Vec<&AgentView> = self.agents.iter().filter(|a| a.record.subproject_id == sid && a.record.archived).collect();
+                if !archived.is_empty() {
+                    let open = self.show_archived.contains(&sid);
+                    list = list.child(
+                        ui::row(("show-archived", sid as usize), false)
+                            .pl(px(46.))
+                            .text_color(rgb(theme::text_3()))
+                            .child(ui::disclosure(open))
+                            .child(div().flex_1().child(format!("{} archived", archived.len())))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.show_archived.remove(&sid) {
+                                    this.show_archived.insert(sid);
+                                }
+                                cx.notify();
+                            })),
+                    );
+                    if open {
+                        for agent in archived {
+                            let aid = agent.record.id;
+                            list = list.child(
+                                ui::row(("archived-agent", aid as usize), self.sel_agent == Some(aid))
+                                    .relative()
+                                    .group("tree-row")
+                                    .on_mouse_down(MouseButton::Right, on_right_click(MenuTarget::Agent(aid), cx))
+                                    .pl(px(62.))
+                                    .text_color(rgb(theme::text_3()))
+                                    .child(icon_sized(Icon::Archive, 12.).text_color(rgb(theme::text_4())))
+                                    .child(div().flex_1().min_w(px(0.)).truncate().child(agent.record.name.clone()))
+                                    .child(row_menu_button(("archived-more", aid as usize), MenuTarget::Agent(aid), false, cx))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.select_agent(aid, cx))),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -713,6 +774,7 @@ impl Monaged {
             if self.budget.share_pct >= 100 { "no cap".to_string() } else { format!("{}%", self.budget.share_pct) }
         );
         div()
+            .relative()
             .w(px(width))
             .flex_none()
             .h_full()
@@ -721,6 +783,7 @@ impl Monaged {
             .bg(rgb(theme::panel()))
             .border_r_1()
             .border_color(rgb(theme::line()))
+            .child(self.sidebar_handle(width, cx))
             .when(!inbox.is_empty(), |d| d.child(section_label("Needs you", Some(inbox.len()))).children(inbox_el))
             .child(
                 section_label("Projects", None).child(
@@ -911,6 +974,9 @@ impl Monaged {
         if let Some(Form::Settings { error }) = &self.form {
             return self.render_settings(error.as_ref(), main_w, window_h, cx);
         }
+        if let Some(Form::Health) = &self.form {
+            return self.render_health(cx);
+        }
         if let Some(form) = &self.form {
             return self.render_form(form, cx);
         }
@@ -979,15 +1045,17 @@ impl Monaged {
             );
         }
         let multi = columns.iter().filter(|c| matches!(c, Column::Agent(_))).count() > 1;
-        let has_room = columns.len() < ((main_w / COLUMN_MIN).floor() as usize).clamp(1, 4);
+        let has_room = !self.zen && columns.len() < ((main_w / COLUMN_MIN).floor() as usize).clamp(1, 4);
+        let widths = self.pane_widths(sub_id, columns.len(), main_w);
         div()
             .flex_1()
             .min_h(px(0.))
             .flex()
             .children(columns.iter().enumerate().map(|(i, column)| {
+                let pane_w = widths.get(i).copied().unwrap_or(main_w);
                 let pane = match *column {
                     Column::Agent(id) => match self.agent(id) {
-                        Some(agent) => self.render_agent_column(agent, multi, has_room, columns, main_w / columns.len() as f32, cx),
+                        Some(agent) => self.render_agent_column(agent, multi, has_room, columns, pane_w, cx),
                         None => div().into_any_element(),
                     },
                     Column::Changes(id) => match self.agent(id) {
@@ -995,14 +1063,17 @@ impl Monaged {
                         None => div().into_any_element(),
                     },
                 };
+                let last = i + 1 == columns.len();
                 div()
-                    .flex_1()
-                    .min_w(px(0.))
+                    .relative()
+                    .when(!last, |d| d.w(px(pane_w)).flex_none())
+                    .when(last, |d| d.flex_1().min_w(px(0.)))
                     .h_full()
                     .flex()
                     .flex_col()
                     .when(i > 0, |d| d.border_l_1().border_color(rgb(theme::line())))
                     .child(pane)
+                    .when(i > 0, |d| d.child(self.pane_handle(sub_id, i, widths.clone(), cx)))
             }))
             .into_any_element()
     }
@@ -1034,7 +1105,13 @@ impl Monaged {
             .flex_col()
             .child(self.render_agent_header(agent, focused, multi, has_room, changes_beside, cx))
             .child(body)
-            .when(agent.tab == AgentTab::Conversation || changes_beside, |d| d.child(self.render_composer(agent, reading, cx)))
+            .when((agent.tab == AgentTab::Conversation || changes_beside) && !agent.record.archived, |d| d.child(self.render_message_box(agent, reading, cx)))
+            .when(agent.record.archived, |d| {
+                d.child(
+                    self.notice_bar(div().text_color(rgb(theme::text_2())).child("Archived: read-only. Restore it to keep working with it.").into_any_element(), false)
+                        .child(ui::button(("restore-agent", id as usize), Kind::Secondary, Some(Icon::Archive), "Restore").on_click(cx.listener(move |this, _, _, cx| this.restore_agent(id, cx)))),
+                )
+            })
             .into_any_element()
     }
 
@@ -1063,6 +1140,9 @@ impl Monaged {
             (Status::Ready, None) => "idle".into(),
         };
         let mut meta: Vec<String> = vec![role_label(&role)];
+        if let Some(title) = &agent.title {
+            meta.push(title.clone());
+        }
         if let Some(label) = self.agent_usage_label(agent) {
             meta.push(label);
         }
@@ -1248,7 +1328,23 @@ impl Monaged {
 
     fn render_transcript(&self, agent: &AgentView, reading: f32, cx: &mut Context<Self>) -> AnyElement {
         let id = agent.record.id;
-        let items: Vec<AnyElement> = agent.items.iter().enumerate().map(|(i, item)| self.render_item(id, i, item, cx)).collect();
+        let matches = self.find_matches(cx);
+        let items: Vec<AnyElement> = agent
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let row = div().w(px(reading)).flex_none().child(self.render_item(id, i, item, cx));
+                match self.find_mark(id, i, &matches) {
+                    Some(current) => row
+                        .rounded(px(6.))
+                        .bg(rgb(if current { theme::selected() } else { theme::hover() }))
+                        .when(current, |d| d.border_1().border_color(rgb(theme::text_3())))
+                        .into_any_element(),
+                    None => row.into_any_element(),
+                }
+            })
+            .collect();
         let scroll = self.scrolls.get(&id).cloned().unwrap_or_default();
         // Scrolled up to read while new text arrives: offer the way back down.
         let max = f32::from(scroll.max_offset().height);
@@ -1284,12 +1380,17 @@ impl Monaged {
         });
         // A flex column so the scroll area gets a definite height (and scrolls)
         // instead of growing under the message box.
+        let tail = [self.render_session_state(agent, cx), self.render_working_line(agent)]
+            .into_iter()
+            .flatten()
+            .map(|el| div().w(px(reading)).flex_none().child(el).into_any_element());
         div()
             .flex_1()
             .min_h(px(0.))
             .relative()
             .flex()
             .flex_col()
+            .children(self.render_find_bar(id, cx))
             .child(
                 div()
                     .id(("transcript", id as usize))
@@ -1297,19 +1398,14 @@ impl Monaged {
                     .min_h(px(0.))
                     .overflow_y_scroll()
                     .track_scroll(&scroll)
-                    .child(
-                        div().flex().justify_center().px(px(24.)).child(
-                            div()
-                                .w(px(reading))
-                                .flex()
-                                .flex_col()
-                                .gap(px(14.))
-                                .py(px(24.))
-                                .children(items)
-                                .children(self.render_session_state(agent, cx))
-                                .children(self.render_working_line(agent)),
-                        ),
-                    ),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(ui::dense(14., 10.)))
+                    .px(px(24.))
+                    .py(px(ui::dense(24., 16.)))
+                    .children(items)
+                    .children(tail),
             )
             .children(jump)
             .into_any_element()
@@ -1376,9 +1472,10 @@ impl Monaged {
         let id = agent.record.id;
         let secs = turn.started.elapsed().as_secs();
         let elapsed = if secs >= 60 { format!("{}:{:02}", secs / 60, secs % 60) } else { format!("{secs}s") };
-        let waiting = agent.items.iter().any(|i| matches!(i, Item::Permission { chosen: None, .. }));
+        let waiting = agent.items.iter().any(|i| matches!(i, Item::Permission { chosen: None, .. })) || agent.open_form();
         let activity = match agent.items.last() {
             _ if waiting => "Waiting for your answer above",
+            _ if agent.compacting => "Compacting the conversation",
             Some(Item::Tool { status, .. }) if status == "in_progress" || status == "pending" => "Running a tool",
             Some(Item::Agent(_)) => "Writing",
             Some(Item::Plan(_)) => "Planning",
@@ -1403,96 +1500,6 @@ impl Monaged {
                 .child(div().text_color(rgb(theme::text_3())).child("stop"))
                 .into_any_element(),
         )
-    }
-
-    fn render_composer(&self, agent: &AgentView, reading: f32, cx: &mut Context<Self>) -> AnyElement {
-        let id = agent.record.id;
-        let busy = agent.is_working();
-        let queued = agent.queued_prompt.is_some();
-        let Some(input) = self.inputs.get(&id).cloned() else { return div().into_any_element() };
-        let action = if busy {
-            div()
-                .id(("composer-stop", id as usize))
-                .size(px(28.))
-                .flex_none()
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(theme::line_strong()))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::hover())))
-                .child(icon_sized(Icon::Stop, 13.).text_color(rgb(theme::text())))
-                .tooltip(tip_key("Stop this turn", "Esc"))
-                .on_click(cx.listener(move |this, _, _, cx| this.stop_agent(id, cx)))
-        } else {
-            div()
-                .id(("composer-send", id as usize))
-                .size(px(28.))
-                .flex_none()
-                .rounded_full()
-                .bg(rgb(theme::text()))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::primary_hover())))
-                .active(|s| s.opacity(0.85))
-                .tooltip(tip_key("Send", "Enter"))
-                .child(icon_sized(Icon::Send, 14.).text_color(rgb(theme::on_primary())))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.sel_agent = Some(id);
-                    this.focus_request = Some(id);
-                    this.on_submit(&Submit, window, cx);
-                }))
-        };
-        div()
-            .flex_none()
-            .flex()
-            .justify_center()
-            .px(px(24.))
-            .pt(px(8.))
-            .pb(px(16.))
-            .child(
-                div()
-                    .w(px(reading))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .p(px(10.))
-                    .pl(px(12.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(rgb(theme::line_strong()))
-                    .bg(rgb(theme::panel()))
-                    .children(queued.then(|| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .text_size(px(12.))
-                            .text_color(rgb(theme::text_3()))
-                            .child(icon_sized(Icon::Clock, 13.).text_color(rgb(theme::text_3())))
-                            .child(if agent.paused { "A message waits for the budget (see the bar at the top)." } else { "Your message is queued; it's sent as soon as the session is open." })
-                    }))
-                    .child(input)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .text_size(px(11.5))
-                            .text_color(rgb(theme::text_3()))
-                            .child(ui::kbd("Enter"))
-                            .child("send")
-                            .when(busy, |d| d.child(ui::kbd("Esc")).child("stop"))
-                            .child(div().flex_1())
-                            .children(agent.model.as_deref().map(|m| ui::mono(crate::usage::pretty_model(m))))
-                            .child(action),
-                    ),
-            )
-            .into_any_element()
     }
 
     pub(crate) fn render_item(&self, agent_id: i64, index: usize, item: &Item, cx: &mut Context<Self>) -> AnyElement {
@@ -1528,45 +1535,30 @@ impl Monaged {
                 .italic()
                 .child(text.clone())
                 .into_any_element(),
-            Item::Tool { title, kind, status, .. } => {
-                let monaged = title.strip_prefix("mcp__monaged__");
-                let glyph = match (monaged, kind.as_str()) {
-                    (Some("ask"), _) => Icon::Ask,
-                    (Some(_), _) => Icon::Board,
-                    (_, "edit" | "delete" | "move") => Icon::Edit,
-                    (_, "execute") => Icon::Terminal,
-                    (_, "read") => Icon::Eye,
-                    (_, "search") => Icon::Search,
-                    (_, "fetch") => Icon::External,
-                    (_, "think") => Icon::Question,
-                    _ => Icon::Agent,
-                };
-                let shown = match monaged {
-                    Some(tool) => format!("monaged · {}", tool.replace('_', " ")),
-                    None => title.clone(),
-                };
-                let state: AnyElement = match status.as_str() {
-                    "in_progress" | "pending" => ui::status_dot(("tool", agent_id as usize * 100_000 + index), State::Working),
-                    "failed" => div()
+            Item::Tool { title, kind, status, detail, .. } => self.render_tool_item(agent_id, index, title, kind, status, detail, cx),
+            Item::Elicit(form) => self.render_elicitation(agent_id, index, form, cx),
+            Item::Attachments(names) => div()
+                .flex()
+                .justify_end()
+                .flex_wrap()
+                .gap(px(6.))
+                .mt(px(-8.))
+                .children(names.iter().map(|name| {
+                    div()
                         .flex()
                         .items_center()
-                        .gap(px(4.))
-                        .text_color(rgb(theme::red_text()))
-                        .child(icon_sized(Icon::Alert, 12.).text_color(rgb(theme::red_text())))
-                        .child("failed")
-                        .into_any_element(),
-                    _ => div().into_any_element(),
-                };
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(9.))
-                    .text_color(rgb(theme::text_3()))
-                    .child(icon(glyph).size(px(14.)))
-                    .child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).child(shown))
-                    .child(div().font_family(theme::MONO).text_size(px(11.)).child(state))
-                    .into_any_element()
-            }
+                        .gap(px(5.))
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(rgb(theme::line()))
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme::text_3()))
+                        .child(icon_sized(Icon::Paperclip, 11.).text_color(rgb(theme::text_3())))
+                        .child(name.clone())
+                }))
+                .into_any_element(),
             Item::Plan(entries) => ui::card()
                 .gap(px(6.))
                 .child(ui::label("Plan"))
@@ -1639,15 +1631,20 @@ impl Monaged {
             InspectorTab::Pipeline => self.render_pipeline_inspector(sub_id, cx),
             InspectorTab::Board => self.render_board(sub_id, cx),
             InspectorTab::Merge => self.render_merge_inspector(sub_id, cx),
+            InspectorTab::Git => self.render_git_inspector(sub_id, cx),
+            InspectorTab::Timeline => self.render_timeline(sub_id, cx),
         };
+        let handle = self.inspector_handle(width, cx);
+        // Five tabs: icons only when the inspector is narrow.
+        let show_icons = width >= 400.;
         let tab = |id: &'static str, glyph: Icon, label: String, which: InspectorTab| {
             let on = self.inspector_tab == which;
             div()
                 .id(id)
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .px(px(9.))
+                .gap(px(5.))
+                .px(px(7.))
                 .pt(px(9.))
                 .pb(px(8.))
                 .text_size(px(12.5))
@@ -1656,7 +1653,7 @@ impl Monaged {
                 .border_b_2()
                 .border_color(rgb(if on { theme::text() } else { theme::panel() }))
                 .when(!on, |d| d.hover(|s| s.text_color(rgb(theme::text_2()))))
-                .child(icon(glyph).size(px(14.)))
+                .when(show_icons, |d| d.child(icon(glyph).size(px(14.))))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.inspector_tab = which;
@@ -1664,6 +1661,7 @@ impl Monaged {
                 }))
         };
         div()
+            .relative()
             .w(px(width))
             .flex_none()
             .h_full()
@@ -1672,6 +1670,7 @@ impl Monaged {
             .bg(rgb(theme::panel()))
             .border_l_1()
             .border_color(rgb(theme::line()))
+            .child(handle)
             .child(
                 div()
                     .flex()
@@ -1680,7 +1679,9 @@ impl Monaged {
                     .border_color(rgb(theme::line()))
                     .child(tab("insp-pipeline", Icon::Flow, "Pipeline".into(), InspectorTab::Pipeline))
                     .child(tab("insp-board", Icon::Board, if board > 0 { format!("Board {board}") } else { "Board".into() }, InspectorTab::Board))
-                    .child(tab("insp-merge", Icon::Merge, "Merge".into(), InspectorTab::Merge)),
+                    .child(tab("insp-merge", Icon::Merge, "Merge".into(), InspectorTab::Merge))
+                    .child(tab("insp-git", Icon::Branch, "Git".into(), InspectorTab::Git))
+                    .child(tab("insp-timeline", Icon::Clock, "Timeline".into(), InspectorTab::Timeline)),
             )
             .child(div().id("inspector-body").flex_1().min_h(px(0.)).overflow_y_scroll().child(body))
             .into_any_element()
@@ -1839,7 +1840,7 @@ impl Monaged {
         // A problem with one field shows under that field; anything else above the buttons.
         let (invalid, form_error) = match form {
             Form::NewProject { invalid, error, .. } | Form::NewSubproject { invalid, error, .. } | Form::StartPipeline { invalid, error, .. } => (*invalid, error.clone()),
-            Form::Settings { .. } => (None, None),
+            Form::Settings { .. } | Form::Health => (None, None),
         };
         let problem = |label: &'static str| -> Option<SharedString> {
             (invalid == Some(label)).then(|| form_error.clone().unwrap_or_default().into())
@@ -1959,7 +1960,7 @@ impl Monaged {
                     .into_any_element();
                 ("Run the pipeline", "Research, two verifiers, a plan, then builders in parallel.", body, false, error.clone(), "Start the research")
             }
-            Form::Settings { .. } => return div().into_any_element(),
+            Form::Settings { .. } | Form::Health => return div().into_any_element(),
         };
 
         div()

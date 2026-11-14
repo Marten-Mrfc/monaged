@@ -13,6 +13,8 @@ use crate::shell::InspectorTab;
 use crate::{Monaged, theme, ui};
 
 const MENU_WIDTH: f32 = 248.;
+/// Settings menus list choices with a description beside them.
+const WIDE_MENU_WIDTH: f32 = 380.;
 const ITEM_HEIGHT: f32 = 28.;
 const SEPARATOR_HEIGHT: f32 = 9.;
 
@@ -21,6 +23,8 @@ pub(crate) enum MenuTarget {
     Project(i64),
     Sub(i64),
     Agent(i64),
+    /// One of an agent's settings: (agent, index into its config options).
+    Config(i64, usize),
 }
 
 pub(crate) struct MenuState {
@@ -48,15 +52,22 @@ pub(crate) enum MenuAction {
     Review(i64),
     Stop(i64),
     Restart(i64),
+    /// (agent, option id, value)
+    SetConfig(i64, String, String),
+    Rename(i64),
+    Archive(i64),
+    Restore(i64),
 }
 
 pub(crate) enum Entry {
-    Item { label: String, glyph: Icon, hint: Option<&'static str>, danger: bool, enabled: bool, action: MenuAction },
+    Item { label: String, glyph: Option<Icon>, hint: Option<&'static str>, detail: Option<String>, danger: bool, enabled: bool, action: MenuAction },
+    /// A small heading over a group of items.
+    Heading(String),
     Separator,
 }
 
 fn item(label: impl Into<String>, glyph: Icon, action: MenuAction) -> Entry {
-    Entry::Item { label: label.into(), glyph, hint: None, danger: false, enabled: true, action }
+    Entry::Item { label: label.into(), glyph: Some(glyph), hint: None, detail: None, danger: false, enabled: true, action }
 }
 
 impl Entry {
@@ -154,7 +165,28 @@ impl Monaged {
                     Entry::Separator,
                     item("Stop the turn", Icon::Stop, MenuAction::Stop(aid)).hint("Esc").enabled(working),
                     item(if failed { "Retry the session" } else { "Restart the session" }, Icon::Refresh, MenuAction::Restart(aid)).enabled(!working),
+                    Entry::Separator,
+                    item("Rename…", Icon::Edit, MenuAction::Rename(aid)),
+                    if agent.record.archived {
+                        item("Restore", Icon::Archive, MenuAction::Restore(aid))
+                    } else {
+                        item("Archive", Icon::Archive, MenuAction::Archive(aid)).enabled(!working)
+                    },
                 ]
+            }
+            MenuTarget::Config(aid, index) => {
+                let Some(option) = self.agent(aid).and_then(|a| a.config.get(index)) else { return Vec::new() };
+                let mut out = vec![Entry::Heading(option.name.clone())];
+                out.extend(option.choices.iter().map(|choice| Entry::Item {
+                    label: choice.name.clone(),
+                    glyph: (choice.value == option.current).then_some(Icon::Check),
+                    hint: None,
+                    detail: (!choice.description.is_empty()).then(|| choice.description.clone()),
+                    danger: choice.value == "bypassPermissions",
+                    enabled: true,
+                    action: MenuAction::SetConfig(aid, option.id.clone(), choice.value.clone()),
+                }));
+                out
             }
         }
     }
@@ -208,6 +240,10 @@ impl Monaged {
                 self.stop_agent(aid, cx);
             }
             MenuAction::Restart(aid) => self.retry_session(aid, cx),
+            MenuAction::SetConfig(aid, option, value) => self.set_config(aid, &option, &value, cx),
+            MenuAction::Rename(aid) => self.start_rename(aid, window, cx),
+            MenuAction::Archive(aid) => self.archive_agent(aid, cx),
+            MenuAction::Restore(aid) => self.restore_agent(aid, cx),
         }
         cx.notify();
     }
@@ -258,17 +294,19 @@ impl Monaged {
     pub(crate) fn render_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let entries = self.menu_entries(menu.target);
+        let width = if matches!(menu.target, MenuTarget::Config(..)) { WIDE_MENU_WIDTH } else { MENU_WIDTH };
         let height: f32 = 8. + entries.iter().map(|e| if matches!(e, Entry::Separator) { SEPARATOR_HEIGHT } else { ITEM_HEIGHT }).sum::<f32>();
         let viewport = window.viewport_size();
         let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
         let (x, y) = (f32::from(menu.position.x), f32::from(menu.position.y));
         // Keep the whole menu on screen: flip left or up near the edges.
-        let left = if x + MENU_WIDTH > vw - 8. { (x - MENU_WIDTH).max(8.) } else { x };
+        let left = if x + width > vw - 8. { (x - width).max(8.) } else { x };
         let top = if y + height > vh - 8. { (y - height).max(8.) } else { y };
         let selected = menu.selected;
         let rows = entries.into_iter().enumerate().map(|(i, entry)| match entry {
             Entry::Separator => div().h(px(SEPARATOR_HEIGHT)).flex().items_center().child(div().w_full().h(px(1.)).bg(rgb(theme::line()))).into_any_element(),
-            Entry::Item { label, glyph, hint, danger, enabled, action } => {
+            Entry::Heading(text) => div().h(px(ITEM_HEIGHT)).flex().items_center().px(px(8.)).child(ui::label(text)).into_any_element(),
+            Entry::Item { label, glyph, hint, detail, danger, enabled, action } => {
                 let on = selected == Some(i);
                 let color = match (enabled, danger) {
                     (false, _) => theme::text_4(),
@@ -291,12 +329,15 @@ impl Monaged {
                             this.run_menu_action(action.clone(), window, cx)
                         }))
                     })
-                    .child(icon_sized(glyph, 14.).text_color(rgb(match (enabled, danger) {
-                        (false, _) => theme::text_4(),
-                        (true, true) => theme::red_text(),
-                        (true, false) => theme::text_3(),
+                    .child(div().size(px(14.)).flex_none().children(glyph.map(|glyph| {
+                        icon_sized(glyph, 14.).text_color(rgb(match (enabled, danger) {
+                            (false, _) => theme::text_4(),
+                            (true, true) => theme::red_text(),
+                            (true, false) => theme::text_3(),
+                        }))
                     })))
-                    .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+                    .child(div().flex_none().max_w(px(180.)).truncate().child(label))
+                    .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(11.5)).text_color(rgb(theme::text_3())).children(detail))
                     .children(hint.map(|h| div().font_family(theme::MONO).text_size(px(10.5)).text_color(rgb(theme::text_3())).child(h)))
                     .into_any_element()
             }
@@ -309,7 +350,7 @@ impl Monaged {
             .absolute()
             .left(px(left))
             .top(px(top))
-            .w(px(MENU_WIDTH))
+            .w(px(width))
             .p(px(4.))
             .flex()
             .flex_col()
@@ -353,6 +394,19 @@ impl Monaged {
         }
         for index in open {
             self.choose_permission(agent_id, index, None, cx);
+        }
+        let forms: Vec<usize> = self
+            .agent(agent_id)
+            .map(|a| {
+                a.items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, item)| matches!(item, crate::agent::Item::Elicit(f) if f.state == crate::agent::FormState::Open).then_some(i))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for index in forms {
+            self.answer_form(agent_id, index, "cancel", cx);
         }
         cx.notify();
     }

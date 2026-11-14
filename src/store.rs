@@ -266,6 +266,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn unarchive_agent(&self, agent_id: i64) -> Result<()> {
+        self.conn.execute("UPDATE agents SET archived = 0 WHERE id = ?1", params![agent_id])?;
+        Ok(())
+    }
+
+    pub fn rename_agent(&self, agent_id: i64, name: &str) -> Result<()> {
+        self.conn.execute("UPDATE agents SET name = ?1 WHERE id = ?2", params![name, agent_id])?;
+        Ok(())
+    }
+
     pub fn set_project_base(&self, project_id: i64, base_branch: &str) -> Result<()> {
         self.conn.execute("UPDATE projects SET base_branch = ?1 WHERE id = ?2", params![base_branch, project_id])?;
         Ok(())

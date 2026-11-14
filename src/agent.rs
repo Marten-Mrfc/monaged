@@ -27,14 +27,278 @@ pub struct PermOption {
     pub kind: String,
 }
 
+/// One of the session's settings, as the agent offers them (ACP `configOptions`):
+/// mode, model, effort, fast mode… Monaged shows whatever the agent reports,
+/// so another ACP agent's settings appear the same way.
+#[derive(Clone, Debug)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub current: String,
+    pub choices: Vec<ConfigChoice>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfigChoice {
+    pub value: String,
+    pub name: String,
+    pub description: String,
+}
+
+impl ConfigOption {
+    pub fn current_name(&self) -> String {
+        self.choices.iter().find(|c| c.value == self.current).map(|c| c.name.clone()).unwrap_or_else(|| self.current.clone())
+    }
+
+    /// An on/off setting (fast mode, ultracode).
+    pub fn is_toggle(&self) -> bool {
+        self.choices.len() == 2 && self.choices.iter().any(|c| c.value == "on") && self.choices.iter().any(|c| c.value == "off")
+    }
+
+    pub fn parse_all(value: &Value) -> Vec<ConfigOption> {
+        value.as_array().into_iter().flatten().filter_map(ConfigOption::parse).collect()
+    }
+
+    fn parse(value: &Value) -> Option<ConfigOption> {
+        let id = value["id"].as_str()?.to_string();
+        let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+        let current = match &value["currentValue"] {
+            Value::String(s) => s.clone(),
+            Value::Bool(b) => if *b { "on".into() } else { "off".into() },
+            other => other.to_string(),
+        };
+        let mut choices: Vec<ConfigChoice> = value["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|o| ConfigChoice { value: text(&o["value"]), name: text(&o["name"]), description: text(&o["description"]) })
+            .collect();
+        if value["type"] == "boolean" && choices.is_empty() {
+            choices = vec![
+                ConfigChoice { value: "on".into(), name: "On".into(), description: String::new() },
+                ConfigChoice { value: "off".into(), name: "Off".into(), description: String::new() },
+            ];
+        }
+        Some(ConfigOption { name: text(&value["name"]), description: text(&value["description"]), category: text(&value["category"]), id, current, choices })
+    }
+}
+
+/// A slash command the agent offers (ACP `available_commands_update`).
+#[derive(Clone, Debug)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    pub hint: Option<String>,
+}
+
+/// Something you attach to your next message.
+#[derive(Clone, Debug)]
+pub struct Attachment {
+    pub name: String,
+    pub kind: AttachmentKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum AttachmentKind {
+    /// Base64 image data.
+    Image { mime: String, data: String },
+    /// A text file's contents, sent as an embedded resource.
+    Text { uri: String, text: String },
+}
+
+impl Attachment {
+    /// The ACP content block for this attachment.
+    pub fn content_block(&self) -> Value {
+        match &self.kind {
+            AttachmentKind::Image { mime, data } => serde_json::json!({ "type": "image", "mimeType": mime, "data": data }),
+            AttachmentKind::Text { uri, text } => {
+                serde_json::json!({ "type": "resource", "resource": { "uri": uri, "mimeType": "text/plain", "text": text } })
+            }
+        }
+    }
+}
+
+/// What a tool call carries beyond its one-line title.
+#[derive(Clone, Debug, Default)]
+pub struct ToolDetail {
+    /// The tool's input, pretty-printed.
+    pub input: Option<String>,
+    pub locations: Vec<String>,
+    pub content: Vec<ToolContent>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ToolContent {
+    Text(String),
+    Diff { path: String, old: Option<String>, new: String },
+    Terminal(String),
+}
+
+impl ToolDetail {
+    fn merge(&mut self, update: &Value) {
+        if !update["rawInput"].is_null() {
+            let raw = &update["rawInput"];
+            self.input = Some(serde_json::to_string_pretty(raw).unwrap_or_else(|_| raw.to_string()));
+        }
+        if let Some(locations) = update["locations"].as_array() {
+            self.locations = locations
+                .iter()
+                .filter_map(|l| {
+                    let path = l["path"].as_str()?;
+                    Some(match l["line"].as_u64() {
+                        Some(line) => format!("{path}:{line}"),
+                        None => path.to_string(),
+                    })
+                })
+                .collect();
+        }
+        if let Some(content) = update["content"].as_array() {
+            self.content = content
+                .iter()
+                .filter_map(|c| match c["type"].as_str()? {
+                    "content" => content_text(&c["content"]).map(ToolContent::Text),
+                    "diff" => Some(ToolContent::Diff {
+                        path: c["path"].as_str().unwrap_or_default().to_string(),
+                        old: c["oldText"].as_str().map(str::to_owned),
+                        new: c["newText"].as_str().unwrap_or_default().to_string(),
+                    }),
+                    "terminal" => c["terminalId"].as_str().map(|t| ToolContent::Terminal(t.to_string())),
+                    _ => None,
+                })
+                .collect();
+        }
+    }
+}
+
+/// A form the agent asks you to fill in (ACP `elicitation/create`): Claude's
+/// own question cards, or an MCP server asking for input or a sign-in link.
+#[derive(Clone, Debug)]
+pub struct Elicitation {
+    pub request_id: Value,
+    pub message: String,
+    /// A link to open instead of a form (MCP sign-in).
+    pub url: Option<String>,
+    pub fields: Vec<FormField>,
+    /// Chosen values by field key (strings, or arrays for multiple choice).
+    pub values: HashMap<String, Value>,
+    pub state: FormState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FormState {
+    Open,
+    /// What you answered, as one line.
+    Answered(String),
+    Skipped,
+    Withdrawn,
+}
+
+#[derive(Clone, Debug)]
+pub struct FormField {
+    pub key: String,
+    pub title: String,
+    pub description: String,
+    pub kind: FieldKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum FieldKind {
+    Single(Vec<ConfigChoice>),
+    Multi(Vec<ConfigChoice>),
+    Text,
+    Bool,
+    Number,
+}
+
+impl Elicitation {
+    pub fn parse(request_id: Value, params: &Value) -> Elicitation {
+        let schema = &params["requestedSchema"];
+        let mut keys: Vec<&String> = schema["properties"].as_object().map(|o| o.keys().collect()).unwrap_or_default();
+        // "question_10" after "question_2": natural order, as the agent numbered them.
+        keys.sort_by_key(|k| natural_key(k));
+        let fields = keys
+            .into_iter()
+            .map(|key| {
+                let prop = &schema["properties"][key.as_str()];
+                let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+                let choices = |list: &Value| -> Vec<ConfigChoice> {
+                    list.as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|o| match o {
+                            Value::String(s) => ConfigChoice { value: s.clone(), name: s.clone(), description: String::new() },
+                            o => ConfigChoice {
+                                value: o["const"].as_str().map(str::to_owned).unwrap_or_else(|| o["const"].to_string()),
+                                name: o["title"].as_str().or(o["const"].as_str()).unwrap_or_default().to_string(),
+                                description: text(&o["description"]),
+                            },
+                        })
+                        .collect()
+                };
+                let kind = match prop["type"].as_str().unwrap_or("string") {
+                    "array" => {
+                        let items = &prop["items"];
+                        let list = if !items["anyOf"].is_null() { &items["anyOf"] } else if !items["oneOf"].is_null() { &items["oneOf"] } else { &items["enum"] };
+                        FieldKind::Multi(choices(list))
+                    }
+                    "boolean" => FieldKind::Bool,
+                    "number" | "integer" => FieldKind::Number,
+                    _ if !prop["oneOf"].is_null() => FieldKind::Single(choices(&prop["oneOf"])),
+                    _ if !prop["enum"].is_null() => FieldKind::Single(choices(&prop["enum"])),
+                    _ => FieldKind::Text,
+                };
+                FormField { key: key.clone(), title: text(&prop["title"]), description: text(&prop["description"]), kind }
+            })
+            .collect();
+        Elicitation {
+            request_id,
+            message: params["message"].as_str().unwrap_or_default().to_string(),
+            url: (params["mode"] == "url").then(|| params["url"].as_str().unwrap_or_default().to_string()),
+            fields,
+            values: HashMap::new(),
+            state: FormState::Open,
+        }
+    }
+
+    /// One line describing the answers, for the transcript.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        for field in &self.fields {
+            match self.values.get(&field.key) {
+                Some(Value::String(s)) if !s.trim().is_empty() => parts.push(s.trim().to_string()),
+                Some(Value::Array(a)) if !a.is_empty() => {
+                    parts.push(a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                }
+                Some(Value::Bool(b)) => parts.push(if *b { "yes".into() } else { "no".into() }),
+                Some(Value::Number(n)) => parts.push(n.to_string()),
+                _ => {}
+            }
+        }
+        if parts.is_empty() { "Answered".into() } else { parts.join(" · ") }
+    }
+}
+
+fn natural_key(key: &str) -> (String, u64, String) {
+    let digits: String = key.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+    let prefix: String = key.chars().take_while(|c| !c.is_ascii_digit()).collect();
+    let rest = key[prefix.len() + digits.len()..].to_string();
+    (prefix, digits.parse().unwrap_or(0), rest)
+}
+
 pub enum Item {
     User(String),
     Agent(String),
     Thought(String),
-    Tool { id: String, title: String, kind: String, status: String },
+    Tool { id: String, title: String, kind: String, status: String, detail: ToolDetail },
     Plan(Vec<PlanEntry>),
     Permission { request_id: Value, title: String, options: Vec<PermOption>, chosen: Option<String> },
     Notice(Tone, String),
+    /// The agent asks you to fill in a form (questions, input, a sign-in link).
+    Elicit(Elicitation),
+    /// Files and images sent with the message before this item.
+    Attachments(Vec<String>),
 }
 
 pub struct Turn {
@@ -100,6 +364,16 @@ pub struct AgentView {
     /// Reopened a session from before cost tracking: its first cost figure
     /// includes old turns, so it only sets the baseline.
     pub cost_baseline: bool,
+    // The agent protocol's own features.
+    /// Mode, model, effort and whatever else the agent lets you set.
+    pub config: Vec<ConfigOption>,
+    pub commands: Vec<SlashCommand>,
+    /// Files and images waiting to go with the next message.
+    pub attachments: Vec<Attachment>,
+    /// The title the agent gave the session.
+    pub title: Option<String>,
+    /// The agent is compacting its context.
+    pub compacting: bool,
 }
 
 impl AgentView {
@@ -130,7 +404,43 @@ impl AgentView {
             cost_total: 0.0,
             paused: false,
             cost_baseline: false,
+            config: Vec::new(),
+            commands: Vec::new(),
+            attachments: Vec::new(),
+            title: None,
+            compacting: false,
         }
+    }
+
+    pub fn config_option(&self, id: &str) -> Option<&ConfigOption> {
+        self.config.iter().find(|o| o.id == id)
+    }
+
+    /// An open form waiting for your answer.
+    pub fn open_form(&self) -> bool {
+        self.items.iter().any(|i| matches!(i, Item::Elicit(e) if e.state == FormState::Open))
+    }
+
+    /// Takes the agent's configOptions (from session/new, session/load or an update).
+    pub fn set_config(&mut self, value: &Value) {
+        let parsed = ConfigOption::parse_all(value);
+        if !parsed.is_empty() {
+            self.config = parsed;
+        }
+    }
+
+    /// The messages you typed yourself, oldest first (for Up in the message box).
+    pub fn typed_messages(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter_map(|i| match i {
+                Item::User(t) if !t.starts_with(crate::pipeline::BRIEF_HEADER) && !t.starts_with("[monaged-") && !t.contains(crate::coord::DIGEST_HEADER) => {
+                    Some(t.trim().to_string())
+                }
+                _ => None,
+            })
+            .filter(|t| !t.is_empty() && t.len() < 4000)
+            .collect()
     }
 
     pub fn role(&self) -> crate::pipeline::Role {
@@ -219,26 +529,88 @@ impl AgentView {
             }
             "tool_call" => {
                 self.mark_first_words();
+                let mut detail = ToolDetail::default();
+                detail.merge(update);
                 self.items.push(Item::Tool {
                     id: update["toolCallId"].as_str().unwrap_or_default().to_owned(),
                     title: update["title"].as_str().unwrap_or("Tool").to_owned(),
                     kind: update["kind"].as_str().unwrap_or_default().to_owned(),
                     status: update["status"].as_str().unwrap_or("pending").to_owned(),
+                    detail,
                 });
             }
             "tool_call_update" => {
                 let id = update["toolCallId"].as_str().unwrap_or_default();
                 let existing = self.items.iter_mut().rev().find_map(|item| match item {
-                    Item::Tool { id: tool_id, title, status, .. } if tool_id == id => Some((title, status)),
+                    Item::Tool { id: tool_id, title, status, detail, .. } if tool_id == id => Some((title, status, detail)),
                     _ => None,
                 });
-                if let Some((title, status)) = existing {
+                if let Some((title, status, detail)) = existing {
                     if let Some(new_title) = update["title"].as_str() {
                         *title = new_title.to_owned();
                     }
                     if let Some(new_status) = update["status"].as_str() {
                         *status = new_status.to_owned();
                     }
+                    detail.merge(update);
+                }
+            }
+            "config_option_update" => {
+                if update["configOptions"].is_array() {
+                    self.set_config(&update["configOptions"]);
+                } else if let (Some(id), Some(value)) = (update["configId"].as_str(), update["value"].as_str()) {
+                    if let Some(option) = self.config.iter_mut().find(|o| o.id == id) {
+                        option.current = value.to_string();
+                    }
+                }
+            }
+            "current_mode_update" => {
+                if let Some(mode) = update["currentModeId"].as_str()
+                    && let Some(option) = self.config.iter_mut().find(|o| o.id == "mode")
+                {
+                    option.current = mode.to_string();
+                }
+            }
+            "available_commands_update" => {
+                self.commands = update["availableCommands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| {
+                        Some(SlashCommand {
+                            name: c["name"].as_str()?.to_string(),
+                            description: c["description"].as_str().unwrap_or_default().to_string(),
+                            hint: c["input"]["hint"].as_str().map(str::to_owned),
+                        })
+                    })
+                    .collect();
+            }
+            "session_info_update" => {
+                if let Some(title) = update["title"].as_str().filter(|t| !t.trim().is_empty()) {
+                    self.title = Some(title.to_string());
+                }
+            }
+            "compaction_update" => {
+                let state = update["state"].as_str().or(update["status"].as_str()).unwrap_or_default();
+                let done = matches!(state, "completed" | "complete" | "done" | "finished" | "failed");
+                if self.compacting && done {
+                    self.notice(Tone::Info, "Compacted the conversation to free up context.");
+                }
+                self.compacting = !done;
+            }
+            "notice" => {
+                let tone = match update["severity"].as_str() {
+                    Some("error") => Tone::Error,
+                    Some("warning" | "warn") => Tone::Warn,
+                    _ => Tone::Info,
+                };
+                let title = update["title"].as_str().unwrap_or_default();
+                let text = match update["description"].as_str() {
+                    Some(d) if !d.is_empty() => format!("{title}: {d}"),
+                    _ => title.to_string(),
+                };
+                if !text.is_empty() {
+                    self.notice(tone, text);
                 }
             }
             "plan" => {

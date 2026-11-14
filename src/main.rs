@@ -6,14 +6,18 @@
 
 mod acp;
 mod agent;
+mod attach;
 mod coord;
 mod coord_ui;
 mod diff;
 mod dots;
 mod feedback;
 mod git;
+mod git_ui;
+mod health;
 mod hosting;
 mod icons;
+mod layout;
 mod llm;
 mod markdown;
 mod menu;
@@ -23,13 +27,16 @@ mod pipeline;
 mod pipeline_ui;
 mod review;
 mod review_ui;
+mod search;
 mod secrets;
+mod session_ui;
 mod shell;
 mod store;
 #[cfg(test)]
 mod tests;
 mod text_input;
 mod theme;
+mod timeline;
 mod ui;
 mod usage;
 mod usage_ui;
@@ -55,7 +62,7 @@ use text_input::TextInput;
 
 actions!(
     monaged,
-    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent]
+    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents]
 );
 
 /// Quoted so neither PowerShell nor cmd rewrites the `~`; bash expands it.
@@ -75,6 +82,8 @@ enum Pending {
     Prompt(i64),
     /// Switching a session to its role's model; its first message waits.
     SetModel(i64),
+    /// You changed one of the session's settings (mode, model, effort…).
+    SetConfig(i64),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -132,6 +141,8 @@ enum Form {
     Settings {
         error: Option<String>,
     },
+    /// The health check page.
+    Health,
 }
 
 /// What `spawn_agent` creates.
@@ -218,8 +229,32 @@ struct Monaged {
     palette: Option<palette::PaletteState>,
     menu: Option<menu::MenuState>,
     confirm: Option<feedback::Confirm>,
+    text_prompt: Option<feedback::TextPrompt>,
+    // Layout you can shape (layout.rs).
+    drag: Option<layout::Drag>,
+    sidebar_w: Option<f32>,
+    inspector_w: Option<f32>,
+    /// Pane widths per (subproject, number of panes).
+    pane_weights: HashMap<(i64, usize), Vec<f32>>,
+    zen: bool,
+    /// The find bar over a conversation (Ctrl F).
+    find: Option<search::FindState>,
+    /// Files per worktree for Ctrl K: (listed at, paths).
+    file_index: HashMap<String, (Instant, Vec<String>)>,
+    files_loading: HashSet<String>,
+    /// The health check's WSL report, Windows tools (zed, gh, glab) and how long it took.
+    health_wsl: Option<(Result<HashMap<String, String>, String>, (bool, bool, bool), std::time::Duration)>,
+    /// Subprojects whose archived agents are listed in the tree.
+    show_archived: HashSet<i64>,
     shortcuts_open: bool,
     toasts: Vec<feedback::Toast>,
+    /// Slash-command suggestions per message box.
+    suggest: HashMap<i64, session_ui::SuggestState>,
+    input_subs: HashMap<i64, Subscription>,
+    /// Text boxes in the agents' question forms: (agent, item, field).
+    form_inputs: HashMap<(i64, usize, String), Entity<TextInput>>,
+    /// Tool calls opened to show their details: (agent, item).
+    expanded_tools: HashSet<(i64, usize)>,
     next_toast: u64,
     /// Toasts raised while handling a message (no `cx` there); shown right after.
     queued_toasts: Vec<(Tone, String, Option<(&'static str, feedback::ToastAction)>)>,
@@ -280,6 +315,9 @@ impl Monaged {
         };
         let theme_key = store.setting("theme").unwrap_or_else(|| "carbon".into());
         let sidebar_open = store.setting("ui:sidebar").is_none_or(|v| v == "1");
+        ui::set_compact(store.setting("ui:density").as_deref() == Some("compact"));
+        let store_f32 = |key: &str| store.setting(key).and_then(|v| v.parse::<f32>().ok());
+        let (sidebar_w_saved, inspector_w_saved) = (store_f32("ui:sidebar_w"), store_f32("ui:inspector_w"));
         // Remember the window's place and size (restored at the next start).
         let bounds_watch = cx.observe_window_bounds(window, |this: &mut Self, window, _cx| {
             let _ = this.store.set_setting("ui:window", &format_bounds(window.window_bounds()));
@@ -363,8 +401,23 @@ impl Monaged {
             palette: None,
             menu: None,
             confirm: None,
+            text_prompt: None,
+            drag: None,
+            sidebar_w: sidebar_w_saved,
+            inspector_w: inspector_w_saved,
+            pane_weights: HashMap::new(),
+            zen: false,
+            find: None,
+            file_index: HashMap::new(),
+            files_loading: HashSet::new(),
+            health_wsl: None,
+            show_archived: HashSet::new(),
             shortcuts_open: false,
             toasts: Vec::new(),
+            suggest: HashMap::new(),
+            input_subs: HashMap::new(),
+            form_inputs: HashMap::new(),
+            expanded_tools: HashSet::new(),
             next_toast: 1,
             queued_toasts: Vec::new(),
             reconnect: feedback::Reconnect::default(),
@@ -477,7 +530,14 @@ impl Monaged {
                     "initialize",
                     json!({
                         "protocolVersion": 1,
-                        "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+                        "clientCapabilities": {
+                            "fs": { "readTextFile": false, "writeTextFile": false },
+                            "terminal": false,
+                            // Question cards and MCP input or sign-in requests, shown as forms.
+                            "elicitation": { "form": {}, "url": {} },
+                            // Warnings and info as their own updates instead of transcript text.
+                            "session": { "notices": {} },
+                        },
                         "clientInfo": { "name": "monaged", "version": env!("CARGO_PKG_VERSION") },
                     }),
                     Pending::Initialize,
@@ -556,6 +616,10 @@ impl Monaged {
                     }
                     self.flush_queued_prompt(agent_id);
                 }
+                Pending::SetConfig(agent_id) => {
+                    let _ = agent_id;
+                    self.queued_toasts.push((Tone::Error, format!("Couldn't change that setting: {text}"), None));
+                }
                 Pending::Prompt(agent_id) => {
                     let hint = if self.logged_in == Some(false) { " You're not logged in yet (see the bar at the top)." } else { "" };
                     if let Some(agent) = self.agent_mut(agent_id) {
@@ -589,6 +653,7 @@ impl Monaged {
                     agent.record.session_id = Some(session_id);
                     agent.status = Status::Ready;
                     agent.live = true;
+                    agent.set_config(&result["configOptions"]);
                     let text = format!("Ready on branch {} in {}", agent.record.branch, agent.record.worktree);
                     agent.notice(Tone::Info, text);
                 }
@@ -601,6 +666,7 @@ impl Monaged {
                 if let Some(agent) = self.agent_mut(agent_id) {
                     agent.status = Status::Ready;
                     agent.live = true;
+                    agent.set_config(&result["configOptions"]);
                     agent.cost_baseline = agent.cost_seen.is_none();
                     agent.notice(Tone::Info, "Reopened the saved conversation.");
                 }
@@ -609,7 +675,15 @@ impl Monaged {
                     self.flush_queued_prompt(agent_id);
                 }
             }
+            Pending::SetConfig(agent_id) => {
+                if let Some(agent) = self.agent_mut(agent_id) {
+                    agent.set_config(&result["configOptions"]);
+                }
+            }
             Pending::SetModel(agent_id) => {
+                if let Some(agent) = self.agent_mut(agent_id) {
+                    agent.set_config(&result["configOptions"]);
+                }
                 let model = result["configOptions"]
                     .as_array()
                     .into_iter()
@@ -650,6 +724,22 @@ impl Monaged {
                     }
                 }
             }
+            "elicitation/complete" => {
+                // A sign-in link was finished in the browser.
+                let session_id = params["sessionId"].as_str().unwrap_or_default();
+                if let Some(&agent_id) = self.sessions.get(session_id)
+                    && let Some(agent) = self.agent_mut(agent_id)
+                {
+                    for item in agent.items.iter_mut() {
+                        if let Item::Elicit(form) = item
+                            && form.url.is_some()
+                            && form.state == agent::FormState::Open
+                        {
+                            form.state = agent::FormState::Answered("Done".into());
+                        }
+                    }
+                }
+            }
             "auth/status_update" => match params["state"].as_str() {
                 Some("unauthenticated") => self.logged_in = Some(false),
                 Some("authenticated") => self.logged_in = Some(true),
@@ -671,6 +761,10 @@ impl Monaged {
                 self.respond(id, json!({ "outcome": { "outcome": "selected", "optionId": option } }));
                 return;
             }
+        }
+        if method == "elicitation/create" {
+            self.on_elicitation(id, params);
+            return;
         }
         if method == "session/request_permission" {
             let session_id = params["sessionId"].as_str().unwrap_or_default();
@@ -947,7 +1041,7 @@ impl Monaged {
                 self.form = None;
                 self.start_pipeline(sub_id, text, auto_mode, cx);
             }
-            Some(Form::Settings { .. }) | None => {}
+            Some(Form::Settings { .. }) | Some(Form::Health) | None => {}
         }
         cx.notify();
     }
@@ -1030,13 +1124,15 @@ impl Monaged {
         }
         let text = self.with_board_updates(agent_id, text);
         let Some(agent) = self.agent_mut(agent_id) else { return };
+        let attachments = std::mem::take(&mut agent.attachments);
         agent.items.push(Item::User(text.clone()));
+        if !attachments.is_empty() {
+            agent.items.push(Item::Attachments(attachments.iter().map(|a| a.name.clone()).collect()));
+        }
         agent.turn = Some(Turn { started: Instant::now(), first_words: None });
-        self.request(
-            "session/prompt",
-            json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": text }] }),
-            Pending::Prompt(agent_id),
-        );
+        let mut prompt = vec![json!({ "type": "text", "text": text })];
+        prompt.extend(attachments.iter().map(|a| a.content_block()));
+        self.request("session/prompt", json!({ "sessionId": session_id, "prompt": prompt }), Pending::Prompt(agent_id));
         if let Some(handle) = self.scrolls.get(&agent_id) {
             handle.scroll_to_bottom();
         }
@@ -1055,6 +1151,10 @@ impl Monaged {
     }
 
     fn on_submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_prompt.is_some() {
+            self.accept_text_prompt(window, cx);
+            return;
+        }
         if self.confirm.is_some() {
             self.accept_confirm(window, cx);
             return;
@@ -1071,22 +1171,58 @@ impl Monaged {
             self.run_palette_selection(window, cx);
             return;
         }
+        if let Some(find) = &self.find
+            && find.input.focus_handle(cx).is_focused(window)
+        {
+            self.find_step(1, cx);
+            return;
+        }
         if self.form.is_some() {
             self.submit_form(cx);
             return;
         }
         let Some(agent_id) = self.composer_agent(window, cx) else { return };
         let Some(input) = self.inputs.get(&agent_id).cloned() else { return };
-        let text = input.read(cx).text().trim().to_string();
-        if text.is_empty() {
+        // Enter on an open command list picks the command.
+        if !self.suggestions(agent_id, cx).is_empty() {
+            self.accept_suggestion(agent_id, cx);
             return;
         }
+        let text = input.read(cx).text().trim().to_string();
+        let Some(agent) = self.agent(agent_id) else { return };
+        if text.is_empty() && agent.attachments.is_empty() {
+            return;
+        }
+        if text.starts_with('/') && self.run_builtin(agent_id, &text, window, cx) {
+            input.update(cx, |input, cx| {
+                input.push_history(text.clone());
+                input.clear(cx);
+            });
+            cx.notify();
+            return;
+        }
+        let text = if text.is_empty() { "Here are the files.".to_string() } else { text };
         let Some(agent) = self.agent(agent_id) else { return };
         if agent.is_working() {
-            self.toast(Tone::Warn, format!("{} is still working. Press Esc to stop it first.", agent.record.name), cx);
+            // Goes out as soon as this turn ends (after_turn sends it).
+            let name = agent.record.name.clone();
+            if let Some(agent) = self.agent_mut(agent_id) {
+                agent.queued_prompt = Some(match agent.queued_prompt.take() {
+                    Some(earlier) => format!("{earlier}\n\n{text}"),
+                    None => text.clone(),
+                });
+            }
+            input.update(cx, |input, cx| {
+                input.push_history(text.clone());
+                input.clear(cx);
+            });
+            self.toast(Tone::Info, format!("Queued: {name} gets it when this turn ends."), cx);
             return;
         }
-        input.update(cx, |input, cx| input.clear(cx));
+        input.update(cx, |input, cx| {
+            input.push_history(text.clone());
+            input.clear(cx);
+        });
         // Typing your own answer replaces any half-answered question cards.
         if let Some(agent) = self.agent_mut(agent_id) {
             agent.answers.clear();
@@ -1100,6 +1236,10 @@ impl Monaged {
     /// Esc closes the innermost thing first: a dialog, a menu, the palette, a
     /// form; otherwise it stops the agent you're typing to.
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_prompt.is_some() {
+            self.close_text_prompt(window, cx);
+            return;
+        }
         if self.confirm.is_some() {
             self.close_confirm(window, cx);
             return;
@@ -1116,6 +1256,10 @@ impl Monaged {
             self.close_palette(window, cx);
             return;
         }
+        if self.find.is_some() {
+            self.close_find(window, cx);
+            return;
+        }
         if self.form.take().is_some() {
             self.focus_request = self.sel_agent;
             window.focus(&self.focus);
@@ -1123,7 +1267,14 @@ impl Monaged {
             return;
         }
         let Some(agent_id) = self.composer_agent(window, cx) else { return };
+        if self.dismiss_suggestions(agent_id, cx) {
+            return;
+        }
         self.stop_agent(agent_id, cx);
+    }
+
+    fn on_toggle_zen(&mut self, _: &ToggleZen, _window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_zen(cx);
     }
 
     fn on_show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
@@ -1348,6 +1499,9 @@ fn main() {
             KeyBinding::new("ctrl-alt-b", ToggleInspector, None),
             KeyBinding::new("ctrl-,", OpenSettings, None),
             KeyBinding::new("ctrl-/", ShowShortcuts, None),
+            KeyBinding::new("f11", ToggleZen, None),
+            KeyBinding::new("ctrl-f", FindInConversation, None),
+            KeyBinding::new("ctrl-shift-f", SearchAgents, None),
             KeyBinding::new("ctrl-n", NewAgentHere, None),
             KeyBinding::new("alt-up", PrevAgent, None),
             KeyBinding::new("alt-down", NextAgent, None),

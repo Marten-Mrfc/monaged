@@ -11,6 +11,24 @@ use gpui::{
 use crate::icons::{Icon, icon, icon_sized};
 use crate::theme;
 
+// ---- Density ---------------------------------------------------------------------------
+
+static COMPACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Compact density: shorter rows and tighter spacing (Settings → Appearance).
+pub fn set_compact(on: bool) {
+    COMPACT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn compact() -> bool {
+    COMPACT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Picks the comfortable or the compact value.
+pub fn dense(comfortable: f32, compact_value: f32) -> f32 {
+    if compact() { compact_value } else { comfortable }
+}
+
 // ---- Text ----------------------------------------------------------------------------
 
 /// Section label: small mono capitals, quiet (Nothing's raw labels).
@@ -104,8 +122,8 @@ fn button_base(id: impl Into<ElementId>, kind: Kind) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
-        .h(px(28.))
-        .px(px(11.))
+        .h(px(dense(28., 25.)))
+        .px(px(dense(11., 9.)))
         .flex()
         .items_center()
         .gap(px(6.))
@@ -299,7 +317,15 @@ pub fn stage_dots(id: impl Into<SharedString>, done: usize, current: Option<usiz
 
 /// A raised card with a hairline; the only "box" in the system.
 pub fn card() -> Div {
-    div().flex().flex_col().gap(px(10.)).p(px(14.)).rounded(px(10.)).border_1().border_color(rgb(theme::line())).bg(rgb(theme::raised()))
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(dense(10., 8.)))
+        .p(px(dense(14., 10.)))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(rgb(theme::line()))
+        .bg(rgb(theme::raised()))
 }
 
 /// An inline message inside a view: an error next to the thing that failed,
@@ -335,9 +361,9 @@ pub fn panel_section(title: impl Into<SharedString>) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(9.))
-        .px(px(16.))
-        .py(px(14.))
+        .gap(px(dense(9., 7.)))
+        .px(px(dense(16., 12.)))
+        .py(px(dense(14., 10.)))
         .border_b_1()
         .border_color(rgb(theme::line()))
         .child(label(title))
@@ -347,7 +373,7 @@ pub fn panel_section(title: impl Into<SharedString>) -> Div {
 pub fn row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
-        .h(px(28.))
+        .h(px(dense(28., 24.)))
         .flex()
         .items_center()
         .gap(px(8.))

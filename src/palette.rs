@@ -12,7 +12,29 @@ use crate::{Monaged, PaletteDown, PaletteUp, theme};
 pub(crate) struct PaletteState {
     pub input: Entity<TextInput>,
     pub selected: usize,
+    pub mode: PaletteMode,
     _changed: Subscription,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum PaletteMode {
+    /// Everything: actions, places, files, conversations.
+    All,
+    /// Only what was said in conversations (Ctrl Shift F).
+    Conversations,
+}
+
+/// Groups in the order the palette lists them.
+fn group_rank(group: &str) -> u8 {
+    match group {
+        "Actions" => 0,
+        "Go to" => 1,
+        "Files" => 2,
+        "In conversations" => 3,
+        "Layouts" => 4,
+        "Theme" => 5,
+        _ => 6,
+    }
 }
 
 #[derive(Clone)]
@@ -33,6 +55,15 @@ pub(crate) enum Command {
     ToggleSidebar,
     Reconnect,
     Shortcuts,
+    OpenFile(String),
+    /// (agent, conversation item)
+    Conversation(i64, usize),
+    Layout(i64, String),
+    SaveLayout(i64),
+    DeleteLayout(i64, String),
+    Zen,
+    Density(bool),
+    Health,
 }
 
 #[derive(Clone)]
@@ -81,11 +112,20 @@ fn score_detail(query: &str, text: &str) -> Option<i32> {
 
 impl Monaged {
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() {
+        self.open_palette_with(PaletteMode::All, window, cx);
+    }
+
+    pub(crate) fn open_palette_with(&mut self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.as_ref().is_some_and(|p| p.mode == mode) {
             self.close_palette(window, cx);
             return;
         }
-        let input = cx.new(|cx| TextInput::new("Search projects, agents and actions", cx).bare());
+        self.refresh_file_index(cx);
+        let placeholder = match mode {
+            PaletteMode::All => "Search projects, agents, files, conversations and actions",
+            PaletteMode::Conversations => "Search what was said in every conversation",
+        };
+        let input = cx.new(|cx| TextInput::new(placeholder, cx).bare());
         let changed = cx.observe(&input, |this, _, cx| {
             if let Some(p) = &mut this.palette {
                 p.selected = 0;
@@ -93,7 +133,7 @@ impl Monaged {
             cx.notify();
         });
         window.focus(&input.focus_handle(cx));
-        self.palette = Some(PaletteState { input, selected: 0, _changed: changed });
+        self.palette = Some(PaletteState { input, selected: 0, mode, _changed: changed });
         cx.notify();
     }
 
@@ -164,26 +204,65 @@ impl Monaged {
         out.push(Entry { group: "App", glyph: Icon::Sidebar, title: "Toggle sidebar".into(), detail: String::new(), state: None, hint: Some("Ctrl B"), command: Command::ToggleSidebar });
         out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: Some("Ctrl ,"), command: Command::Settings });
         out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: Some("Ctrl /"), command: Command::Shortcuts });
+        out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: Some("F11"), command: Command::Zen });
+        let compact = ui::compact();
+        out.push(Entry { group: "App", glyph: Icon::Lines, title: if compact { "Comfortable density".into() } else { "Compact density".into() }, detail: String::new(), state: None, hint: None, command: Command::Density(!compact) });
+        out.push(Entry { group: "App", glyph: Icon::Gauge, title: "Health check".into(), detail: "WSL, the agent, git, logins, disk".into(), state: None, hint: None, command: Command::Health });
+        // Saved layouts of the project you're in.
+        if let Some(project_id) = self.sel_project {
+            for layout in self.layouts(project_id) {
+                out.push(Entry { group: "Layouts", glyph: Icon::Sidebar, title: format!("Layout: {}", layout.name), detail: String::new(), state: None, hint: None, command: Command::Layout(project_id, layout.name.clone()) });
+            }
+            out.push(Entry { group: "Layouts", glyph: Icon::Plus, title: "Save this layout…".into(), detail: "Panes, widths and the inspector".into(), state: None, hint: None, command: Command::SaveLayout(project_id) });
+            for layout in self.layouts(project_id) {
+                out.push(Entry { group: "Layouts", glyph: Icon::Trash, title: format!("Delete layout: {}", layout.name), detail: String::new(), state: None, hint: None, command: Command::DeleteLayout(project_id, layout.name.clone()) });
+            }
+        }
         out
     }
 
     /// The entries matching what's typed, best first within each group.
     fn filtered(&self, cx: &Context<Self>) -> Vec<Entry> {
         let Some(p) = &self.palette else { return Vec::new() };
-        let query = p.input.read(cx).text().trim().to_lowercase();
-        let mut scored: Vec<(usize, i32, Entry)> = self
-            .entries()
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, e)| {
-                let best = score(&query, &e.title).max(score_detail(&query, &e.detail));
-                best.map(|s| (i, s, e))
-            })
-            .collect();
-        if !query.is_empty() {
-            scored.sort_by_key(|(i, s, _)| (std::cmp::Reverse(*s), *i));
+        let raw = p.input.read(cx).text().to_string();
+        let query = raw.trim().to_lowercase();
+        let mut scored: Vec<(usize, i32, Entry)> = Vec::new();
+        if p.mode == PaletteMode::All {
+            scored = self
+                .entries()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    let best = score(&query, &e.title).max(score_detail(&query, &e.detail));
+                    best.map(|s| (i, s, e))
+                })
+                .collect();
+            for (i, (path, full)) in self.search_files(&query, 8).into_iter().enumerate() {
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let folder = path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+                scored.push((10_000 + i, 500 - i as i32, Entry { group: "Files", glyph: Icon::Lines, title: name, detail: folder, state: None, hint: None, command: Command::OpenFile(full) }));
+            }
         }
-        scored.into_iter().map(|(_, _, e)| e).take(60).collect()
+        let limit = if p.mode == PaletteMode::Conversations { 40 } else { 8 };
+        for (i, hit) in self.search_conversations(&raw, limit).into_iter().enumerate() {
+            let agent = self.agent(hit.agent_id).map(|a| a.record.name.clone()).unwrap_or_default();
+            scored.push((20_000 + i, 400 - i as i32, Entry {
+                group: "In conversations",
+                glyph: Icon::Ask,
+                title: hit.snippet,
+                detail: agent,
+                state: None,
+                hint: None,
+                command: Command::Conversation(hit.agent_id, hit.item),
+            }));
+        }
+        // One header per group: sort by group, then by how well it matched.
+        if query.is_empty() {
+            scored.sort_by_key(|(i, _, e)| (group_rank(e.group), *i));
+        } else {
+            scored.sort_by_key(|(i, s, e)| (group_rank(e.group), std::cmp::Reverse(*s), *i));
+        }
+        scored.into_iter().map(|(_, _, e)| e).take(80).collect()
     }
 
     pub(crate) fn on_palette_up(&mut self, _: &PaletteUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -217,6 +296,7 @@ impl Monaged {
     }
 
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.palette.as_ref().map(|p| p.input.read(cx).text().trim().to_string()).unwrap_or_default();
         self.palette = None;
         match command {
             Command::Project(id) => self.select_project(id, cx),
@@ -238,6 +318,21 @@ impl Monaged {
             Command::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
             Command::Reconnect => self.reconnect_now(cx),
             Command::Shortcuts => self.shortcuts_open = true,
+            Command::OpenFile(path) => self.open_in_zed(path, cx),
+            Command::Conversation(agent_id, item) => {
+                self.open_hit(agent_id, item, query, window, cx);
+                cx.notify();
+                return;
+            }
+            Command::Layout(project_id, name) => self.apply_layout(project_id, &name, cx),
+            Command::SaveLayout(project_id) => {
+                self.ask_save_layout(project_id, window, cx);
+                return;
+            }
+            Command::DeleteLayout(project_id, name) => self.delete_layout(project_id, &name, cx),
+            Command::Zen => self.toggle_zen(cx),
+            Command::Density(compact) => self.set_density(compact, cx),
+            Command::Health => self.open_health(cx),
         }
         if self.form.is_none() && self.palette.is_none() && !self.shortcuts_open {
             if let Some(id) = self.sel_agent {
@@ -322,7 +417,7 @@ impl Monaged {
                     div()
                         .id("palette")
                         .key_context("Palette")
-                        .w(px(640.))
+                        .w(px(720.))
                         .max_h(px(520.))
                         .flex()
                         .flex_col()

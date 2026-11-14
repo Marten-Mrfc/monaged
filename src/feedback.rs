@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, FocusHandle, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px, rgb,
+    AnyElement, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px, rgb,
     rgba,
 };
 
@@ -50,6 +50,8 @@ pub(crate) enum ToastAction {
     RetrySession(i64),
     /// Jump to a subproject (and an agent in it).
     Open { sub_id: i64, agent_id: Option<i64> },
+    /// Undo an archive.
+    Restore(i64),
 }
 
 /// Steps that can't be undone ask first.
@@ -68,6 +70,21 @@ pub(crate) struct Confirm {
     pub danger: bool,
     pub action: ConfirmAction,
     pub focus: FocusHandle,
+}
+
+/// A small dialog asking for one line of text (a new name, a layout's name).
+pub(crate) struct TextPrompt {
+    pub title: String,
+    pub hint: String,
+    pub confirm: String,
+    pub input: gpui::Entity<crate::text_input::TextInput>,
+    pub action: TextAction,
+}
+
+#[derive(Clone)]
+pub(crate) enum TextAction {
+    RenameAgent(i64),
+    SaveLayout(i64),
 }
 
 /// Automatic reconnects after the Claude process dies.
@@ -166,6 +183,7 @@ impl Monaged {
                 return;
             }
             ToastAction::RetrySession(agent_id) => self.retry_session(agent_id, cx),
+            ToastAction::Restore(agent_id) => self.restore_agent(agent_id, cx),
             ToastAction::Open { sub_id, agent_id } => {
                 self.form = None;
                 self.select_sub(sub_id, cx);
@@ -380,6 +398,89 @@ impl Monaged {
                 .occlude()
                 .on_click(cx.listener(|this, _, window, cx| this.close_confirm(window, cx)))
                 .child(ui::fade_in("confirm-in", panel))
+                .into_any_element(),
+        )
+    }
+
+    // ---- Text prompt ---------------------------------------------------------------------------
+
+    pub(crate) fn ask_text(&mut self, title: String, hint: String, confirm: String, initial: String, action: TextAction, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            let mut input = crate::text_input::TextInput::new(hint.clone(), cx);
+            input.set_text(initial, cx);
+            input
+        });
+        window.focus(&input.focus_handle(cx));
+        self.text_prompt = Some(TextPrompt { title, hint, confirm, input, action });
+        cx.notify();
+    }
+
+    pub(crate) fn close_text_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.text_prompt = None;
+        window.focus(&self.focus);
+        self.focus_request = self.sel_agent;
+        cx.notify();
+    }
+
+    pub(crate) fn accept_text_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.text_prompt.take() else { return };
+        let text = prompt.input.read(cx).text().trim().to_string();
+        window.focus(&self.focus);
+        self.focus_request = self.sel_agent;
+        if text.is_empty() {
+            cx.notify();
+            return;
+        }
+        match prompt.action {
+            TextAction::RenameAgent(agent_id) => self.rename_agent(agent_id, &text, cx),
+            TextAction::SaveLayout(project_id) => self.save_layout(project_id, &text, cx),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn render_text_prompt(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let prompt = self.text_prompt.as_ref()?;
+        let panel = div()
+            .id("text-prompt")
+            .occlude()
+            .w(px(440.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .p(px(20.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgb(theme::line_strong()))
+            .bg(rgb(theme::raised()))
+            .shadow_lg()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(ui::heading(prompt.title.clone()))
+            .child(prompt.input.clone())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex().items_center().gap(px(6.)).text_size(px(11.5)).text_color(rgb(theme::text_3())).child(ui::kbd("Enter")).child("save").child(ui::kbd("Esc")).child("cancel"))
+                    .child(div().flex_1())
+                    .child(ui::button("prompt-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, window, cx| this.close_text_prompt(window, cx))))
+                    .child(ui::button("prompt-ok", Kind::Primary, None, prompt.confirm.clone()).on_click(cx.listener(|this, _, window, cx| this.accept_text_prompt(window, cx)))),
+            );
+        let _ = &prompt.hint;
+        Some(
+            div()
+                .id("text-prompt-scrim")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(theme::scrim()))
+                .occlude()
+                .on_click(cx.listener(|this, _, window, cx| this.close_text_prompt(window, cx)))
+                .child(ui::fade_in("text-prompt-in", panel))
                 .into_any_element(),
         )
     }
