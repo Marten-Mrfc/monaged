@@ -1,8 +1,9 @@
-//! Installing Monaged just for you: no admin rights, no registry. The setup
-//! file (the same exe, named Monaged-Setup-<version>.exe) copies itself to
-//! %LOCALAPPDATA%\Programs\Monaged and adds Start menu shortcuts, one of
-//! them to uninstall. Projects and settings live in %APPDATA%\Monaged and
-//! are never touched by installing, updating or uninstalling.
+//! Installing Monaged just for you, without admin rights. The setup file (the
+//! same exe, named Monaged-Setup-<version>.exe) copies itself to
+//! %LOCALAPPDATA%\Programs\Monaged, adds Start menu shortcuts (one of them to
+//! uninstall) and lists itself under Settings → Apps for your user only
+//! (HKCU). Projects and settings live in %APPDATA%\Monaged and are never
+//! touched by installing, updating or uninstalling.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -100,6 +101,61 @@ fn desktop() -> PathBuf {
     PathBuf::from(base).join("Desktop")
 }
 
+const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Monaged";
+
+fn reg(args: &[&str]) -> Result<()> {
+    let mut command = Command::new("reg.exe");
+    command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::wsl::CREATE_NO_WINDOW);
+    }
+    let status = command.status().context("couldn't run reg.exe")?;
+    if !status.success() {
+        anyhow::bail!("reg.exe {} failed", args.first().copied().unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// Lists Monaged under Settings → Apps (for this user), with its version,
+/// icon and uninstaller.
+pub fn register(exe: &Path) -> Result<()> {
+    let exe_text = exe.display().to_string();
+    let dir = exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let size_kb = std::fs::metadata(exe).map(|m| m.len() / 1024).unwrap_or(0).to_string();
+    let uninstall = format!("\"{exe_text}\" --uninstall");
+    let icon = format!("{exe_text},0");
+    let strings = [
+        ("DisplayName", "Monaged"),
+        ("DisplayVersion", env!("CARGO_PKG_VERSION")),
+        ("Publisher", "Monaged"),
+        ("DisplayIcon", icon.as_str()),
+        ("InstallLocation", dir.as_str()),
+        ("UninstallString", uninstall.as_str()),
+        ("URLInfoAbout", "https://github.com/Marten-Mrfc/monaged"),
+        ("HelpLink", "https://github.com/Marten-Mrfc/monaged/blob/main/docs/troubleshooting.md"),
+        ("Comments", "Run Claude Code agents on your projects, inside WSL, from one window"),
+    ];
+    for (name, value) in strings {
+        reg(&["add", UNINSTALL_KEY, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])?;
+    }
+    for (name, value) in [("NoModify", "1"), ("NoRepair", "1"), ("EstimatedSize", size_kb.as_str())] {
+        reg(&["add", UNINSTALL_KEY, "/v", name, "/t", "REG_DWORD", "/d", value, "/f"])?;
+    }
+    Ok(())
+}
+
+/// After an update the installed copy is a new version: keep Settings → Apps in step.
+pub fn refresh_registration(store: &crate::store::Store) {
+    if !running_installed() || store.setting("install:registered").as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+        return;
+    }
+    if register(&installed_exe()).is_ok() {
+        let _ = store.set_setting("install:registered", env!("CARGO_PKG_VERSION"));
+    }
+}
+
 /// Installs the running exe; returns where it went.
 pub fn install(desktop_shortcut: bool) -> Result<PathBuf> {
     let src = std::env::current_exe().context("couldn't find this program's file")?;
@@ -114,6 +170,8 @@ pub fn install(desktop_shortcut: bool) -> Result<PathBuf> {
     if desktop_shortcut {
         shortcut(&desktop().join("Monaged.lnk"), &dst, "", "Run Claude agents on your projects")?;
     }
+    // Settings → Apps lists it; failing that only loses the listing.
+    let _ = register(&dst);
     Ok(dst)
 }
 
@@ -122,6 +180,8 @@ pub fn uninstall() -> Result<()> {
     for link in [start_menu().join("Monaged.lnk"), start_menu().join("Uninstall Monaged.lnk"), desktop().join("Monaged.lnk")] {
         let _ = std::fs::remove_file(link);
     }
+    let _ = reg(&["delete", UNINSTALL_KEY, "/f"]);
+    crate::onboarding::reopen_after_restart(false);
     let dir = install_dir();
     let mut command = Command::new("cmd.exe");
     command.args(["/C", &format!("timeout /t 2 /nobreak >nul & rmdir /s /q \"{}\"", dir.display())]);
@@ -193,7 +253,7 @@ impl Render for SetupView {
             SetupMode::Install => (
                 format!("Install Monaged {version}"),
                 format!(
-                    "Monaged goes into {} (just for you, no admin needed) with Start menu shortcuts. Your projects and settings in %APPDATA%\\Monaged stay as they are.",
+                    "Monaged goes into {} (just for you, no admin needed) with Start menu shortcuts. When it opens, a setup guide checks WSL, Ubuntu and the Claude agent and installs what's missing, asking first. Your projects and settings in %APPDATA%\\Monaged stay as they are.",
                     install_dir().display()
                 ),
             ),
@@ -227,7 +287,7 @@ impl Render for SetupView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child(if self.mode == SetupMode::Install { "Installed." } else { "Removed. You can close this window." }))
+                    .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child(if self.mode == SetupMode::Install { "Installed. Monaged's setup guide takes it from here." } else { "Removed. You can close this window." }))
                     .child(ui::button("setup-close", Kind::Ghost, None, "Close").on_click(cx.listener(|_, _, _, cx| cx.quit())))
                     .children(path.map(|p| {
                         ui::button("setup-open", Kind::Primary, Some(Icon::Play), "Open Monaged").on_click(cx.listener(move |_, _, _, cx| {
@@ -253,7 +313,7 @@ impl Render for SetupView {
             .text_color(rgb(theme::text()))
             .font_family(theme::SANS)
             .text_size(px(13.))
-            .child(div().flex().items_center().gap(px(10.)).child(div().size(px(10.)).rounded_full().bg(rgb(theme::red()))).child(ui::title(title)))
+            .child(div().flex().items_center().gap(px(14.)).child(crate::onboarding::logo_mark(40.)).child(ui::title(title)))
             .child(div().line_height(px(20.)).text_color(rgb(theme::text_2())).child(body))
             .child(div().flex_1())
             .child(actions)

@@ -6,7 +6,7 @@ use gpui::{AnyElement, ClipboardItem, Context, FontWeight, IntoElement, div, pre
 use crate::agent::Tone;
 use crate::icons::{Icon, icon_sized};
 use crate::ui::{self, Kind};
-use crate::{Conn, Form, LOGIN_COMMAND, Monaged, theme};
+use crate::{Conn, Form, Monaged, theme};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Check {
@@ -23,6 +23,7 @@ pub(crate) enum HealthFix {
     CopyIdentity,
     EnableGcm,
     Settings,
+    Setup,
 }
 
 #[derive(Clone)]
@@ -112,7 +113,7 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                 title: "Claude login",
                 state: Check::Fail,
                 detail: "Claude isn't logged in inside WSL.".into(),
-                fix: Some(("Copy the login command", HealthFix::CopyLogin)),
+                fix: Some(("Copy the sign-in command", HealthFix::CopyLogin)),
             },
             Conn::Ready => HealthItem { title: "Claude connection", state: Check::Ok, detail: "Connected; sessions open on demand.".into(), fix: None },
             Conn::Failed(reason) => HealthItem { title: "Claude connection", state: Check::Fail, detail: reason.clone(), fix: Some(("Reconnect", HealthFix::Reconnect)) },
@@ -149,7 +150,7 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                 title: "WSL",
                 state: Check::Fail,
                 detail: format!("Can't run commands in the {} distro: {err}", self.config.distro),
-                fix: None,
+                fix: Some(("Open the setup guide", HealthFix::Setup)),
             }),
             Ok(r) => {
                 let get = |k: &str| r.get(k).cloned().unwrap_or_default();
@@ -172,7 +173,7 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                     title: "Agent adapter",
                     state: if adapter == "missing" { Check::Fail } else { Check::Ok },
                     detail: if adapter == "missing" { format!("Not found at {}", self.config.agent_cmd) } else { format!("claude-agent-acp {adapter}") },
-                    fix: None,
+                    fix: (adapter == "missing").then_some(("Install it", HealthFix::Setup)),
                 });
                 let (name, email) = (get("gitname"), get("gitemail"));
                 items.push(if name.is_empty() || email.is_empty() {
@@ -240,12 +241,13 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
         match fix {
             HealthFix::Reconnect => self.reconnect_now(cx),
             HealthFix::CopyLogin => {
-                cx.write_to_clipboard(ClipboardItem::new_string(LOGIN_COMMAND.to_string()));
-                self.toast(Tone::Info, "Copied. Paste it in a terminal, then type /login.", cx);
+                cx.write_to_clipboard(ClipboardItem::new_string(self.login_command()));
+                self.toast(Tone::Info, "Copied. Paste it in a terminal and follow the sign-in.", cx);
             }
             HealthFix::CopyIdentity => self.copy_git_identity(cx),
             HealthFix::EnableGcm => self.enable_windows_credentials(cx),
             HealthFix::Settings => self.open_settings(cx),
+            HealthFix::Setup => self.open_setup(cx),
         }
     }
 
@@ -320,6 +322,7 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                                             (false, n) => format!("{n} thing{} to look at.", if n == 1 { "" } else { "s" }),
                                         })),
                                 )
+                                .child(ui::button("health-setup", Kind::Ghost, Some(Icon::Flag), "Setup guide").on_click(cx.listener(|this, _, _, cx| this.open_setup(cx))))
                                 .child(if checking {
                                     ui::busy_button("health-rerun", Kind::Secondary, "Checking…")
                                 } else {

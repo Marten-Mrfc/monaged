@@ -17,7 +17,7 @@ use crate::icons::{Icon, icon, icon_sized};
 use crate::menu::MenuTarget;
 use crate::pipeline::{self, Role, Stage};
 use crate::ui::{self, Kind, State};
-use crate::{Conn, Form, LOGIN_COMMAND, Monaged, SubKind, coord, coord_ui, dots, pipeline_ui, review_ui, theme};
+use crate::{Conn, Form, Monaged, SubKind, coord, coord_ui, dots, pipeline_ui, review_ui, theme};
 
 pub(crate) const COLUMN_MIN: f32 = 600.;
 const READING_WIDTH: f32 = 680.;
@@ -358,8 +358,10 @@ impl Monaged {
             window.focus(&self.focus);
         }
         let zen = self.zen && self.sel_agent.is_some() && self.form.is_none();
-        let sidebar_w = if self.sidebar_open && !zen { self.sidebar_px(width) } else { 0. };
-        let inspector_w = if self.inspector_visible() && !zen { self.inspector_px(width) } else { 0. };
+        // The setup guide has the window to itself.
+        let setup = matches!(self.form, Some(Form::Setup));
+        let sidebar_w = if self.sidebar_open && !zen && !setup { self.sidebar_px(width) } else { 0. };
+        let inspector_w = if self.inspector_visible() && !zen && !setup { self.inspector_px(width) } else { 0. };
         let main_w = width - sidebar_w - inspector_w;
         let columns = match (self.form.is_none(), zen) {
             (false, _) => Vec::new(),
@@ -401,9 +403,7 @@ impl Monaged {
                     .flex()
                     .flex_col()
                     .bg(rgb(theme::bg()))
-                    .children(self.render_connection_bar(cx))
-                    .children(self.render_login_banner(cx))
-                    .children(self.render_paused_bar(cx))
+                    .when(!setup, |d| d.children(self.render_connection_bar(cx)).children(self.render_login_banner(cx)).children(self.render_paused_bar(cx)))
                     .child(self.render_content(&columns, main_w, f32::from(window.viewport_size().height), cx)),
             )
             .when(inspector_w > 0., |d| d.child(self.render_inspector(inspector_w, cx)));
@@ -441,7 +441,7 @@ impl Monaged {
             .text_size(px(13.))
             .child(self.render_titlebar(window, sidebar_w, cx))
             .child(body)
-            .when(!zen, |d| d.child(self.render_statusbar(cx)))
+            .when(!zen && !setup, |d| d.child(self.render_statusbar(cx)))
             // Floating layers, lowest first.
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
@@ -471,6 +471,9 @@ impl Monaged {
         }
         if matches!(self.form, Some(Form::Guide)) {
             crumbs = vec!["Playground guide".into()];
+        }
+        if matches!(self.form, Some(Form::Setup)) {
+            crumbs = vec!["Setup".into()];
         }
         if self.zen && self.form.is_none() {
             crumbs.push(format!("Zen · {} to leave", crate::keys::label("zen")).into());
@@ -1035,19 +1038,21 @@ impl Monaged {
         if self.logged_in != Some(false) {
             return None;
         }
+        let command = self.login_command();
         let text = div()
             .flex()
             .flex_col()
             .gap(px(2.))
-            .child("Claude isn't logged in inside WSL. Run this once in a terminal, type /login, then reconnect.")
-            .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).child(LOGIN_COMMAND))
+            .child("Claude isn't signed in inside WSL. Sign in once (a terminal window opens), then reconnect.")
+            .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).child(command.clone()))
             .into_any_element();
         Some(
             self.notice_bar(text, true)
-                .child(ui::button("copy-login", Kind::Secondary, Some(Icon::Copy), "Copy command").on_click(cx.listener(|this, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(LOGIN_COMMAND.to_string()));
-                    this.toast(Tone::Info, "Copied. Paste it in a terminal, then type /login.", cx);
+                .child(ui::button("copy-login", Kind::Ghost, Some(Icon::Copy), "Copy command").on_click(cx.listener(move |this, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                    this.toast(Tone::Info, "Copied. Paste it in a terminal and follow the sign-in.", cx);
                 })))
+                .child(ui::button("login-open", Kind::Secondary, Some(Icon::Key), "Sign in").on_click(cx.listener(|this, _, _, cx| this.sign_in_window(cx))))
                 .child(ui::button("login-reconnect", Kind::Primary, Some(Icon::Refresh), "Reconnect").on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))))
                 .into_any_element(),
         )
@@ -1064,6 +1069,9 @@ impl Monaged {
         }
         if let Some(Form::Guide) = &self.form {
             return self.render_guide(cx);
+        }
+        if let Some(Form::Setup) = &self.form {
+            return self.render_setup(cx);
         }
         if let Some(Form::Project(page)) = &self.form {
             return self.render_project_page(page, cx);
@@ -1997,7 +2005,7 @@ impl Monaged {
             Form::NewSubproject { invalid, error, .. }
             | Form::StartPipeline { invalid, error, .. }
             | Form::EditPlan { invalid, error, .. } => (*invalid, error.clone()),
-            Form::Settings { .. } | Form::Health | Form::Project(_) | Form::Guide | Form::NewProject(_) => (None, None),
+            Form::Settings { .. } | Form::Health | Form::Project(_) | Form::Guide | Form::Setup | Form::NewProject(_) => (None, None),
         };
         let problem = |label: &'static str| -> Option<SharedString> {
             (invalid == Some(label)).then(|| form_error.clone().unwrap_or_default().into())
@@ -2094,7 +2102,7 @@ impl Monaged {
                 let body = self.render_plan_editor(title, summary, rows, problem("Workstreams").map(|s| s.to_string()), cx);
                 ("Edit the plan", "Change what the builders do before you approve it.", body, false, error.clone(), "Save plan")
             }
-            Form::Settings { .. } | Form::Health | Form::Project(_) | Form::Guide => return div().into_any_element(),
+            Form::Settings { .. } | Form::Health | Form::Project(_) | Form::Guide | Form::Setup => return div().into_any_element(),
         };
 
         div()

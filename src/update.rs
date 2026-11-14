@@ -1,14 +1,19 @@
-//! Updates from the GitHub releases of Monaged's (private) repo, through the
-//! GitHub CLI's login: check (by hand, or once a day), then "Update and
-//! restart" downloads the new setup exe and swaps it in. Only the installed
-//! copy updates itself; a development build points you to installing.
+//! Updates from Monaged's GitHub releases: check (by hand, or once a day),
+//! then "Update and restart" downloads the new setup exe, checks it against
+//! the release's SHA256SUMS.txt, and swaps it in. Public releases come straight
+//! from GitHub's API; while the repo is private, through the GitHub CLI's
+//! login. Only the installed copy updates itself; a development build points
+//! you to installing.
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{AnyElement, Context, div, prelude::*, px, rgb};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::agent::Tone;
 use crate::icons::Icon;
@@ -25,6 +30,10 @@ pub struct Release {
     pub version: String,
     pub notes: String,
     pub url: String,
+    /// The setup exe's download link (public releases).
+    pub asset: Option<String>,
+    /// SHA256SUMS.txt's download link (public releases).
+    pub sums: Option<String>,
 }
 
 #[derive(Default)]
@@ -42,10 +51,25 @@ pub fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// "0.10.1" > "0.9.3".
+/// "0.10.1" > "0.9.3"; a release beats its own pre-releases ("0.3.0" > "0.3.0-beta.1").
 pub fn newer(candidate: &str, than: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> { v.trim_start_matches('v').split(['.', '-']).take(3).map(|p| p.parse().unwrap_or(0)).collect() };
+    let parse = |v: &str| -> (Vec<u64>, bool) {
+        let v = v.trim().trim_start_matches('v');
+        let (core, pre) = match v.split_once('-') {
+            Some((core, _)) => (core, true),
+            None => (v, false),
+        };
+        (core.split('.').take(3).map(|p| p.parse().unwrap_or(0)).collect(), !pre)
+    };
     parse(candidate) > parse(than)
+}
+
+fn http(timeout: u64) -> ureq::Agent {
+    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(timeout))).build().into()
+}
+
+fn user_agent() -> String {
+    format!("Monaged/{} (+https://github.com/{DEFAULT_REPO})", current())
 }
 
 fn gh(args: &[&str]) -> Result<String> {
@@ -63,34 +87,141 @@ fn gh(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// The newest release, or None when the repo has none yet.
-pub fn latest(repo: &str) -> Result<Option<Release>> {
-    match gh(&["release", "view", "--repo", repo, "--json", "tagName,name,body,url"]) {
+/// A release as GitHub's API describes it.
+fn release_from(v: &Value) -> Option<Release> {
+    let tag = v["tag_name"].as_str().or_else(|| v["tagName"].as_str())?.to_string();
+    let assets = v["assets"].as_array().cloned().unwrap_or_default();
+    let link = |want: &dyn Fn(&str) -> bool| {
+        assets.iter().find(|a| a["name"].as_str().is_some_and(want)).and_then(|a| a["browser_download_url"].as_str().or_else(|| a["url"].as_str())).map(str::to_owned)
+    };
+    Some(Release {
+        version: tag.trim_start_matches('v').to_string(),
+        notes: v["body"].as_str().unwrap_or_default().to_string(),
+        url: v["html_url"].as_str().or_else(|| v["url"].as_str()).unwrap_or_default().to_string(),
+        asset: link(&|n: &str| n.starts_with("Monaged-Setup-") && n.ends_with(".exe")),
+        sums: link(&|n: &str| n == "SHA256SUMS.txt"),
+        tag,
+    })
+}
+
+/// Through GitHub's public API: Ok(None) when there's no release to see (none
+/// yet, or the repo is private).
+fn latest_public(repo: &str) -> Result<Option<Release>> {
+    let mut response = http(30)
+        .get(&format!("https://api.github.com/repos/{repo}/releases/latest"))
+        .header("User-Agent", &user_agent())
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .context("couldn't reach GitHub")?;
+    match response.status().as_u16() {
+        200 => {
+            let v: Value = response.body_mut().read_json().context("unexpected reply from GitHub")?;
+            Ok(release_from(&v))
+        }
+        404 => Ok(None),
+        403 | 429 => bail!("GitHub's rate limit was reached; try again in an hour"),
+        code => bail!("GitHub answered {code}"),
+    }
+}
+
+/// Through the GitHub CLI (private repos).
+fn latest_gh(repo: &str) -> Result<Option<Release>> {
+    match gh(&["release", "view", "--repo", repo, "--json", "tagName,body,url"]) {
         Ok(out) => {
             let v: Value = serde_json::from_str(&out).context("unexpected reply from gh")?;
-            let tag = v["tagName"].as_str().unwrap_or_default().to_string();
-            Ok(Some(Release {
-                version: tag.trim_start_matches('v').to_string(),
-                tag,
-                notes: v["body"].as_str().unwrap_or_default().to_string(),
-                url: v["url"].as_str().unwrap_or_default().to_string(),
-            }))
+            Ok(release_from(&v))
         }
         Err(err) if err.to_string().contains("release not found") => Ok(None),
         Err(err) => Err(err),
     }
 }
 
-/// Downloads the release's setup exe and puts it in place of the running one.
-pub fn download_and_swap(repo: &str, tag: &str) -> Result<()> {
+/// The newest release, or None when the repo has none yet.
+pub fn latest(repo: &str) -> Result<Option<Release>> {
+    let public = match latest_public(repo) {
+        Ok(Some(release)) => return Ok(Some(release)),
+        other => other,
+    };
+    match (latest_gh(repo), public) {
+        (Ok(found), _) => Ok(found),
+        (Err(err), Ok(_)) if err.to_string().contains("couldn't run gh") => {
+            // GitHub shows nothing publicly and gh isn't there: private, or no release yet.
+            bail!("no public release found at github.com/{repo}. If the repo is private, install the GitHub CLI and run gh auth login")
+        }
+        (Err(err), Ok(_)) => Err(err),
+        (Err(_), Err(err)) => Err(err),
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The hash SHA256SUMS.txt lists for `name`.
+fn listed_hash(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (hash, file) = line.trim().split_once(char::is_whitespace)?;
+        (file.trim().trim_start_matches('*') == name).then(|| hash.trim().to_lowercase())
+    })
+}
+
+fn download(url: &str, to: &Path) -> Result<()> {
+    let mut response = http(900).get(url).header("User-Agent", &user_agent()).header("Accept", "application/octet-stream").call().context("couldn't reach GitHub")?;
+    if response.status().as_u16() != 200 {
+        bail!("GitHub answered {} for {url}", response.status().as_u16());
+    }
+    let mut file = std::fs::File::create(to).with_context(|| format!("couldn't write {}", to.display()))?;
+    std::io::copy(&mut response.body_mut().with_config().limit(1 << 30).reader(), &mut file).context("the download broke off")?;
+    Ok(())
+}
+
+/// Downloads the release's setup exe, checks it, and puts it in place of the running one.
+pub fn download_and_swap(repo: &str, release: &Release) -> Result<()> {
     let dir = std::env::temp_dir().join("monaged-update");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
-    gh(&["release", "download", tag, "--repo", repo, "--pattern", "Monaged-Setup-*.exe", "--dir", &dir.display().to_string(), "--clobber"])?;
+    match &release.asset {
+        Some(url) => {
+            let name = url.rsplit('/').next().unwrap_or("Monaged-Setup.exe");
+            download(url, &dir.join(name))?;
+            if let Some(sums) = &release.sums {
+                download(sums, &dir.join("SHA256SUMS.txt"))?;
+            }
+        }
+        None => {
+            let dest = dir.display().to_string();
+            gh(&["release", "download", &release.tag, "--repo", repo, "--pattern", "Monaged-Setup-*.exe", "--dir", &dest, "--clobber"])?;
+            let _ = gh(&["release", "download", &release.tag, "--repo", repo, "--pattern", "SHA256SUMS.txt", "--dir", &dest, "--clobber"]);
+        }
+    }
     let file: PathBuf = std::fs::read_dir(&dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .find(|p| p.extension().is_some_and(|e| e == "exe"))
         .context("the release has no Monaged-Setup exe")?;
+    let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    // A Windows program starts with "MZ"; anything else is an error page.
+    let mut head = [0u8; 2];
+    std::fs::File::open(&file)?.read_exact(&mut head).context("the download is empty")?;
+    if &head != b"MZ" {
+        bail!("the download isn't a Windows program");
+    }
+    if let Ok(sums) = std::fs::read_to_string(dir.join("SHA256SUMS.txt")) {
+        let expected = listed_hash(&sums, &name).with_context(|| format!("SHA256SUMS.txt doesn't list {name}"))?;
+        let actual = sha256_file(&file)?;
+        if actual != expected {
+            bail!("the download doesn't match its checksum (expected {expected}, got {actual}); nothing was changed");
+        }
+    }
     let target = std::env::current_exe()?;
     install::replace_exe(&file, &target)
 }
@@ -164,8 +295,8 @@ impl Monaged {
         let repo = self.update_repo();
         self.progress("update", format!("Downloading Monaged {}…", release.version), cx);
         cx.spawn(async move |view, cx| {
-            let tag = release.tag.clone();
-            let result = cx.background_spawn(async move { download_and_swap(&repo, &tag) }).await;
+            let wanted = release.clone();
+            let result = cx.background_spawn(async move { download_and_swap(&repo, &wanted) }).await;
             view.update(cx, |this, cx| {
                 this.update.installing = false;
                 match result {
@@ -273,7 +404,11 @@ impl Monaged {
                     .child(div().flex().child(ui::button("update-notes", Kind::Ghost, Some(Icon::External), "Open on GitHub").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))))),
             );
         }
-        col.child(ui::meta(format!("Releases come from github.com/{} through your GitHub CLI login.", self.update_repo()))).into_any_element()
+        col.child(ui::meta(format!(
+            "Releases come from github.com/{}: straight from GitHub when the repo is public, otherwise through your GitHub CLI login. Each download is checked against the release's SHA256SUMS.txt.",
+            self.update_repo()
+        )))
+        .into_any_element()
     }
 }
 
@@ -285,5 +420,34 @@ mod tests {
         assert!(super::newer("v0.10.0", "0.9.3"));
         assert!(!super::newer("0.2.0", "0.2.0"));
         assert!(!super::newer("0.1.0", "0.2.0"));
+        assert!(super::newer("0.3.0", "0.3.0-beta.1"));
+        assert!(!super::newer("0.3.0-beta.2", "0.3.0"));
+        assert!(super::newer("0.3.1-beta.1", "0.3.0"));
+    }
+
+    #[test]
+    fn reads_a_release_and_its_files() {
+        let v = serde_json::json!({
+            "tag_name": "v0.3.0",
+            "body": "notes",
+            "html_url": "https://github.com/o/r/releases/tag/v0.3.0",
+            "assets": [
+                { "name": "monaged-0.3.0-windows-x64.zip", "browser_download_url": "https://x/zip" },
+                { "name": "Monaged-Setup-0.3.0.exe", "browser_download_url": "https://x/exe" },
+                { "name": "SHA256SUMS.txt", "browser_download_url": "https://x/sums" }
+            ]
+        });
+        let r = super::release_from(&v).unwrap();
+        assert_eq!(r.version, "0.3.0");
+        assert_eq!(r.asset.as_deref(), Some("https://x/exe"));
+        assert_eq!(r.sums.as_deref(), Some("https://x/sums"));
+    }
+
+    #[test]
+    fn finds_a_files_checksum() {
+        let sums = "abc123  Monaged-Setup-0.3.0.exe\r\nDEF456  monaged-0.3.0-windows-x64.zip\n";
+        assert_eq!(super::listed_hash(sums, "Monaged-Setup-0.3.0.exe").as_deref(), Some("abc123"));
+        assert_eq!(super::listed_hash(sums, "monaged-0.3.0-windows-x64.zip").as_deref(), Some("def456"));
+        assert_eq!(super::listed_hash(sums, "other.exe"), None);
     }
 }

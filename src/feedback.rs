@@ -72,6 +72,8 @@ pub(crate) enum ConfirmAction {
     /// (agent, your message number): restore the files to before it.
     Rollback(i64, i64),
     RerunBuilder(i64, String),
+    /// Restart Windows to finish installing WSL (the setup guide).
+    RestartWindows,
 }
 
 pub(crate) struct Confirm {
@@ -361,6 +363,12 @@ impl Monaged {
                 "Start builder".to_string(),
                 false,
             ),
+            ConfirmAction::RestartWindows => (
+                "Restart Windows now?".into(),
+                "Windows restarts in a few seconds; save your work in other programs first. Monaged opens again after you sign in and carries on with the setup.".into(),
+                "Restart".into(),
+                true,
+            ),
             ConfirmAction::Promote(_, from, to) => (
                 format!("Merge {from} into {to}?"),
                 format!("{to} is your top branch, so this asks first. Monaged merges in a clean checkout and stops if there are conflicts."),
@@ -396,6 +404,13 @@ impl Monaged {
             ConfirmAction::RerunBuilder(sub_id, workstream) => self.rerun_builder(sub_id, &workstream, cx),
             ConfirmAction::Discard(sub_id, file) => self.git_discard(sub_id, file, cx),
             ConfirmAction::Rollback(agent_id, ordinal) => self.rollback_to(agent_id, ordinal, cx),
+            ConfirmAction::RestartWindows => {
+                crate::onboarding::reopen_after_restart(true);
+                match crate::onboarding::restart_windows() {
+                    Ok(()) => self.toast(Tone::Info, "Restarting Windows…", cx),
+                    Err(err) => self.toast_error(format!("{err:#}"), cx),
+                }
+            }
         }
         cx.notify();
     }
@@ -708,6 +723,7 @@ impl Monaged {
                     cx.write_to_clipboard(ClipboardItem::new_string(reason_text.clone()));
                     this.toast(Tone::Info, "Copied to the clipboard", cx);
                 })))
+                .child(ui::button("conn-setup", Kind::Secondary, Some(Icon::Flag), "Setup guide").tooltip(crate::shell::tip("Checks WSL, the Claude agent and your sign-in, and fixes what's missing")).on_click(cx.listener(|this, _, _, cx| this.open_setup(cx))))
                 .child(ui::button("conn-retry", Kind::Primary, Some(Icon::Refresh), "Reconnect now").on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))))
                 .into_any_element(),
         )

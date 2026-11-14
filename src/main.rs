@@ -2,7 +2,11 @@
 //! native window. Projects contain subprojects; each subproject runs agents
 //! in their own git worktrees, all over one Agent Client Protocol connection.
 //!
-//! Usage: monaged [--distro Ubuntu] [--agent <path to claude-agent-acp in WSL>]
+//! Usage: monaged [--distro Ubuntu] [--agent <path to claude-agent-acp in WSL>] [--setup]
+
+// Release builds are a windowed app (no console window next to Monaged); logs
+// go to %APPDATA%\Monaged\monaged.log instead. Debug builds keep the console.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod acp;
 mod add_project;
@@ -32,6 +36,7 @@ mod media;
 mod menu;
 mod merge_ui;
 mod notify;
+mod onboarding;
 mod palette;
 mod pipeline;
 mod playground;
@@ -83,9 +88,6 @@ actions!(
     monaged,
     [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext, FocusTree, ToggleSideChat, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen]
 );
-
-/// Quoted so neither PowerShell nor cmd rewrites the `~`; bash expands it.
-const LOGIN_COMMAND: &str = r#"wsl -d Ubuntu -- bash -lc "~/.local/share/claude-agent-acp/current/claude""#;
 
 enum Conn {
     Starting,
@@ -158,6 +160,8 @@ enum Form {
     Project(Box<project_ui::ProjectPage>),
     /// The playground's tour (PLAYGROUND.md).
     Guide,
+    /// The setup guide (first start, or Ctrl K → Setup guide).
+    Setup,
     /// Editing the plan before approving it.
     EditPlan {
         sub_id: i64,
@@ -325,6 +329,8 @@ struct Monaged {
     fetched: HashMap<i64, Instant>,
     /// Updates from GitHub releases (Settings → Updates).
     update: update::UpdateState,
+    /// The setup guide's checks and what it's doing.
+    setup: onboarding::Setup,
     /// Settings → Agents: the new profile's name and command.
     profile_inputs: Option<(Entity<TextInput>, Entity<TextInput>)>,
     /// What the agent said about itself when we connected (agentInfo, agentCapabilities).
@@ -539,6 +545,7 @@ impl Monaged {
             git_identity: None,
             profile_inputs: None,
             update: update::UpdateState::default(),
+            setup: onboarding::Setup::default(),
             agent_info: None,
             last_place: String::new(),
             merge_queue: std::collections::VecDeque::new(),
@@ -598,11 +605,16 @@ impl Monaged {
         if let Some(backup) = this.store.restored.clone() {
             this.toast_error(format!("Monaged's database was damaged, so it went back to the backup {backup}. Recent changes since that backup may be missing."), cx);
         }
-        this.check_sandbox(cx);
         this.apply_theme(window);
         window.focus(&this.focus);
-        this.connect(cx);
-        this.check_credentials(cx);
+        // A fresh PC gets the setup guide first; it connects when it's done.
+        if this.setup_needed(std::env::args().any(|a| a == "--setup")) {
+            this.open_setup(cx);
+        } else {
+            this.check_sandbox(cx);
+            this.connect(cx);
+            this.check_credentials(cx);
+        }
         if let Some(project_id) = this.sel_project {
             this.refresh_branches(project_id, cx);
         }
@@ -1164,7 +1176,7 @@ impl Monaged {
                 self.save_plan_edit(cx);
                 return;
             }
-            Some(Form::Settings { .. }) | Some(Form::Health) | Some(Form::Project(_)) | Some(Form::Guide) | None => {}
+            Some(Form::Settings { .. }) | Some(Form::Health) | Some(Form::Project(_)) | Some(Form::Guide) | Some(Form::Setup) | None => {}
         }
         cx.notify();
     }
@@ -1667,7 +1679,7 @@ fn parse_args() -> AgentConfig {
         match arg.as_str() {
             "--distro" => config.distro = args.next().unwrap_or(config.distro),
             "--agent" => config.agent_cmd = args.next().unwrap_or(config.agent_cmd),
-            "--install" | "--uninstall" | "--restarted" => {}
+            "--install" | "--uninstall" | "--restarted" | "--setup" => {}
             other => eprintln!("ignoring unknown argument {other}"),
         }
     }
@@ -1694,7 +1706,7 @@ fn main() {
     };
     if let Some(mode) = setup {
         Application::new().with_assets(icons::Assets).run(move |cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(560.), px(300.)), cx);
+            let bounds = Bounds::centered(None, size(px(580.), px(330.)), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1713,6 +1725,7 @@ fn main() {
     if instance::already_running(args.iter().any(|a| a == "--restarted")) {
         return;
     }
+    log_to_file();
     install::cleanup_old();
     let mut config = parse_args();
     let store = match Store::open() {
@@ -1726,6 +1739,13 @@ fn main() {
     if config.agent_cmd == AgentConfig::default().agent_cmd {
         config.agent_cmd = settings_ui::active_command(&store);
     }
+    // The distro the setup guide picked, unless --distro says otherwise.
+    if !args.iter().any(|a| a == "--distro")
+        && let Some(distro) = store.setting("wsl:distro").filter(|d| !d.trim().is_empty())
+    {
+        config.distro = distro;
+    }
+    install::refresh_registration(&store);
     let saved_bounds = store.setting("ui:window").and_then(|v| parse_bounds(&v));
     Application::new().with_assets(icons::Assets).run(move |cx: &mut App| {
         // Text boxes, the fixed keys, and your shortcuts (Settings → Keyboard).
@@ -1752,4 +1772,36 @@ fn main() {
         .expect("failed to open the window");
         cx.activate(true);
     });
+}
+
+/// Without a console (release builds started from the Start menu), stderr
+/// goes nowhere; point it at %APPDATA%\Monaged\monaged.log so problems can
+/// be looked at. The previous run's log is kept as monaged.old.log.
+fn log_to_file() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::IntoRawHandle;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(which: u32) -> isize;
+            fn SetStdHandle(which: u32, handle: isize) -> i32;
+        }
+        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+        // A console or a pipe is already there (a terminal, cargo run): keep it.
+        let current = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        if current != 0 && current != -1 {
+            return;
+        }
+        let dir = store::data_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("monaged.log");
+        let _ = std::fs::rename(&log, dir.join("monaged.old.log"));
+        if let Ok(file) = std::fs::File::create(&log) {
+            let handle = file.into_raw_handle() as isize;
+            unsafe {
+                SetStdHandle(STD_ERROR_HANDLE, handle);
+            }
+            eprintln!("Monaged {} started", env!("CARGO_PKG_VERSION"));
+        }
+    }
 }

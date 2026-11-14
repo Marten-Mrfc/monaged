@@ -245,6 +245,11 @@ fn open_checked(path: &std::path::Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Where Monaged keeps its database, backups and log: %APPDATA%\Monaged.
+pub fn data_dir() -> PathBuf {
+    PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into())).join("Monaged")
+}
+
 impl Store {
     /// Opens the database. A damaged one is set aside and the newest good
     /// backup takes its place (`restored` says which); every start makes a

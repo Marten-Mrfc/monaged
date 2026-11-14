@@ -69,6 +69,7 @@ pub(crate) enum Command {
     ProjectSettings(i64),
     CreatePlayground,
     Guide,
+    Setup,
 }
 
 #[derive(Clone)]
@@ -218,6 +219,7 @@ impl Monaged {
         out.push(Entry { group: "App", glyph: Icon::Lines, title: if compact { "Comfortable density".into() } else { "Compact density".into() }, detail: String::new(), state: None, hint: None, command: Command::Density(!compact) });
         out.push(Entry { group: "App", glyph: Icon::ArrowDown, title: "Check for updates".into(), detail: format!("Monaged {}", crate::update::current()), state: None, hint: None, command: Command::CheckUpdates });
         out.push(Entry { group: "App", glyph: Icon::Gauge, title: "Health check".into(), detail: "WSL, the agent, git, logins, disk".into(), state: None, hint: None, command: Command::Health });
+        out.push(Entry { group: "App", glyph: Icon::Flag, title: "Setup guide".into(), detail: "Install WSL, Ubuntu and the Claude agent, sign in".into(), state: None, hint: None, command: Command::Setup });
         let has_playground = self.projects.iter().any(|p| p.path.ends_with("/monaged-playground"));
         out.push(Entry {
             group: "App",
@@ -356,6 +358,7 @@ impl Monaged {
             Command::Zen => self.toggle_zen(cx),
             Command::Density(compact) => self.set_density(compact, cx),
             Command::Health => self.open_health(cx),
+            Command::Setup => self.open_setup(cx),
             Command::SubChanges(id) => self.open_sub_changes(id, cx),
             Command::CheckUpdates => self.check_updates(false, cx),
             Command::CreatePlayground => self.create_playground(cx),

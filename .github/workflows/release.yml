@@ -1,11 +1,16 @@
 name: Release
 
-# Push a tag like v0.3.0 (matching the version in Cargo.toml) to build the
-# Windows release and publish it as a GitHub release. Running it by hand
-# builds the same files as a workflow artifact without publishing anything.
+# Builds the Windows release and publishes it as the GitHub release v<version>
+# (the version in Cargo.toml), in either of two ways:
+#   - push a tag like v0.3.0, or
+#   - push a commit whose message starts with "Release v0.3.0" to main or a
+#     claude/ branch (the workflow then creates the tag on that commit).
+# Running it by hand builds the same files as a workflow artifact without
+# publishing anything.
 on:
   push:
     tags: ["v*"]
+    branches: ["main", "claude/**"]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +19,7 @@ permissions:
 jobs:
   release:
     name: Build and publish (Windows x64)
+    if: github.event_name != 'push' || github.ref_type == 'tag' || startsWith(github.event.head_commit.message, 'Release v')
     runs-on: windows-latest
     timeout-minutes: 90
     env:
@@ -38,12 +44,24 @@ jobs:
       - name: Version
         id: version
         shell: pwsh
+        env:
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
             throw "Tag $env:GITHUB_REF_NAME doesn't match Cargo.toml's version $version"
           }
+          $publish = 'false'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $publish = 'true' }
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_TYPE -eq 'branch') {
+            $subject = ($env:HEAD_MESSAGE -split "`n")[0].Trim()
+            if ($subject -notmatch "^Release v$([regex]::Escape($version))\b") {
+              throw "The commit says '$subject' but Cargo.toml's version is $version"
+            }
+            $publish = 'true'
+          }
           "version=$version" >> $env:GITHUB_OUTPUT
+          "publish=$publish" >> $env:GITHUB_OUTPUT
           Write-Host "Monaged $version"
       - name: Test
         run: cargo test --locked
@@ -61,7 +79,7 @@ jobs:
           path: dist/*
           if-no-files-found: error
       - name: Publish the GitHub release
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.publish == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,6 +92,6 @@ jobs:
             gh release upload "v$version" $files --repo $env:GITHUB_REPOSITORY --clobber
             gh release edit "v$version" --repo $env:GITHUB_REPOSITORY --notes-file dist-notes.md
           } else {
-            gh release create "v$version" $files --repo $env:GITHUB_REPOSITORY --title "Monaged $version" --notes-file dist-notes.md $pre
+            gh release create "v$version" $files --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Monaged $version" --notes-file dist-notes.md $pre
           }
           if ($LASTEXITCODE -ne 0) { throw "publishing failed" }
