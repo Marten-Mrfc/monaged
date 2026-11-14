@@ -1,0 +1,79 @@
+name: Release
+
+# Push a tag like v0.3.0 (matching the version in Cargo.toml) to build the
+# Windows release and publish it as a GitHub release. Running it by hand
+# builds the same files as a workflow artifact without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: windows-cargo-${{ hashFiles('Cargo.lock') }}-release
+          restore-keys: windows-cargo-${{ hashFiles('Cargo.lock') }}-
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME doesn't match Cargo.toml's version $version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Monaged $version"
+      - name: Test
+        run: cargo test --locked
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package.ps1 -Version "${{ steps.version.outputs.version }}"
+      - name: Release notes
+        shell: pwsh
+        run: ./scripts/release-notes.ps1 -Version "${{ steps.version.outputs.version }}" -Out dist-notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: monaged-${{ steps.version.outputs.version }}-windows-x64
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish the GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $files = (Get-ChildItem dist -File).FullName
+          $pre = if ($version -match '-') { '--prerelease' } else { '--latest' }
+          gh release view "v$version" --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "v$version" $files --repo $env:GITHUB_REPOSITORY --clobber
+            gh release edit "v$version" --repo $env:GITHUB_REPOSITORY --notes-file dist-notes.md
+          } else {
+            gh release create "v$version" $files --repo $env:GITHUB_REPOSITORY --title "Monaged $version" --notes-file dist-notes.md $pre
+          }
+          if ($LASTEXITCODE -ne 0) { throw "publishing failed" }

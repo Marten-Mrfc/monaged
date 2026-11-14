@@ -13,3 +13,4 @@ Thumbs.db
 
 # Release files (scripts/release.ps1)
 /dist/
+dist-notes.md
