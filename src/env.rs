@@ -338,12 +338,9 @@ pub(crate) fn set_git_token_masks(list: Vec<(Secret, String)>) {
     rebuild_masks();
 }
 
-/// One more git token (a renewed one), until the next full refresh.
-pub(crate) fn add_git_token_mask(value: Secret, name: String) {
-    if let Ok(mut sources) = MASK_SOURCES.write() {
-        sources.1.push((value, name));
-    }
-    rebuild_masks();
+/// Empties the clipboard (after Monaged picked a token up from it).
+pub(crate) fn clear_clipboard() -> bool {
+    win::copy_private("")
 }
 
 fn rebuild_masks() {

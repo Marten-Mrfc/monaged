@@ -190,16 +190,19 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                 let monaged = get("monaged").parse::<usize>().unwrap_or(0);
                 let accounts = self.git_auth.accounts.len();
                 let ok = monaged > 0 || gcm;
+                let expiring: Vec<String> = self.git_auth.accounts.iter().filter(|a| a.days_left().is_some_and(|d| d < 14)).map(|a| a.key()).collect();
                 items.push(HealthItem {
                     title: "Git logins",
-                    state: if ok { Check::Ok } else { Check::Warn },
-                    detail: match (monaged > 0, gcm) {
+                    state: if ok && expiring.is_empty() { Check::Ok } else { Check::Warn },
+                    detail: if !expiring.is_empty() {
+                        format!("These tokens have expired or expire within two weeks: {}. Sign in again in Settings → Git accounts.", expiring.join(", "))
+                    } else { match (monaged > 0, gcm) {
                         (true, true) => format!("{accounts} Monaged account(s) sign git in to {monaged} host(s); Git Credential Manager covers the rest."),
                         (true, false) => format!("{accounts} Monaged account(s) sign git in to {monaged} host(s)."),
                         (false, true) => "Git in WSL uses Windows' Git Credential Manager for push and clone.".into(),
                         (false, false) => "Git in WSL can't sign in anywhere, so pushes and private clones fail.".into(),
-                    },
-                    fix: (!ok).then_some(("Sign in", HealthFix::GitAccounts)),
+                    } },
+                    fix: (!ok || !expiring.is_empty()).then_some(("Sign in", HealthFix::GitAccounts)),
                 });
                 let disk = get("disk");
                 let pct: u32 = disk.split_whitespace().nth(1).and_then(|p| p.trim_end_matches('%').parse().ok()).unwrap_or(0);

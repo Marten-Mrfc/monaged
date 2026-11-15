@@ -337,7 +337,7 @@ One rule for where a message goes:
 - [x] **The database protects itself:** every start makes a backup (VACUUM INTO, last five kept), checks the file, and if it's damaged sets it aside and starts from the newest good backup (and says so). The window position is only saved when it changes, never while minimized.
 
 ### Git sign-in and a fuller Git tab (done 2026-11-15)
-- [x] **Accounts** (Settings → Git accounts): GitHub, GitLab (Enterprise and self-hosted too) and any other host. Sign in in the browser (OAuth device flow: a code to approve on the host's site; GitLab's expiring tokens renew themselves), with a token (opens the token page with the scopes ticked), with a username and app password for other hosts, or by importing what the GitHub CLI, the GitLab CLI or Git Credential Manager already has. Every token is checked with the host's API (who you are, your email, its scopes).
+- [x] **Accounts** (Settings → Git accounts): GitHub, GitLab (Enterprise and self-hosted too) and any other host. Fully on your PC: no OAuth app, client ID, secret or server. Sign in in the browser (the host's own token page opens with the scopes ticked; you click Generate and Copy, and Monaged picks the token up from the clipboard, only if it has the host's token shape, then empties the clipboard), by pasting a token, with a username and app password for other hosts, or by importing what the GitHub CLI, the GitLab CLI or Git Credential Manager already has. Every token is checked with the host's API (who you are, your email, its scopes, when it expires); tokens that expire within two weeks are flagged in Settings and the health check.
 - [x] **No Git Credential Manager needed:** tokens live in Windows Credential Manager under Monaged's name, and `monaged.exe --git-credential` is git's helper in WSL for each host with an account (through WSL interop, window open or not). It's set up again by itself when monaged.exe moves (updates, dev builds). A token git finds rejected shows up in Settings.
 - [x] **Or with it:** Git Credential Manager is found wherever Git for Windows or its own installer put it, and one switch makes it the helper for hosts without an account (or turns it off).
 - [x] **Several accounts per host:** a default, and a project can sign in as another (`credential.<url>.username` in its git config), switched from the Git tab.
@@ -347,7 +347,7 @@ One rule for where a message goes:
 - [x] **Commit as an account:** its name and email become git's identity in WSL.
 - [x] **Git tab:** commit only the files you tick, amend the last commit, take back a commit that isn't pushed, pull with a merge when a branch moved on both sides, and an Origin row with who it signs in as, a connection test, and HTTPS ⇄ SSH.
 - [x] Clone checks, push errors and the health check point to Settings → Git accounts.
-- [ ] Not exercised live yet (written and type-checked off Windows): the browser sign-in against a real OAuth app, the helper through WSL interop, imports from gh/glab/GCM.
+- [ ] Not exercised live yet (written and type-checked off Windows): the clipboard pick-up against the real token pages, the helper through WSL interop, imports from gh/glab/GCM.
 
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.

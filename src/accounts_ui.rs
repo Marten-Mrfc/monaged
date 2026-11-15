@@ -17,7 +17,7 @@ use std::time::Duration;
 use gpui::{AnyElement, ClipboardItem, Context, Entity, FontWeight, SharedString, div, prelude::*, px, rgb};
 
 use crate::agent::Tone;
-use crate::git_auth::{self, Account, DeviceCode, Found, HelperStatus, Poll, SshKey};
+use crate::git_auth::{self, Account, Found, HelperStatus, SshKey};
 use crate::hosting::Provider;
 use crate::icons::{Icon, icon_sized};
 use crate::text_input::TextInput;
@@ -39,12 +39,10 @@ pub(crate) struct GitAuthUi {
     pub found: Option<Vec<Found>>,
     /// SSH test results per host.
     pub ssh_results: HashMap<String, (bool, String)>,
-    /// Bumped to stop a browser sign-in that's waiting.
-    pub device_gen: u64,
+    /// Bumped to stop a browser sign-in that's waiting for the clipboard.
+    pub watch_gen: u64,
     /// Projects that sign in as an account other than the host's default.
     pub project_logins: HashMap<i64, String>,
-    /// When the token masks were last rebuilt (renewals happen in other processes too).
-    pub masks_at: Option<std::time::Instant>,
 }
 
 /// The open sign-in form.
@@ -53,9 +51,8 @@ pub(crate) struct SignIn {
     pub host: Entity<TextInput>,
     pub user: Entity<TextInput>,
     pub token: Entity<TextInput>,
-    pub client_id: Entity<TextInput>,
-    pub show_client_id: bool,
-    pub device: Option<DeviceCode>,
+    /// The browser sign-in is watching the clipboard for the new token.
+    pub watching: bool,
     pub working: Option<String>,
     pub error: Option<String>,
 }
@@ -99,7 +96,6 @@ impl Monaged {
                 .await;
             view.update(cx, |this, cx| {
                 let (helper, gcm, keys, rejected) = result;
-                this.git_auth.masks_at = Some(std::time::Instant::now());
                 this.creds_ok = Some(helper.as_ref().is_ok_and(|h| !h.hosts.is_empty() || h.uses_gcm()));
                 this.git_auth.helper = Some(helper);
                 this.git_auth.gcm_path = Some(gcm);
@@ -108,25 +104,6 @@ impl Monaged {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
-    }
-
-    /// Rebuilds the token masks every ten minutes: GitLab sign-ins renew
-    /// themselves, also inside git's helper process, and the new token must
-    /// be masked too.
-    pub(crate) fn maybe_refresh_git_masks(&mut self, cx: &mut Context<Self>) {
-        if self.git_auth.accounts.is_empty() || self.git_auth.masks_at.is_none_or(|at| at.elapsed() < Duration::from_secs(600)) {
-            return;
-        }
-        self.git_auth.masks_at = Some(std::time::Instant::now());
-        let accounts = self.git_auth.accounts.clone();
-        cx.background_spawn(async move {
-            let masks = accounts
-                .iter()
-                .filter_map(|a| git_auth::load_secret(&a.host, &a.login).map(|s| (crate::env::Secret::new(s.token.clone()), format!("git token {}", a.key()))))
-                .collect();
-            crate::env::set_git_token_masks(masks);
         })
         .detach();
     }
@@ -301,7 +278,7 @@ impl Monaged {
     // ---- Signing in --------------------------------------------------------------------------
 
     fn open_sign_in(&mut self, provider: Option<Provider>, cx: &mut Context<Self>) {
-        self.git_auth.device_gen += 1;
+        self.git_auth.watch_gen += 1;
         let host_text = match provider {
             Some(Provider::GitHub) => "github.com",
             Some(Provider::GitLab) => "gitlab.com",
@@ -311,13 +288,12 @@ impl Monaged {
         host.update(cx, |i, cx| i.set_text(host_text, cx));
         let user = cx.new(|cx| TextInput::new("Username", cx));
         let token = cx.new(|cx| TextInput::new(if provider.is_some() { "Paste the token" } else { "Password or token" }, cx).masked());
-        let client_id = cx.new(|cx| TextInput::new("OAuth app client ID", cx));
-        self.git_auth.sign_in = Some(SignIn { provider, host, user, token, client_id, show_client_id: false, device: None, working: None, error: None });
+        self.git_auth.sign_in = Some(SignIn { provider, host, user, token, watching: false, working: None, error: None });
         cx.notify();
     }
 
     fn close_sign_in(&mut self, cx: &mut Context<Self>) {
-        self.git_auth.device_gen += 1;
+        self.git_auth.watch_gen += 1;
         self.git_auth.sign_in = None;
         cx.notify();
     }
@@ -337,7 +313,11 @@ impl Monaged {
         cx.notify();
     }
 
-    /// The OAuth device flow: get a code, open the browser, wait for approval.
+    /// Browser sign-in without any OAuth app: open the host's token page with
+    /// the permissions ticked, then watch the clipboard for a token of that
+    /// host's shape. When you click Copy on the page, Monaged checks the token
+    /// with the host, saves it and empties the clipboard. Only text that looks
+    /// like a token is ever kept; anything else on the clipboard is ignored.
     fn start_browser_sign_in(&mut self, cx: &mut Context<Self>) {
         let Some((provider, host)) = self.sign_in_host(cx) else { return };
         let Some(provider) = provider else {
@@ -348,113 +328,82 @@ impl Monaged {
             self.set_sign_in_error(Some("Enter the host first.".into()), cx);
             return;
         }
-        if let Some(form) = &self.git_auth.sign_in {
-            let typed = form.client_id.read(cx).text().trim().to_string();
-            if !typed.is_empty() {
-                let _ = self.store.set_setting(&format!("git:oauth:{host}"), &typed);
-            }
-        }
-        let Some(client_id) = git_auth::client_id(&self.store, provider, &host) else {
-            if let Some(form) = self.git_auth.sign_in.as_mut() {
-                form.show_client_id = true;
-                form.error = Some(format!(
-                    "Browser sign-in on {host} needs an OAuth app. Register one (it takes a minute), tick \"Enable Device Flow\"{}, and paste its client ID below. Or sign in with a token instead.",
-                    if provider == Provider::GitLab { " (on GitLab: untick \"Confidential\" and choose the api, read_user and write_repository scopes)" } else { "" }
-                ));
-            }
-            cx.notify();
-            return;
-        };
-        self.git_auth.device_gen += 1;
-        let generation = self.git_auth.device_gen;
+        let Some(page) = git_auth::token_page(Some(provider), &host) else { return };
+        self.git_auth.watch_gen += 1;
+        let generation = self.git_auth.watch_gen;
+        // What's on the clipboard now doesn't count: only a token copied from now on.
+        let before = cx.read_from_clipboard().and_then(|item| item.text()).map(|t| t.trim().to_string());
         if let Some(form) = self.git_auth.sign_in.as_mut() {
             form.error = None;
-            form.working = Some(format!("Asking {host} for a code…"));
+            form.watching = true;
+            form.working = Some(format!("Waiting for you to copy the new token on {host}…"));
         }
+        cx.open_url(&page);
         cx.notify();
         cx.spawn(async move |view, cx| {
-            let h = host.clone();
-            let started = cx.background_spawn(async move { git_auth::start_device(provider, &h, &client_id) }).await;
-            let code = match started {
-                Ok(code) => code,
-                Err(err) => {
-                    view.update(cx, |this, cx| {
-                        if this.git_auth.device_gen == generation {
-                            this.set_sign_in_error(Some(format!("{err:#}")), cx)
+            let started = std::time::Instant::now();
+            loop {
+                cx.background_executor().timer(Duration::from_millis(700)).await;
+                let picked = view
+                    .update(cx, |this, cx| {
+                        if this.git_auth.watch_gen != generation {
+                            return Err(());
                         }
+                        if started.elapsed() > Duration::from_secs(15 * 60) {
+                            if let Some(form) = this.git_auth.sign_in.as_mut() {
+                                form.watching = false;
+                            }
+                            this.set_sign_in_error(Some("Stopped waiting for a token after 15 minutes. Start again, or paste it below.".into()), cx);
+                            return Err(());
+                        }
+                        let text = cx.read_from_clipboard().and_then(|item| item.text()).map(|t| t.trim().to_string());
+                        Ok(text.filter(|t| Some(t) != before.as_ref() && git_auth::looks_like_token(provider, t)))
                     })
-                    .ok();
-                    return;
-                }
-            };
-            let alive = view
-                .update(cx, |this, cx| {
-                    if this.git_auth.device_gen != generation {
-                        return false;
+                    .unwrap_or(Err(()));
+                let token = match picked {
+                    Err(()) => return,
+                    Ok(None) => continue,
+                    Ok(Some(token)) => token,
+                };
+                // Got it: stop watching, empty the clipboard, check it with the host.
+                view.update(cx, |this, cx| {
+                    let still = cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|t| t.trim() == token);
+                    if still {
+                        crate::env::clear_clipboard();
                     }
-                    cx.write_to_clipboard(ClipboardItem::new_string(code.user_code.clone()));
-                    cx.open_url(code.verification_uri_complete.as_deref().unwrap_or(&code.verification_uri));
                     if let Some(form) = this.git_auth.sign_in.as_mut() {
-                        form.device = Some(code.clone());
-                        form.working = Some("Waiting for you to approve it in the browser…".into());
+                        form.watching = false;
+                        form.working = Some(format!("Got the token. Checking it with {host}…"));
                     }
                     cx.notify();
-                    true
                 })
-                .unwrap_or(false);
-            if !alive {
+                .ok();
+                let h = host.clone();
+                let result = cx.background_spawn(async move { git_auth::check_token(provider, &h, &token, "browser") }).await;
+                view.update(cx, |this, cx| {
+                    // Cancelled meanwhile: nothing is saved.
+                    if this.git_auth.watch_gen != generation {
+                        return;
+                    }
+                    match result.and_then(|(account, stored)| git_auth::save_secret(&account.host, &account.login, &stored).map(|_| account)) {
+                        Ok(account) => this.add_git_account(account, cx),
+                        Err(err) => this.set_sign_in_error(Some(format!("{err:#}")), cx),
+                    }
+                })
+                .ok();
                 return;
-            }
-            let mut interval = code.interval;
-            loop {
-                cx.background_executor().timer(Duration::from_secs(interval)).await;
-                let current = view.update(cx, |this, _| this.git_auth.device_gen == generation).unwrap_or(false);
-                if !current {
-                    return;
-                }
-                let c = code.clone();
-                let polled = cx
-                    .background_spawn(async move {
-                        match git_auth::poll_device(&c)? {
-                            Poll::Done(tokens) => git_auth::finish_device(&c, tokens).map(|found| Some(Ok(found))),
-                            Poll::SlowDown => Ok(Some(Err(()))),
-                            Poll::Waiting => Ok(None),
-                        }
-                    })
-                    .await;
-                match polled {
-                    Ok(None) => continue,
-                    Ok(Some(Err(()))) => interval += 5,
-                    Ok(Some(Ok((account, stored)))) => {
-                        view.update(cx, |this, cx| {
-                            // Cancelled at the last moment: nothing is saved.
-                            if this.git_auth.device_gen != generation {
-                                return;
-                            }
-                            match git_auth::save_secret(&account.host, &account.login, &stored) {
-                                Ok(()) => this.add_git_account(account, cx),
-                                Err(err) => this.set_sign_in_error(Some(format!("{err:#}")), cx),
-                            }
-                        })
-                        .ok();
-                        return;
-                    }
-                    Err(err) => {
-                        view.update(cx, |this, cx| {
-                            if this.git_auth.device_gen == generation {
-                                if let Some(form) = this.git_auth.sign_in.as_mut() {
-                                    form.device = None;
-                                }
-                                this.set_sign_in_error(Some(format!("{err:#}")), cx);
-                            }
-                        })
-                        .ok();
-                        return;
-                    }
-                }
             }
         })
         .detach();
+    }
+
+    fn cancel_browser_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.git_auth.watch_gen += 1;
+        if let Some(form) = self.git_auth.sign_in.as_mut() {
+            form.watching = false;
+            form.working = None;
+        }
+        cx.notify();
     }
 
     fn sign_in_with_token(&mut self, cx: &mut Context<Self>) {
@@ -748,8 +697,12 @@ impl Monaged {
         if !a.scopes.is_empty() {
             details.push(format!("may: {}", a.scopes.join(", ")));
         }
-        if a.method == "browser" && a.provider == Some(Provider::GitLab) {
-            details.push("renews itself".into());
+        let days = a.days_left();
+        match days {
+            Some(d) if d < 0 => details.push(format!("expired {}", a.expires)),
+            Some(_) => details.push(format!("expires {}", a.expires)),
+            None if a.provider.is_some() => details.push("doesn't expire".into()),
+            None => {}
         }
         let (k1, k2, k3, k5) = (key.clone(), key.clone(), key.clone(), key.clone());
         div()
@@ -759,7 +712,7 @@ impl Monaged {
             .p(px(12.))
             .rounded(px(8.))
             .border_1()
-            .border_color(rgb(if rejected.is_some() { theme::red_line() } else { theme::line() }))
+            .border_color(rgb(if rejected.is_some() || days.is_some_and(|d| d < 14) { theme::red_line() } else { theme::line() }))
             .bg(rgb(theme::panel()))
             .child(
                 div()
@@ -776,6 +729,13 @@ impl Monaged {
             .when_some(rejected, |d, _| {
                 d.child(div().text_size(px(12.5)).text_color(rgb(theme::red_text())).child(format!("{} turned this login down the last time git used it. Test it, or sign in again.", a.host)))
             })
+            .when_some(days.filter(|d| *d < 14), |d, left| {
+                d.child(div().text_size(px(12.5)).text_color(rgb(theme::red_text())).child(match left {
+                    l if l < 0 => format!("This token expired on {}. Sign in again to make a new one.", a.expires),
+                    0 => "This token expires today. Sign in again to make a new one.".to_string(),
+                    l => format!("This token expires in {l} day{}. Sign in again to make a new one.", if l == 1 { "" } else { "s" }),
+                }))
+            })
             .child(
                 div()
                     .flex()
@@ -786,7 +746,7 @@ impl Monaged {
                         d.child(ui::button(("acct-identity", i), Kind::Ghost, Some(Icon::Commit), "Commit as this account").on_click(cx.listener(move |this, _, _, cx| this.use_account_identity(&k2, cx))))
                     })
                     .when(several && !a.default, |d| d.child(ui::button(("acct-default", i), Kind::Ghost, None, "Make default").on_click(cx.listener(move |this, _, _, cx| this.make_default_account(&k3, cx)))))
-                    .when(rejected.is_some(), |d| {
+                    .when(rejected.is_some() || days.is_some_and(|d| d < 14), |d| {
                         let provider = a.provider;
                         let host = a.host.clone();
                         d.child(ui::button(("acct-again", i), Kind::Secondary, Some(Icon::Refresh), "Sign in again").on_click(cx.listener(move |this, _, _, cx| {
@@ -831,55 +791,36 @@ impl Monaged {
             })));
         }
 
-        if let Some(code) = &form.device {
-            let uri = code.verification_uri_complete.clone().unwrap_or_else(|| code.verification_uri.clone());
-            let user_code = code.user_code.clone();
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .p(px(14.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(rgb(theme::line_strong()))
-                    .child(ui::meta(format!("Enter this code on {} (it's on your clipboard), then approve Monaged:", code.verification_uri)))
-                    .child(div().font_family(theme::MONO).text_size(px(26.)).font_weight(FontWeight::MEDIUM).child(code.user_code.clone()))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(ui::button("device-open", Kind::Secondary, Some(Icon::External), "Open the page again").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&uri))))
-                            .child(ui::button("device-copy", Kind::Ghost, Some(Icon::Copy), "Copy the code").on_click(cx.listener(move |this, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(user_code.clone()));
-                                this.toast(Tone::Info, "Copied the code.", cx);
-                            })))
-                            .child(ui::button("device-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| {
-                                this.git_auth.device_gen += 1;
-                                if let Some(form) = this.git_auth.sign_in.as_mut() {
-                                    form.device = None;
-                                    form.working = None;
-                                }
-                                cx.notify();
-                            }))),
-                    ),
-            );
-        } else if let Some(provider) = provider {
-            // Browser sign-in.
+        if let Some(provider) = provider {
+            // Browser sign-in: the host's own token page, picked up from the clipboard.
+            let page = git_auth::token_page(Some(provider), if host.is_empty() { "github.com" } else { &host });
+            let what = match provider {
+                Provider::GitHub => "Generate token, then the copy button next to it",
+                Provider::GitLab => "Create token, then the copy button next to it",
+            };
             card = card.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("In the browser (recommended)"))
-                    .child(ui::meta(format!("Monaged shows a code, opens {name}, and you approve it there. No password goes through Monaged.")))
-                    .when(form.show_client_id, |d| {
-                        let page = git_auth::oauth_app_page(provider, if host.is_empty() { "github.com" } else { &host });
-                        d.child(ui::field("OAuth app client ID", Some("Saved for this host. Monaged never needs the app's secret."), form.client_id.clone())).child(
-                            div().flex().child(ui::button("oauth-register", Kind::Ghost, Some(Icon::External), "Register an OAuth app").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&page)))),
-                        )
-                    })
-                    .child(div().flex().child(ui::button("signin-browser", Kind::Primary, Some(Icon::External), "Continue in the browser").on_click(cx.listener(|this, _, _, cx| this.start_browser_sign_in(cx))))),
+                    .child(ui::meta(format!(
+                        "Opens {name}'s token page with the right permissions ticked. Click {what}: Monaged picks the token up from the clipboard, checks it with {name} and empties the clipboard. No app to register, nothing goes through anyone but {name}."
+                    )))
+                    .child(if form.watching {
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(8.))
+                            .child(ui::button("signin-reopen", Kind::Secondary, Some(Icon::External), "Open the page again").on_click(cx.listener(move |_, _, _, cx| {
+                                if let Some(page) = &page {
+                                    cx.open_url(page)
+                                }
+                            })))
+                            .child(ui::button("signin-cancel", Kind::Ghost, None, "Stop waiting").on_click(cx.listener(|this, _, _, cx| this.cancel_browser_sign_in(cx))))
+                    } else {
+                        div().flex().child(ui::button("signin-browser", Kind::Primary, Some(Icon::External), format!("Sign in with {name}")).on_click(cx.listener(|this, _, _, cx| this.start_browser_sign_in(cx))))
+                    }),
             );
         }
 
@@ -893,7 +834,7 @@ impl Monaged {
                 .pt(px(4.))
                 .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if provider.is_some() { "With a token" } else { "With a username and password or token" }))
                 .child(ui::meta(match provider {
-                    Some(_) => "Make a personal access token (the button opens the page with the right permissions ticked), then paste it. Monaged checks it and keeps it in Windows Credential Manager.",
+                    Some(_) => "Already have a personal access token? Paste it here. Monaged checks it and keeps it in Windows Credential Manager.",
                     None => "For Gitea, Bitbucket, Azure DevOps and others: an app password or access token works best. Kept in Windows Credential Manager.",
                 }))
                 .when(provider.is_none(), |d| d.child(ui::field("Username", None, form.user.clone())))

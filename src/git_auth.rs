@@ -2,19 +2,24 @@
 //! Credential Manager isn't needed, but Monaged sets it up as a fallback when
 //! you want it.
 //!
-//! - **Accounts.** You sign in once per account: in the browser (the OAuth
-//!   device flow: Monaged shows a code, you approve it on the host's site),
-//!   with a token you paste, or by importing a login the GitHub CLI, the
-//!   GitLab CLI or Git Credential Manager already has. Monaged checks the token
-//!   with the host's API and remembers who you are and what it may do.
+//! - **Everything happens on your PC.** No OAuth app, client ID, client
+//!   secret or server of Monaged's: you make a personal access token on the
+//!   host's own website and Monaged keeps it. Nothing is sent anywhere but to
+//!   the git host itself.
+//! - **Accounts.** You sign in once per account: in the browser (Monaged opens
+//!   the host's token page with the right permissions ticked; you click
+//!   Generate and Copy, and Monaged picks the token up from the clipboard and
+//!   clears it), with a token you paste, or by importing a login the GitHub
+//!   CLI, the GitLab CLI or Git Credential Manager already has. Monaged checks
+//!   the token with the host's API and remembers who you are, what it may do
+//!   and when it expires.
 //! - **Where tokens live.** In Windows Credential Manager, under Monaged's
 //!   name: never in Monaged's database, never in a file in WSL, never in a
 //!   command line. The database only lists the accounts.
 //! - **How git gets them.** Monaged is git's credential helper for each host
 //!   you signed in to: `credential.https://<host>.helper` runs
 //!   `monaged.exe --git-credential` through WSL interop, which reads the token
-//!   from Credential Manager and hands it to git (renewing it first when it's
-//!   a browser sign-in that expires). It works whether or not the Monaged
+//!   from Credential Manager and hands it to git. It works whether or not the Monaged
 //!   window is open, so git in a WSL terminal signs in the same way. (Agents
 //!   don't push; their sandbox hides Windows programs anyway.)
 //! - **Several accounts on one host.** One is the default; a project can sign
@@ -35,11 +40,7 @@ use serde_json::{Value, json};
 use crate::hosting::Provider;
 use crate::wsl::{quote, run};
 
-/// Built into release builds when set; Settings can override them per host.
-const GITHUB_CLIENT_ID: Option<&str> = option_env!("MONAGED_GITHUB_CLIENT_ID");
-const GITLAB_CLIENT_ID: Option<&str> = option_env!("MONAGED_GITLAB_CLIENT_ID");
-
-/// What the browser sign-in asks for.
+/// The permissions the token page has ticked.
 pub const GITHUB_SCOPES: &str = "repo workflow read:org gist admin:public_key user:email";
 pub const GITLAB_SCOPES: &str = "api read_user write_repository";
 
@@ -116,14 +117,6 @@ pub fn token_page(provider: Option<Provider>, host: &str) -> Option<String> {
     }
 }
 
-/// Where you register the OAuth app the browser sign-in needs.
-pub fn oauth_app_page(provider: Provider, host: &str) -> String {
-    match provider {
-        Provider::GitHub => format!("https://{host}/settings/applications/new"),
-        Provider::GitLab => format!("https://{host}/-/user_settings/applications"),
-    }
-}
-
 /// Where you add an SSH key by hand.
 pub fn ssh_keys_page(provider: Option<Provider>, host: &str) -> Option<String> {
     match provider {
@@ -131,19 +124,6 @@ pub fn ssh_keys_page(provider: Option<Provider>, host: &str) -> Option<String> {
         Some(Provider::GitLab) => Some(format!("https://{host}/-/user_settings/ssh_keys")),
         None => None,
     }
-}
-
-/// The OAuth client ID for browser sign-in: Settings first, then the built-in one.
-pub fn client_id(store: &crate::store::Store, provider: Provider, host: &str) -> Option<String> {
-    if let Some(id) = store.setting(&format!("git:oauth:{host}")).filter(|v| !v.trim().is_empty()) {
-        return Some(id.trim().to_string());
-    }
-    match provider {
-        Provider::GitHub if host == "github.com" => GITHUB_CLIENT_ID.map(str::to_owned),
-        Provider::GitLab if host == "gitlab.com" => GITLAB_CLIENT_ID.map(str::to_owned),
-        _ => None,
-    }
-    .filter(|id| !id.trim().is_empty())
 }
 
 // ---- Accounts (the list lives in Monaged's database, tokens in Credential Manager) ------
@@ -161,6 +141,8 @@ pub struct Account {
     pub added: i64,
     /// The account git uses for this host unless a project says otherwise.
     pub default: bool,
+    /// When the token stops working ("2026-12-01"), if it expires.
+    pub expires: String,
 }
 
 impl Account {
@@ -170,7 +152,7 @@ impl Account {
 
     pub fn method_label(&self) -> &'static str {
         match self.method.as_str() {
-            "browser" => "signed in with the browser",
+            "browser" => "token made in the browser",
             "token" => "personal access token",
             "password" => "username and password",
             "gh" => "from the GitHub CLI",
@@ -178,6 +160,11 @@ impl Account {
             "gcm" => "from Git Credential Manager",
             _ => "token",
         }
+    }
+
+    /// Days until the token expires (negative once it has), if it expires.
+    pub fn days_left(&self) -> Option<i64> {
+        days_until(&self.expires)
     }
 
     /// Whether the token may add SSH keys through the API.
@@ -193,6 +180,7 @@ impl Account {
         json!({
             "host": self.host, "provider": provider_key(self.provider), "login": self.login, "name": self.name,
             "email": self.email, "method": self.method, "scopes": self.scopes, "added": self.added, "default": self.default,
+            "expires": self.expires,
         })
     }
 
@@ -207,6 +195,7 @@ impl Account {
             scopes: v["scopes"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
             added: v["added"].as_i64().unwrap_or(0),
             default: v["default"].as_bool().unwrap_or(false),
+            expires: v["expires"].as_str().unwrap_or_default().to_string(),
         })
     }
 }
@@ -251,16 +240,12 @@ pub fn fix_defaults(accounts: &mut [Account]) {
 
 // ---- The secret half (Windows Credential Manager) ---------------------------------------
 
-/// What git needs to sign in, plus what renewing it takes.
+/// What git needs to sign in.
 #[derive(Clone)]
 pub struct Stored {
-    /// The username git sends (`oauth2` for GitLab browser sign-ins).
+    /// The username git sends.
     pub user: String,
     pub token: String,
-    pub refresh: Option<String>,
-    /// Unix seconds; `None` when the token doesn't expire.
-    pub expires: Option<i64>,
-    pub client_id: Option<String>,
     pub provider: Option<Provider>,
 }
 
@@ -272,11 +257,7 @@ impl std::fmt::Debug for Stored {
 
 impl Stored {
     fn to_json(&self) -> String {
-        json!({
-            "user": self.user, "token": self.token, "refresh": self.refresh, "expires": self.expires,
-            "client_id": self.client_id, "provider": provider_key(self.provider),
-        })
-        .to_string()
+        json!({ "user": self.user, "token": self.token, "provider": provider_key(self.provider) }).to_string()
     }
 
     fn from_json(text: &str) -> Option<Stored> {
@@ -284,15 +265,8 @@ impl Stored {
         Some(Stored {
             user: v["user"].as_str()?.to_string(),
             token: v["token"].as_str()?.to_string(),
-            refresh: v["refresh"].as_str().map(str::to_owned),
-            expires: v["expires"].as_i64(),
-            client_id: v["client_id"].as_str().map(str::to_owned),
             provider: provider_from_key(v["provider"].as_str().unwrap_or_default()),
         })
-    }
-
-    pub fn expired(&self) -> bool {
-        self.expires.is_some_and(|at| at - 60 <= now())
     }
 }
 
@@ -340,80 +314,12 @@ fn host_logins(host: &str) -> Vec<String> {
     entry(&format!("git-logins:{host}")).ok().and_then(|e| e.get_password().ok()).map(|t| t.lines().map(str::to_owned).collect()).unwrap_or_default()
 }
 
-/// The token for `host` (as `login`, or the default account), renewed first
-/// when it has expired. For Monaged's own API calls and for git.
+/// The token for `host` (as `login`, or the default account). For Monaged's
+/// own API calls and for git.
 pub fn token_for(host: &str, login: Option<&str>) -> Option<Stored> {
     let host = normalize_host(host);
     let login = login.map(str::to_owned).or_else(|| default_login(&host))?;
-    let stored = load_secret(&host, &login)?;
-    if stored.expired() {
-        // Refresh tokens are used once: several git processes at once must
-        // not all renew. Whoever gets the lock renews; the rest re-read.
-        let _lock = RenewLock::take();
-        let stored = load_secret(&host, &login)?;
-        if !stored.expired() {
-            return Some(stored);
-        }
-        let renewed = renew(&host, &login, &stored).ok()?;
-        crate::env::add_git_token_mask(crate::env::Secret::new(renewed.token.clone()), format!("git token {host}/{login}"));
-        return Some(renewed);
-    }
-    Some(stored)
-}
-
-/// A lock file next to Monaged's database, shared by every Monaged process.
-struct RenewLock(Option<std::path::PathBuf>);
-
-impl RenewLock {
-    fn take() -> RenewLock {
-        let Some(path) = std::env::var("APPDATA").ok().map(|a| std::path::PathBuf::from(a).join("Monaged").join("git-renew.lock")) else { return RenewLock(None) };
-        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
-        let started = std::time::Instant::now();
-        loop {
-            if std::fs::OpenOptions::new().write(true).create_new(true).open(&path).is_ok() {
-                return RenewLock(Some(path));
-            }
-            // A lock older than half a minute belongs to a process that died.
-            let stale = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(30));
-            if stale {
-                let _ = std::fs::remove_file(&path);
-                continue;
-            }
-            if started.elapsed() > Duration::from_secs(20) {
-                return RenewLock(None);
-            }
-            std::thread::sleep(Duration::from_millis(150));
-        }
-    }
-}
-
-impl Drop for RenewLock {
-    fn drop(&mut self) {
-        if let Some(path) = &self.0 {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-/// Swaps a refresh token for a new access token and saves both.
-fn renew(host: &str, login: &str, stored: &Stored) -> Result<Stored> {
-    let (Some(refresh), Some(client_id), Some(provider)) = (&stored.refresh, &stored.client_id, stored.provider) else {
-        bail!("this login expired and can't be renewed; sign in again")
-    };
-    let url = match provider {
-        Provider::GitHub => format!("https://{host}/login/oauth/access_token"),
-        Provider::GitLab => format!("https://{host}/oauth/token"),
-    };
-    let reply = post_form(&url, &[("client_id", client_id), ("grant_type", "refresh_token"), ("refresh_token", refresh)])?;
-    let tokens = read_tokens(&reply)?.ok_or_else(|| anyhow!("{host} didn't renew the login; sign in again"))?;
-    let renewed = Stored {
-        token: tokens.access,
-        refresh: tokens.refresh.or_else(|| stored.refresh.clone()),
-        expires: tokens.expires_in.map(|s| now() + s),
-        ..stored.clone()
-    };
-    save_secret(host, login, &renewed)?;
-    Ok(renewed)
+    load_secret(&host, &login)
 }
 
 // ---- HTTP -------------------------------------------------------------------------------
@@ -422,25 +328,17 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()
 }
 
-fn post_form(url: &str, form: &[(&str, &str)]) -> Result<Value> {
-    let mut response = agent()
-        .post(url)
-        .header("Accept", "application/json")
-        .header("User-Agent", "Monaged")
-        .send_form(form.iter().copied())
-        .map_err(|e| anyhow!("couldn't reach {url}: {e}"))?;
-    let status = response.status().as_u16();
-    let text = response.body_mut().read_to_string().unwrap_or_default();
-    // A reply that isn't JSON is never shown: it could carry a token.
-    let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "error": "unreadable", "error_description": format!("{url} sent a reply Monaged can't read (HTTP {status})") }));
-    if status >= 500 {
-        bail!("{url} answered {status}");
-    }
-    Ok(value)
+/// What a reply's headers say about the token.
+#[derive(Clone, Debug, Default)]
+pub struct TokenInfo {
+    /// GitHub's `X-OAuth-Scopes` (classic tokens).
+    pub scopes: Option<String>,
+    /// GitHub's `GitHub-Authentication-Token-Expiration` ("2026-12-01 00:00:00 UTC").
+    pub expires: Option<String>,
 }
 
-/// Calls the host's REST API with a token. Returns (status, body, scopes header).
-pub fn api(method: &str, provider: Provider, host: &str, token: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value, Option<String>)> {
+/// Calls the host's REST API with a token. Returns (status, body, token info).
+pub fn api(method: &str, provider: Provider, host: &str, token: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value, TokenInfo)> {
     let url = format!("{}{}", api_base(provider, host), path);
     let agent = agent();
     let auth = format!("Bearer {token}");
@@ -451,10 +349,11 @@ pub fn api(method: &str, provider: Provider, host: &str, token: &str, path: &str
     };
     let mut response = sent.map_err(|e| anyhow!("couldn't reach {host}: {e}"))?;
     let status = response.status().as_u16();
-    let scopes = response.headers().get("x-oauth-scopes").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let info = TokenInfo { scopes: header("x-oauth-scopes"), expires: header("github-authentication-token-expiration") };
     let text = response.body_mut().read_to_string().unwrap_or_default();
     let value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    Ok((status, value, scopes))
+    Ok((status, value, info))
 }
 
 fn accept(provider: Provider) -> &'static str {
@@ -489,13 +388,15 @@ pub struct Profile {
     pub name: String,
     pub email: String,
     pub scopes: Vec<String>,
+    /// "2026-12-01", or empty when the token doesn't expire.
+    pub expires: String,
 }
 
-/// Asks the host's API who the token belongs to (and what it may do).
+/// Asks the host's API who the token belongs to (what it may do, when it expires).
 pub fn whoami(provider: Provider, host: &str, token: &str) -> Result<Profile> {
     match provider {
         Provider::GitHub => {
-            let (status, user, scopes) = api("GET", provider, host, token, "/user", None)?;
+            let (status, user, info) = api("GET", provider, host, token, "/user", None)?;
             if status != 200 {
                 bail!("{host}: {}", api_error(status, &user));
             }
@@ -522,7 +423,8 @@ pub fn whoami(provider: Provider, host: &str, token: &str) -> Result<Profile> {
                 name: user["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(&login).to_string(),
                 login,
                 email,
-                scopes: scopes.map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()).unwrap_or_default(),
+                scopes: info.scopes.map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()).unwrap_or_default(),
+                expires: info.expires.map(|e| e.chars().take(10).collect()).unwrap_or_default(),
             })
         }
         Provider::GitLab => {
@@ -530,9 +432,12 @@ pub fn whoami(provider: Provider, host: &str, token: &str) -> Result<Profile> {
             if status != 200 {
                 bail!("{host}: {}", api_error(status, &user));
             }
-            let scopes = match api("GET", provider, host, token, "/personal_access_tokens/self", None) {
-                Ok((200, pat, _)) => pat["scopes"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
-                _ => Vec::new(),
+            let (scopes, expires) = match api("GET", provider, host, token, "/personal_access_tokens/self", None) {
+                Ok((200, pat, _)) => (
+                    pat["scopes"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
+                    pat["expires_at"].as_str().unwrap_or_default().chars().take(10).collect(),
+                ),
+                _ => (Vec::new(), String::new()),
             };
             let email = ["commit_email", "email", "public_email"].iter().find_map(|k| user[*k].as_str().filter(|e| e.contains('@'))).unwrap_or_default().to_string();
             Ok(Profile {
@@ -540,148 +445,56 @@ pub fn whoami(provider: Provider, host: &str, token: &str) -> Result<Profile> {
                 name: user["name"].as_str().unwrap_or_default().to_string(),
                 email,
                 scopes,
+                expires,
             })
         }
     }
 }
 
-// ---- Browser sign-in (OAuth device flow) ------------------------------------------------
-
-#[derive(Clone, Debug)]
-pub struct DeviceCode {
-    pub provider: Provider,
-    pub host: String,
-    pub client_id: String,
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    /// The page with the code already filled in (GitLab).
-    pub verification_uri_complete: Option<String>,
-    pub interval: u64,
-    pub expires_at: i64,
+/// Days from today until a "YYYY-MM-DD" date (negative once it's past).
+pub fn days_until(date: &str) -> Option<i64> {
+    let mut parts = date.get(..10)?.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+    // Days since 1970-01-01 (Howard Hinnant's civil-from-days, inverted).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days - now().div_euclid(86_400))
 }
 
-/// Asks the host for a code to approve in the browser.
-pub fn start_device(provider: Provider, host: &str, client_id: &str) -> Result<DeviceCode> {
-    let (url, scopes) = match provider {
-        Provider::GitHub => (format!("https://{host}/login/device/code"), GITHUB_SCOPES),
-        Provider::GitLab => (format!("https://{host}/oauth/authorize_device"), GITLAB_SCOPES),
-    };
-    let reply = post_form(&url, &[("client_id", client_id), ("scope", scopes)])?;
-    if let Some(error) = reply["error"].as_str() {
-        let detail = reply["error_description"].as_str().unwrap_or(error);
-        bail!(
-            "{host} didn't start the sign-in: {detail}{}",
-            if error == "device_flow_disabled" || detail.contains("device") { ". Turn on \"Enable Device Flow\" for the OAuth app." } else { "" }
-        );
-    }
-    Ok(DeviceCode {
-        provider,
-        host: host.to_string(),
-        client_id: client_id.to_string(),
-        device_code: reply["device_code"].as_str().context("no device code in the reply")?.to_string(),
-        user_code: reply["user_code"].as_str().context("no user code in the reply")?.to_string(),
-        verification_uri: reply["verification_uri"].as_str().unwrap_or(&format!("https://{host}/login/device")).to_string(),
-        verification_uri_complete: reply["verification_uri_complete"].as_str().map(str::to_owned),
-        interval: reply["interval"].as_u64().unwrap_or(5).max(1),
-        expires_at: now() + reply["expires_in"].as_i64().unwrap_or(900),
-    })
+/// Whether clipboard text looks like a GitHub or GitLab personal access token.
+/// Only those shapes are picked up by the browser sign-in; nothing else is read.
+pub fn looks_like_token(provider: Provider, text: &str) -> bool {
+    let t = text.trim();
+    let shape = t.len() >= 20 && t.len() <= 255 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
+    shape
+        && match provider {
+            Provider::GitHub => ["ghp_", "github_pat_", "gho_", "ghu_"].iter().any(|p| t.starts_with(p)),
+            Provider::GitLab => t.starts_with("glpat-"),
+        }
 }
 
-pub struct Tokens {
-    pub access: String,
-    pub refresh: Option<String>,
-    pub expires_in: Option<i64>,
-    pub scope: Option<String>,
-}
-
-fn read_tokens(reply: &Value) -> Result<Option<Tokens>> {
-    if let Some(error) = reply["error"].as_str() {
-        return match error {
-            "authorization_pending" | "slow_down" => Ok(None),
-            "expired_token" => bail!("the code expired before it was approved; start again"),
-            "access_denied" => bail!("the sign-in was cancelled on the website"),
-            other => bail!("{}", reply["error_description"].as_str().unwrap_or(other)),
-        };
-    }
-    let access = reply["access_token"].as_str().context("no access token in the reply")?.to_string();
-    Ok(Some(Tokens {
-        access,
-        refresh: reply["refresh_token"].as_str().map(str::to_owned),
-        expires_in: reply["expires_in"].as_i64(),
-        scope: reply["scope"].as_str().map(str::to_owned),
-    }))
-}
-
-pub enum Poll {
-    Waiting,
-    /// The host asked to poll less often.
-    SlowDown,
-    Done(Tokens),
-}
-
-/// One check whether the code was approved.
-pub fn poll_device(code: &DeviceCode) -> Result<Poll> {
-    if now() > code.expires_at {
-        bail!("the code expired before it was approved; start again");
-    }
-    let url = match code.provider {
-        Provider::GitHub => format!("https://{}/login/oauth/access_token", code.host),
-        Provider::GitLab => format!("https://{}/oauth/token", code.host),
-    };
-    let reply = post_form(
-        &url,
-        &[("client_id", &code.client_id), ("device_code", &code.device_code), ("grant_type", "urn:ietf:params:oauth:grant-type:device_code")],
-    )?;
-    if reply["error"].as_str() == Some("slow_down") {
-        return Ok(Poll::SlowDown);
-    }
-    Ok(match read_tokens(&reply)? {
-        Some(tokens) => Poll::Done(tokens),
-        None => Poll::Waiting,
-    })
-}
-
-/// Turns approved tokens into an account (the caller saves it with `save_secret`).
-pub fn finish_device(code: &DeviceCode, tokens: Tokens) -> Result<(Account, Stored)> {
-    let profile = whoami(code.provider, &code.host, &tokens.access)?;
-    let scopes = if profile.scopes.is_empty() {
-        tokens.scope.as_deref().unwrap_or_default().split([' ', ',']).filter(|s| !s.is_empty()).map(str::to_owned).collect()
-    } else {
-        profile.scopes.clone()
-    };
-    let stored = Stored {
-        user: if code.provider == Provider::GitLab { "oauth2".into() } else { profile.login.clone() },
-        token: tokens.access,
-        refresh: tokens.refresh,
-        expires: tokens.expires_in.map(|s| now() + s),
-        client_id: Some(code.client_id.clone()),
-        provider: Some(code.provider),
-    };
-    let account = Account {
-        host: code.host.clone(),
-        provider: Some(code.provider),
-        login: profile.login,
-        name: profile.name,
-        email: profile.email,
-        method: "browser".into(),
-        scopes,
-        added: now(),
-        default: false,
-    };
-    Ok((account, stored))
-}
+// ---- Saving a token ---------------------------------------------------------------------
 
 /// Checks a pasted token and saves it as an account.
 pub fn add_token(provider: Provider, host: &str, token: &str, method: &str) -> Result<Account> {
+    let (account, stored) = check_token(provider, host, token, method)?;
+    save_secret(host, &account.login, &stored)?;
+    Ok(account)
+}
+
+/// Checks a token with the host and makes the account, without saving anything.
+pub fn check_token(provider: Provider, host: &str, token: &str, method: &str) -> Result<(Account, Stored)> {
     let token = token.trim();
     if token.is_empty() {
         bail!("Paste a token first.");
     }
     let profile = whoami(provider, host, token)?;
-    let stored = Stored { user: profile.login.clone(), token: token.into(), refresh: None, expires: None, client_id: None, provider: Some(provider) };
-    save_secret(host, &profile.login, &stored)?;
-    Ok(Account {
+    let stored = Stored { user: profile.login.clone(), token: token.into(), provider: Some(provider) };
+    let account = Account {
         host: host.into(),
         provider: Some(provider),
         login: profile.login,
@@ -691,7 +504,9 @@ pub fn add_token(provider: Provider, host: &str, token: &str, method: &str) -> R
         scopes: profile.scopes,
         added: now(),
         default: false,
-    })
+        expires: profile.expires,
+    };
+    Ok((account, stored))
 }
 
 /// Saves a username and password (or token) for a host Monaged can't ask an API about.
@@ -699,7 +514,7 @@ pub fn add_password(host: &str, user: &str, secret: &str) -> Result<Account> {
     if user.trim().is_empty() || secret.trim().is_empty() {
         bail!("Enter the username and the password or token.");
     }
-    let stored = Stored { user: user.trim().into(), token: secret.trim().into(), refresh: None, expires: None, client_id: None, provider: None };
+    let stored = Stored { user: user.trim().into(), token: secret.trim().into(), provider: None };
     save_secret(host, user.trim(), &stored)?;
     Ok(Account {
         host: host.into(),
@@ -711,6 +526,7 @@ pub fn add_password(host: &str, user: &str, secret: &str) -> Result<Account> {
         scopes: Vec::new(),
         added: now(),
         default: false,
+        expires: String::new(),
     })
 }
 
@@ -921,24 +737,14 @@ pub fn run_helper(operation: &str) -> Result<()> {
             let mut out = std::io::stdout();
             writeln!(out, "username={}", stored.user)?;
             writeln!(out, "password={}", stored.token)?;
-            if let Some(at) = stored.expires {
-                writeln!(out, "password_expiry_utc={at}")?;
-            }
             out.flush()?;
         }
         "erase" => {
-            // The host turned the token down: renew it next time if it can be,
-            // and let Settings say so. The token itself stays until you sign out.
-            // Git sends back what it was given (`oauth2` for GitLab), so the
-            // account is the one whose token matches.
+            // The host turned the token down: let Settings say so. The token
+            // itself stays until you sign out. The account is the one whose
+            // token git sends back.
             let password = fields.get("password").copied().unwrap_or_default();
             let login = host_logins(&host).into_iter().find(|l| !password.is_empty() && load_secret(&host, l).is_some_and(|s| s.token == password)).unwrap_or(login);
-            if let Some(mut stored) = load_secret(&host, &login)
-                && stored.refresh.is_some()
-            {
-                stored.expires = Some(0);
-                let _ = save_secret(&host, &login, &stored);
-            }
             note_rejected(&host, &login);
         }
         _ => {}
@@ -1193,13 +999,32 @@ mod tests {
 
     #[test]
     fn stored_logins_round_trip() {
-        let stored = Stored { user: "oauth2".into(), token: "t".into(), refresh: Some("r".into()), expires: Some(10), client_id: Some("c".into()), provider: Some(Provider::GitLab) };
+        let stored = Stored { user: "me".into(), token: "glpat-secretvalue".into(), provider: Some(Provider::GitLab) };
         let back = Stored::from_json(&stored.to_json()).unwrap();
-        assert_eq!(back.user, "oauth2");
-        assert_eq!(back.refresh.as_deref(), Some("r"));
+        assert_eq!(back.user, "me");
+        assert_eq!(back.token, "glpat-secretvalue");
         assert_eq!(back.provider, Some(Provider::GitLab));
-        assert!(back.expired());
-        assert!(!format!("{back:?}").contains('t') || !format!("{back:?}").contains("\"t\""));
+        assert!(!format!("{back:?}").contains("secretvalue"));
+    }
+
+    #[test]
+    fn tokens_are_recognised() {
+        assert!(looks_like_token(Provider::GitHub, "ghp_0123456789abcdefghijABCDEFGHIJ012345"));
+        assert!(looks_like_token(Provider::GitHub, " github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz \n"));
+        assert!(looks_like_token(Provider::GitLab, "glpat-abcdefghij0123456789"));
+        assert!(!looks_like_token(Provider::GitLab, "ghp_0123456789abcdefghijABCDEFGHIJ012345"));
+        assert!(!looks_like_token(Provider::GitHub, "ghp_ but this is a sentence someone copied"));
+        assert!(!looks_like_token(Provider::GitHub, "hello"));
+    }
+
+    #[test]
+    fn expiry_dates() {
+        let today = now().div_euclid(86_400);
+        assert_eq!(days_until("1970-01-01"), Some(-today));
+        assert_eq!(days_until("1970-01-31").map(|d| d + today), Some(30));
+        assert_eq!(days_until("2000-03-01").map(|d| d + today), Some(11_017));
+        assert_eq!(days_until(""), None);
+        assert_eq!(days_until("soon"), None);
     }
 
     #[test]
@@ -1214,6 +1039,7 @@ mod tests {
             scopes: Vec::new(),
             added: 0,
             default,
+            expires: String::new(),
         };
         let mut list = vec![a("one", false), a("two", true)];
         let back: Vec<Account> = list.iter().map(|x| Account::from_json(&x.to_json()).unwrap()).collect();
