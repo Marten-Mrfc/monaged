@@ -8,7 +8,9 @@ Monaged writes a log to `%APPDATA%\Monaged\monaged.log` (the previous run's is `
 
 **Windows SmartScreen says it protected my PC.** The installer isn't code-signed yet. Click **More info → Run anyway**. To check the file, compare `Get-FileHash .\Monaged-Setup-<version>.exe` in PowerShell with the release's `SHA256SUMS.txt`.
 
-**Where did it install?** `%LOCALAPPDATA%\Programs\Monaged`. Your projects and settings are in `%APPDATA%\Monaged`, and stay there when you update or uninstall.
+**Where did it install?** `%LOCALAPPDATA%\Programs\Monaged`. Your projects and settings are in `%APPDATA%\Monaged`; they stay there when you update, and when you uninstall unless you tick them.
+
+**How do I uninstall?** Settings → Apps → Monaged → Uninstall, or Start menu → Uninstall Monaged. A checklist shows what Monaged put on your PC. The program and git's sign-in setting in WSL always go, and the Claude agent in WSL is ticked. The rest is up to you: your projects and settings (`%APPDATA%\Monaged`), sign-ins saved in Windows Credential Manager, agents' working folders (their branches stay in your repos), the playground, Claude's sign-in in WSL, and the Ubuntu the setup guide installed, which takes everything inside it, including code you haven't pushed. Keep your projects and settings and installing again picks up where you were. WSL itself, other distros and apps like Zed or gh are never removed. If something couldn't be removed, the last screen says why; run the uninstaller again once it's fixed (Monaged stays installed while git in WSL still depends on it). Git tokens removed from Credential Manager keep working on GitHub or GitLab until you revoke them there. For scripts, `monaged.exe --uninstall --quiet` removes the default choice without a window (`--all` removes everything, the Ubuntu Monaged installed included) and exits with 0 when everything went.
 
 ## WSL
 
@@ -57,4 +59,4 @@ Monaged writes a log to `%APPDATA%\Monaged\monaged.log` (the previous run's is `
 ## Starting over
 
 - Re-run setup: Ctrl K → Setup guide, or start Monaged with `--setup`.
-- Reset Monaged completely: quit it and delete `%APPDATA%\Monaged` (your projects in WSL aren't touched). Monaged keeps the last five database backups in `%APPDATA%\Monaged\backups`, and goes back to the newest good one by itself if the database is ever damaged.
+- Reset Monaged completely: uninstall it and tick **Projects and settings** (or quit it and delete `%APPDATA%\Monaged`); your repositories in WSL aren't touched. Monaged keeps the last five database backups in `%APPDATA%\Monaged\backups`, and goes back to the newest good one by itself if the database is ever damaged.

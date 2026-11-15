@@ -12,7 +12,7 @@ Setting up happens entirely inside Monaged now, git signs in to GitHub and GitLa
 - **Pull and merge requests and CI without `gh` or `glab`**: through the hosts' REST APIs with your account.
 - **A fuller Git tab**: commit only the files you tick, amend, take back a commit that isn't pushed, pull with a merge when a branch moved on both sides, and an Origin row (account, connection test, HTTPS ⇄ SSH).
 - **Install buttons** in the setup guide's extras: Zed and the GitHub CLI with winget (hidden; Windows still asks for permission when an installer needs it, and the new PATH is picked up without restarting Monaged), Claude Code's sandbox tools, pytest and curl with apt as root in WSL (no Linux password), each with its progress. The GitHub CLI signs in with GitHub's one-time code shown in the guide. When winget is missing, a **Website** button offers the download instead.
-UNINSTALLER_PLACEHOLDER
+- **A full uninstaller.** Uninstalling (Settings → Apps, or Start menu → Uninstall Monaged) shows what Monaged put on your PC, with sizes, and lets you choose what goes. The program always goes, and with it git's sign-in setting in WSL (git would otherwise call a Monaged that's gone). The Claude agent is ticked; your projects and settings, saved sign-ins, agents' working folders, the playground and Claude's sign-in in WSL are choices. The Ubuntu the setup guide installed can go too: never ticked by itself, and only after a warning that lists what's lost. WSL itself, your other distros and apps like Zed stay. An open Monaged window is closed first, each part shows its progress, and the last screen says what was removed and what wasn't. For scripts: `monaged.exe --uninstall --quiet` (add `--all` for everything).
 
 ### Changed
 

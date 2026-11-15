@@ -376,7 +376,7 @@ Asked for after testing 0.3.0 on a real PC: Ubuntu's install ran in a console th
 - [x] **Claude sign-in without a terminal:** `claude auth login` runs hidden; the guide shows its link (and opens it) and a box for the code Claude's page shows. It reads that code from plain input, so no terminal is needed.
 - [x] **Install buttons** for the extras (winget hidden, apt as root in WSL, both with progress), GitHub CLI sign-in with its one-time code, and a website fallback when winget is missing.
 - [x] **Git accounts** merged in (see the section above), and the guide links to them.
-- [x] **Uninstaller** that can remove everything Monaged added (see the changelog), but never WSL itself.
+- [x] **Uninstaller** that can remove everything Monaged added, as choices: the program and git's helper setting in WSL always, the Claude agent by default, and data, saved sign-ins, agents' folders, the playground, Claude's sign-in and the Ubuntu Monaged installed when you tick them (the distro after a warning). Never WSL itself, other distros or apps. Safe paths only, an open Monaged is closed first, and `--uninstall --quiet [--all]` for scripts. Checked under Wine (quiet mode, Credential Manager) and its WSL scripts against a sandbox home; the window itself is untested.
 - [x] **Fixed on the way:** progress bars never filled (percentage widths that resolved to nothing in GPUI's layout), fields that collapsed, and the guide's buttons ending up out of reach.
 
 **Tested:** unit tests under Wine; the whole guide in the real UI against stand-ins for WSL, the Claude CLI, gh and an elevated PowerShell, with a real (throttled, local) Ubuntu image download and checksum.

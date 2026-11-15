@@ -51,6 +51,7 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/health.rs` | The health check |
 | `src/settings_ui.rs` | Settings: agents, message box, notifications, general |
 | `src/install.rs`, `src/update.rs` | The per-user installer and its Settings → Apps entry; updates from GitHub releases, verified by checksum |
+| `src/uninstall.rs` | The uninstaller: what Monaged put on the PC (database, registry, Credential Manager, folders, each distro it used), a choice per part, removing them in a safe order with progress, and `--uninstall --quiet` |
 | `src/add_project.rs` | Adding a project: live checks, one-click fixes, step-by-step progress, cancelling a clone |
 | `src/env.rs` | Environment variables: the DPAPI vault, masking, .env import, the agents' `env_list`/`run_with_env` tools and approvals, repo checks |
 | `src/instance.rs` | One Monaged at a time |
