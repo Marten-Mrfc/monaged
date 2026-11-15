@@ -23,4 +23,4 @@ Everything for writing or talking about Monaged.
 - **Built with:** Rust and GPUI (Zed's UI framework); Claude Code through claude-agent-acp and the Agent Client Protocol
 - **Price:** free; agents use your own Claude subscription or API account
 - **License:** MIT with the Commons Clause (source-available)
-- **Current version:** 0.5.0
+- **Current version:** 0.6.0

@@ -2,13 +2,14 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-11-15
+
+Each subproject gets a dashboard where everything that needs you can be answered, with a lead agent to talk to, and pipeline work now has to pass review before it's integrated or merged.
 
 ### Added
 
 - **A dashboard per subproject.** Clicking a subproject opens it: the request, where it stands, and everything that waits for you, answerable in place (agents' questions with their options or your own reply, permissions, forms, secret requests, the pipeline's decisions and plan, work below the bar, failed sessions, the merge), then every agent with its state, score and findings, with Open, Changes, Review, Fix findings and Stop. The inbox opens it too, and agents have a button back to it.
 - **The lead.** Every pipeline gets an agent that oversees the others, and you talk to it on the dashboard: ask how things stand, or tell it what should happen next and it passes it on. It has its own tools (the team's status, messaging an agent, starting one, reviews and fixes), Monaged keeps it posted, and it can't write code or accept work below the bar for you. Settings → Agents turns it off; Ctrl K or the dashboard starts one anywhere. Other agents' `ask` with "lead" reaches it.
-
 - **Fix findings**: a button next to Review on the confidence card sends the review's findings and any failing tests to the agent as one message (it's asked to check each one first and say when one isn't real); the change is reviewed again when it's done.
 - **Rule out a finding**: ✓ next to a finding says it isn't a problem, with an optional reason. The score is worked out again without it, and the project's next reviews are told, so a wrong finding doesn't keep coming back.
 - **Show only this agent**: a pane's header can switch the middle to one agent at a time (and back to side by side); Ctrl K has both, and can turn the Changes column beside the agent off.
@@ -19,8 +20,8 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ### Fixed
 
-- **Reviews no longer blame agents for tests that were already broken.** When the tests fail, Monaged runs them on the branch the agent started from too; when every failing test failed there as well, the score isn't capped at 2 and the agent isn't asked to fix them.
 - **Low-scored work was integrated and merged anyway.** A builder that said it was done counted as done straight away, without waiting for its review, and merging into develop by itself only stopped at 1/5. Now builders and the integrator have to pass a quality gate: their work is reviewed when they say they're done and needs 4/5 (Settings → Reviews: 3, 4 or 5). Below that, Monaged sends the findings back to fix, twice; then it stops and asks you (Fix again, Review again, or Accept anyway, which is logged). Merging into develop by itself needs the same score. When reviews are off, the work waits for you instead of going through unchecked. A rerun builder replaces the old one instead of the pipeline waiting for both.
+- **Reviews no longer blame agents for tests that were already broken.** When the tests fail, Monaged runs them on the branch the agent started from too; when every failing test failed there as well, the score isn't capped at 2 and the agent isn't asked to fix them.
 - **Closing a pane** didn't stick: the agent you closed came straight back because it was still the focused agent. A closed pane now stays closed until you open that agent again.
 
 ## [0.5.0] - 2026-11-15
