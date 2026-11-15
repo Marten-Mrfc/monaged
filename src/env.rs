@@ -892,7 +892,7 @@ impl Monaged {
         self.audit(project_id, format!("{name} ran `{command}` with {env} ({} variables, {how})", names.len()));
         let distro = self.config.distro.clone();
         let script = Secret(format!(
-            "cd {wt} || exit 1\n{}timeout 300 bash -c {cmd} < /dev/null 2>&1\necho \"MONAGED_EXIT $?\"",
+            "cd {wt} || exit 1\n{}/usr/bin/timeout 300 /bin/bash -c {cmd} < /dev/null 2>&1\necho \"MONAGED_EXIT $?\"",
             exports.expose(),
             wt = shell_path(&worktree),
             cmd = quote(&command)

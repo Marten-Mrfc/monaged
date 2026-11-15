@@ -191,7 +191,7 @@ fn run_tests(distro: &str, worktree: &str, command: &str, times: usize, exports:
     let mut last = TestResult::default();
     let mut any_failed = false;
     for _ in 0..times.max(1) {
-        let script = format!("cd {} || exit 1\n{exports}timeout 900 bash -c {} 2>&1\necho \"MONAGED_EXIT $?\"", shell_path(worktree), quote(command));
+        let script = format!("cd {} || exit 1\n{exports}/usr/bin/timeout 900 /bin/bash -c {} 2>&1\necho \"MONAGED_EXIT $?\"", shell_path(worktree), quote(command));
         let out = if exports.is_empty() { run(distro, &script)? } else { crate::wsl::run_clean(distro, &script)? };
         let out = crate::env::mask_names(&out).0;
         let (body, code) = out.rsplit_once("MONAGED_EXIT ").map(|(b, c)| (b.to_string(), c.trim().parse::<i32>().unwrap_or(1))).unwrap_or((out.clone(), 1));
@@ -278,7 +278,7 @@ impl Monaged {
         // With any, the shell skips startup files (see wsl::clean_prelude).
         let clean = !exports.expose().is_empty();
         let script = crate::env::Secret::new(format!(
-            "export GIT_TERMINAL_PROMPT=0\n{}cd {} || exit 1\n{}exec 2>&1\nexec setsid --wait bash -c {} < /dev/null\n",
+            "export GIT_TERMINAL_PROMPT=0\n{}cd {} || exit 1\n{}exec 2>&1\nexec /usr/bin/setsid --wait /bin/bash -c {} < /dev/null\n",
             if clean { crate::wsl::clean_prelude(&self.config.distro) } else { String::new() },
             shell_path(&dir),
             exports.expose(),
