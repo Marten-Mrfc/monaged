@@ -2,6 +2,24 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **How merges reach a branch**, per project: here then push (the default with an origin), here only, or through GitHub pull requests or GitLab merge requests, merged on the host once its reviews and checks allow it (protected branches work). Click the chip in the project view or the Merge tab.
+- **Update from develop**: when develop has commits a feature branch doesn't, one button brings them in (after catching develop up with origin), so conflicts show up early and can go to an agent.
+- **Better pull and merge requests**: the description says what each agent did, how it was checked, the score with its reasons and any open findings; below the quality bar the request opens as a draft and is marked ready once the score reaches the bar.
+
+### Changed
+
+- **Merges know about origin**: Monaged fetches first, catches the target up when origin moved on, and stops (instead of making a branch that can't be pushed) when the target went its own way both here and on origin.
+- **Fetching is on by default** (every 15 minutes), and open requests and running CI are re-checked about once a minute while you're in the project.
+- With known conflicts, "Resolve conflicts with an agent" comes first in the Merge tab.
+
+### Fixed
+
+- The merge queue counted a feature as ready at 3/5; it now uses the quality bar.
+
 ## [0.7.0] - 2026-11-15
 
 Claude can look at Monaged now (an export to read or paste into a chat, and an MCP server for Claude Desktop and Claude Code), a security review and a bug hunt are fixed, and a round of quality-of-life features saves time and keeps work from being lost.

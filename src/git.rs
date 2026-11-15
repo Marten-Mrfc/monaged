@@ -171,20 +171,42 @@ pub enum MergeOutcome {
     Blocked(String),
 }
 
+/// A merge and what happened around it on origin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeReport {
+    pub outcome: MergeOutcome,
+    /// The target was behind origin and was caught up first (commits taken).
+    pub caught_up: usize,
+    /// After merging: None when not asked to push (or no origin), else how it went.
+    pub pushed: Option<Result<(), String>>,
+}
+
 /// Merges `source` into `target` with a merge commit, without disturbing
 /// anyone's work: in the worktree where `target` is checked out (only if it
 /// has no uncommitted changes), or else in Monaged's own merge worktree.
+/// With an origin, it fetches first and catches `target` up with origin
+/// (refusing when they diverged), and pushes `target` afterwards when asked.
 /// Conflicts are aborted and reported.
-pub fn merge_branch(distro: &str, repo: &str, source: &str, target: &str, message: &str) -> Result<MergeOutcome> {
+pub fn merge_branch(distro: &str, repo: &str, source: &str, target: &str, message: &str, push: bool) -> Result<MergeReport> {
     let found = secrets_in(distro, repo, &format!("{}..{}", quote(target), quote(source)))?;
     if !found.is_empty() {
-        return Ok(MergeOutcome::Blocked(format!("{source} has commits with the value of {}; remove it before merging", found.join(", "))));
+        let why = format!("{source} has commits with the value of {}; remove it before merging", found.join(", "));
+        return Ok(MergeReport { outcome: MergeOutcome::Blocked(why), caught_up: 0, pushed: None });
     }
     let merge_worktree = worktree_path(repo, "_merge", "worktree");
-    let script = format!(
+    let out = run(distro, &merge_script(repo, source, target, message, &merge_worktree, push))?;
+    Ok(parse_merge(&out))
+}
+
+/// The script behind `merge_branch` (kept apart so it can be tested in bash).
+pub fn merge_script(repo: &str, source: &str, target: &str, message: &str, merge_worktree: &str, push: bool) -> String {
+    format!(
         "cd {repo} || exit 1\n\
-         src={src}; dst={dst}; msg={msg}; mwt={mwt}\n\
-         if git merge-base --is-ancestor \"$src\" \"$dst\"; then echo MONAGED_UPTODATE; exit 0; fi\n\
+         src={src}; dst={dst}; msg={msg}; mwt={mwt}; push={push}\n\
+         origin=$(git remote | grep -qx origin && echo 1)\n\
+         # What origin has now (quietly: offline still merges here).\n\
+         # One at a time: a branch origin doesn't have yet would fail both.\n\
+         if [ -n \"$origin\" ]; then timeout 90 git fetch -q origin \"$dst\" >/dev/null 2>&1; timeout 90 git fetch -q origin \"$src\" >/dev/null 2>&1; fi\n\
          wt=$(git worktree list --porcelain | awk -v b=\"refs/heads/$dst\" '/^worktree /{{p=substr($0,10)}} $1==\"branch\" && $2==b {{print p}}')\n\
          release=0\n\
          if [ -n \"$wt\" ]; then\n\
@@ -195,35 +217,93 @@ pub fn merge_branch(distro: &str, repo: &str, source: &str, target: &str, messag
            git -C \"$wt\" checkout -q \"$dst\" 2>/dev/null || {{ echo \"MONAGED_BLOCKED couldn't check out $dst\"; exit 0; }}\n\
            release=1\n\
          fi\n\
+         done_here() {{ [ \"$release\" = 1 ] && git -C \"$wt\" checkout -q --detach; }}\n\
+         # Catch up with origin first; never merge on top of a branch that went its own way.\n\
+         if [ -n \"$origin\" ] && git rev-parse -q --verify \"refs/remotes/origin/$dst\" >/dev/null; then\n\
+           if ! git merge-base --is-ancestor \"origin/$dst\" \"$dst\"; then\n\
+             if git merge-base --is-ancestor \"$dst\" \"origin/$dst\"; then\n\
+               echo \"MONAGED_CAUGHT_UP $(git rev-list --count \"$dst..origin/$dst\")\"\n\
+               git -C \"$wt\" merge -q --ff-only \"origin/$dst\" >/dev/null 2>&1 || {{ echo \"MONAGED_BLOCKED couldn't catch $dst up with origin\"; done_here; exit 0; }}\n\
+             else\n\
+               echo \"MONAGED_BLOCKED $dst has commits here and on origin that the other doesn't: pull it first (Git tab → Pull), then merge again\"; done_here; exit 0\n\
+             fi\n\
+           fi\n\
+         fi\n\
+         if git merge-base --is-ancestor \"$src\" \"$dst\"; then echo MONAGED_UPTODATE; done_here; exit 0; fi\n\
          if out=$(git -C \"$wt\" merge --no-ff -m \"$msg\" \"$src\" 2>&1); then\n\
            echo \"MONAGED_MERGED $(git -C \"$wt\" rev-parse --short HEAD)\"\n\
+           if [ \"$push\" = 1 ] && [ -n \"$origin\" ]; then\n\
+             if pout=$(timeout 120 git -C \"$wt\" push -q origin \"$dst\" 2>&1); then echo MONAGED_PUSHED; else echo \"MONAGED_PUSH_FAILED $(echo \"$pout\" | grep -v '^\\s*$' | tail -n 2 | tr '\\n' ' ')\"; fi\n\
+           fi\n\
          else\n\
            files=$(git -C \"$wt\" diff --name-only --diff-filter=U)\n\
            git -C \"$wt\" merge --abort >/dev/null 2>&1\n\
            if [ -n \"$files\" ]; then echo MONAGED_CONFLICT; echo \"$files\"; else echo \"MONAGED_BLOCKED $(echo \"$out\" | tail -n 1)\"; fi\n\
          fi\n\
-         if [ \"$release\" = 1 ]; then git -C \"$wt\" checkout -q --detach; fi\n\
+         done_here\n\
          true",
         repo = quote(repo),
         src = quote(source),
         dst = quote(target),
         msg = quote(message),
-        mwt = quote(&merge_worktree),
-    );
-    let out = run(distro, &script)?;
-    let mut lines = out.lines();
-    let first = lines.next().unwrap_or_default();
-    Ok(if first == "MONAGED_UPTODATE" {
-        MergeOutcome::AlreadyMerged
-    } else if let Some(sha) = first.strip_prefix("MONAGED_MERGED ") {
-        MergeOutcome::Merged(sha.trim().to_string())
-    } else if first == "MONAGED_CONFLICT" {
-        MergeOutcome::Conflict(lines.map(str::to_owned).filter(|l| !l.is_empty()).collect())
-    } else if let Some(why) = first.strip_prefix("MONAGED_BLOCKED ") {
-        MergeOutcome::Blocked(why.to_string())
-    } else {
-        MergeOutcome::Blocked(format!("unexpected git output: {first}"))
-    })
+        mwt = quote(merge_worktree),
+        push = if push { 1 } else { 0 },
+    )
+}
+
+/// Reads what `merge_script` printed.
+pub fn parse_merge(out: &str) -> MergeReport {
+    let mut report = MergeReport { outcome: MergeOutcome::Blocked("git said nothing".into()), caught_up: 0, pushed: None };
+    let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty()).peekable();
+    let mut outcome = None;
+    while let Some(line) = lines.next() {
+        if let Some(n) = line.strip_prefix("MONAGED_CAUGHT_UP ") {
+            report.caught_up = n.trim().parse().unwrap_or(0);
+        } else if line == "MONAGED_UPTODATE" {
+            outcome = Some(MergeOutcome::AlreadyMerged);
+        } else if let Some(sha) = line.strip_prefix("MONAGED_MERGED ") {
+            outcome = Some(MergeOutcome::Merged(sha.trim().to_string()));
+        } else if line == "MONAGED_PUSHED" {
+            report.pushed = Some(Ok(()));
+        } else if let Some(why) = line.strip_prefix("MONAGED_PUSH_FAILED") {
+            report.pushed = Some(Err(why.trim().to_string()));
+        } else if line == "MONAGED_CONFLICT" {
+            let files: Vec<String> = lines.by_ref().map(str::to_owned).collect();
+            outcome = Some(MergeOutcome::Conflict(files));
+        } else if let Some(why) = line.strip_prefix("MONAGED_BLOCKED ") {
+            outcome = Some(MergeOutcome::Blocked(why.to_string()));
+        } else if outcome.is_none() && !line.starts_with("MONAGED_") {
+            outcome = Some(MergeOutcome::Blocked(format!("unexpected git output: {line}")));
+        }
+    }
+    if let Some(outcome) = outcome {
+        report.outcome = outcome;
+    }
+    report
+}
+
+/// Catches a local branch up with origin when it's only behind (after a
+/// merge on GitHub or GitLab): in its worktree if it's checked out and clean,
+/// else by moving the branch. Returns how many commits it took.
+pub fn catch_up(distro: &str, repo: &str, branch: &str) -> Result<usize> {
+    let out = run(distro, &catch_up_script(repo, branch))?;
+    Ok(out.lines().find_map(|l| l.strip_prefix("MONAGED_N ")).and_then(|n| n.trim().parse().ok()).unwrap_or(0))
+}
+
+pub fn catch_up_script(repo: &str, branch: &str) -> String {
+    format!(
+        "cd {repo} || exit 1\nb={b}\n\
+         timeout 90 git fetch -q origin \"$b\" >/dev/null 2>&1 || {{ echo MONAGED_N 0; exit 0; }}\n\
+         git rev-parse -q --verify \"refs/remotes/origin/$b\" >/dev/null || {{ echo MONAGED_N 0; exit 0; }}\n\
+         git merge-base --is-ancestor \"$b\" \"origin/$b\" || {{ echo MONAGED_N 0; exit 0; }}\n\
+         n=$(git rev-list --count \"$b..origin/$b\")\n\
+         wt=$(git worktree list --porcelain | awk -v r=\"refs/heads/$b\" '/^worktree /{{p=substr($0,10)}} $1==\"branch\" && $2==r {{print p}}')\n\
+         if [ -n \"$wt\" ]; then [ -z \"$(git -C \"$wt\" status --porcelain)\" ] && git -C \"$wt\" merge -q --ff-only \"origin/$b\" >/dev/null 2>&1 || n=0\n\
+         else git branch -f \"$b\" \"origin/$b\" >/dev/null 2>&1 || n=0; fi\n\
+         echo \"MONAGED_N $n\"",
+        repo = quote(repo),
+        b = quote(branch),
+    )
 }
 
 /// `git push -u origin <branch>` from WSL.

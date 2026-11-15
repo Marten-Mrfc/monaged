@@ -268,6 +268,8 @@ struct Monaged {
     dismissed: HashSet<i64>,
     /// An export is being written.
     exporting: bool,
+    /// When open requests and running CI were last asked about.
+    hosts_polled: Option<Instant>,
     /// Windows is being kept awake (an agent works).
     awake: bool,
     /// You chose to close despite running work.
@@ -561,6 +563,7 @@ impl Monaged {
             starting_build: HashSet::new(),
             dashboard_chat: true,
             awake: false,
+            hosts_polled: None,
             closing: false,
             away_since: None,
             away: None,

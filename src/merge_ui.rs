@@ -7,12 +7,57 @@ use std::collections::HashMap;
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px, rgb};
 
 use crate::agent::Tone;
-use crate::git::{self, BranchState, Cleanup, MergeOutcome};
-use crate::hosting::{self, Remote, Request};
+use crate::git::{self, BranchState, Cleanup, MergeOutcome, MergeReport};
+use crate::hosting::{self, Mergeable, Remote, Request};
 use crate::pipeline::{Role, Stage};
 use crate::icons::{Icon, icon, icon_sized};
 use crate::ui::{self, Kind};
 use crate::{AgentSpec, Monaged, theme, tone_color};
+
+/// How work reaches a branch: merged here and pushed, merged here only, or
+/// merged by GitHub or GitLab through a pull/merge request (protected
+/// branches, required reviews and checks).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Method {
+    Push,
+    Local,
+    Request,
+}
+
+impl Method {
+    fn as_str(self) -> &'static str {
+        match self {
+            Method::Push => "push",
+            Method::Local => "local",
+            Method::Request => "request",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "push" => Some(Method::Push),
+            "local" => Some(Method::Local),
+            "request" => Some(Method::Request),
+            _ => None,
+        }
+    }
+
+    pub fn label(self, request_name: &str) -> String {
+        match self {
+            Method::Push => "merges: here, then push".into(),
+            Method::Local => "merges: here, you push".into(),
+            Method::Request => format!("merges: through {request_name}s"),
+        }
+    }
+}
+
+/// What a merge through a request came to.
+enum RequestOutcome {
+    /// Merged on the host; `caught_up` commits came into the local target.
+    Merged { number: u64, caught_up: usize },
+    /// Open, but the host won't merge it yet (and why).
+    Waiting(Mergeable),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Policy {
@@ -132,6 +177,74 @@ impl Monaged {
         cx.notify();
     }
 
+    /// How merges reach their branch in this project (see `Method`).
+    pub(crate) fn method(&self, project_id: i64) -> Method {
+        let has_origin = self.branch_info.get(&project_id).is_some_and(|i| i.state.remote_url.is_some());
+        let hosted = self.remote(project_id).is_some_and(|r| r.provider.is_some());
+        match self.store.setting(&format!("git:method:{project_id}")).as_deref().and_then(Method::parse) {
+            Some(Method::Request) if !hosted => if has_origin { Method::Push } else { Method::Local },
+            Some(Method::Push) if !has_origin => Method::Local,
+            Some(m) => m,
+            None if has_origin => Method::Push,
+            None => Method::Local,
+        }
+    }
+
+    fn cycle_method(&mut self, project_id: i64, cx: &mut Context<Self>) {
+        let hosted = self.remote(project_id).is_some_and(|r| r.provider.is_some());
+        let has_origin = self.branch_info.get(&project_id).is_some_and(|i| i.state.remote_url.is_some());
+        let next = match self.method(project_id) {
+            Method::Push => Method::Local,
+            Method::Local if hosted => Method::Request,
+            Method::Local | Method::Request if has_origin => Method::Push,
+            _ => Method::Local,
+        };
+        let _ = self.store.set_setting(&format!("git:method:{project_id}"), next.as_str());
+        cx.notify();
+    }
+
+    /// The description a pull/merge request opens with: what was built, how
+    /// it was checked, and the score, so a reviewer starts informed.
+    pub(crate) fn request_body(&self, sub_id: i64) -> String {
+        let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id) else { return String::new() };
+        let p = self.pipelines.get(&sub_id);
+        let mut out = String::new();
+        let summary = p.and_then(|p| p.plan.as_ref()).and_then(|plan| plan["summary"].as_str().map(str::to_owned));
+        out.push_str(&summary.or_else(|| p.map(|p| p.request.clone())).unwrap_or_else(|| sub.name.clone()));
+        out.push_str("\n");
+        let agents: Vec<_> = self
+            .agents
+            .iter()
+            .filter(|a| a.record.subproject_id == sub_id && !a.record.archived && matches!(a.role(), Role::Builder(_) | Role::Integrator | Role::Free))
+            .filter_map(|a| a.summary.as_ref().map(|s| (a.record.name.clone(), s.text.clone())))
+            .collect();
+        if !agents.is_empty() {
+            out.push_str("\n## What changed\n\n");
+            for (name, text) in agents {
+                out.push_str(&format!("- **{name}**: {}\n", text.replace('\n', " ")));
+            }
+        }
+        let reviewed = self
+            .agents
+            .iter()
+            .rev()
+            .find(|a| a.record.subproject_id == sub_id && !a.record.archived && a.role() == Role::Integrator)
+            .or_else(|| self.agents.iter().find(|a| a.record.subproject_id == sub_id && a.confidence.is_some()))
+            .and_then(|a| a.confidence.as_ref());
+        if let Some(c) = reviewed {
+            out.push_str(&format!("\n## Checks\n\n{}\n", c.checks.lines().next().unwrap_or_default()));
+            out.push_str(&format!("\n## Confidence: {}/5\n\n", c.score));
+            for reason in c.reasons.iter().take(6) {
+                out.push_str(&format!("- {reason}\n"));
+            }
+            for issue in c.issues.iter().take(8) {
+                out.push_str(&format!("- Open finding [{}] {}: {}\n", issue.severity, issue.file, issue.problem));
+            }
+        }
+        out.push_str("\n---\nOpened by Monaged.");
+        crate::export::mask_all(&out)
+    }
+
     pub(crate) fn remote(&self, project_id: i64) -> Option<Remote> {
         let mut remote = self.branch_info.get(&project_id)?.state.remote_url.as_deref().and_then(hosting::parse_remote)?;
         remote.login = self.git_auth.project_logins.get(&project_id).cloned();
@@ -183,6 +296,8 @@ impl Monaged {
                     let mut pairs: Vec<(String, String)> = chain.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect();
                     if let Some(first) = chain.first() {
                         pairs.extend(features.iter().filter(|f| state.has(f)).map(|f| (f.clone(), first.clone())));
+                        // And the other way: what the target has that a feature doesn't (it moved on).
+                        pairs.extend(features.iter().filter(|f| state.has(f)).map(|f| (first.clone(), f.clone())));
                     }
                     let counts = git::ahead_counts(&distro, &project.path, &pairs)?;
                     anyhow::Ok((state, chain, pairs.into_iter().zip(counts).collect::<HashMap<_, _>>(), login))
@@ -262,6 +377,51 @@ impl Monaged {
         self.run_merge(sub.project_id, sub.branch, target, message, Some(sub_id), cx);
     }
 
+    /// Brings the target's newer commits into the feature branch (after the
+    /// target caught up with origin), so conflicts show up now, not at merge time.
+    pub(crate) fn update_from_target(&mut self, sub_id: i64, cx: &mut Context<Self>) {
+        let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
+        let Some(project) = self.projects.iter().find(|p| p.id == sub.project_id).cloned() else { return };
+        let Some(target) = self.merge_target(sub_id) else { return };
+        let state = self.merge_state(sub_id);
+        state.busy = true;
+        state.conflict.clear();
+        state.message = Some((Tone::Info, format!("Bringing {target} into {}…", sub.branch)));
+        cx.notify();
+        let distro = self.config.distro.clone();
+        cx.spawn(async move |view, cx| {
+            let (repo, feature, t) = (project.path.clone(), sub.branch.clone(), target.clone());
+            let result = cx
+                .background_spawn(async move {
+                    let _ = git::catch_up(&distro, &repo, &t);
+                    git::merge_branch(&distro, &repo, &t, &feature, &format!("Merge {t} into {feature}"), false)
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                let (tone, text, conflict) = match result {
+                    Ok(MergeReport { outcome: MergeOutcome::Merged(sha), .. }) => (Tone::Info, format!("{} has the latest of {target} now ({sha}).", sub.branch), Vec::new()),
+                    Ok(MergeReport { outcome: MergeOutcome::AlreadyMerged, .. }) => (Tone::Info, format!("{} already has everything from {target}.", sub.branch), Vec::new()),
+                    Ok(MergeReport { outcome: MergeOutcome::Conflict(files), .. }) => (
+                        Tone::Warn,
+                        format!("{target} conflicts with {} in {}; nothing was changed. An agent can resolve them.", sub.branch, files_word(files.len())),
+                        files,
+                    ),
+                    Ok(MergeReport { outcome: MergeOutcome::Blocked(why), .. }) => (Tone::Error, format!("Didn't update: {why}"), Vec::new()),
+                    Err(err) => (Tone::Error, format!("Couldn't update: {err:#}"), Vec::new()),
+                };
+                let _ = this.store.log_event(sub_id, None, if conflict.is_empty() { "merge" } else { "conflict" }, &text);
+                let state = this.merge_state(sub_id);
+                state.busy = false;
+                state.conflict = conflict;
+                state.message = Some((tone, text));
+                this.refresh_branches(sub.project_id, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// After the pipeline is done and a confidence score is in: merge on its
     /// own when the target's policy is "auto" and confidence is at the bar.
     pub(crate) fn maybe_auto_merge(&mut self, sub_id: i64, cx: &mut Context<Self>) {
@@ -326,6 +486,12 @@ impl Monaged {
 
     fn run_merge(&mut self, project_id: i64, source: String, target: String, message: String, sub_id: Option<i64>, cx: &mut Context<Self>) {
         let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() else { return };
+        let method = self.method(project_id);
+        if method == Method::Request
+            && let Some(remote) = self.remote(project_id).filter(|r| r.provider.is_some())
+        {
+            return self.merge_through_request(project_id, remote, source, target, message, sub_id, cx);
+        }
         if let Some(sub_id) = sub_id {
             let state = self.merge_state(sub_id);
             state.busy = true;
@@ -335,52 +501,168 @@ impl Monaged {
         self.progress("merge", format!("Merging {source} into {target}…"), cx);
         cx.notify();
         let distro = self.config.distro.clone();
+        let push = method == Method::Push;
         cx.spawn(async move |view, cx| {
             let (s, t) = (source.clone(), target.clone());
-            let outcome = cx.background_spawn(async move { git::merge_branch(&distro, &project.path, &s, &t, &message) }).await;
+            let report = cx.background_spawn(async move { git::merge_branch(&distro, &project.path, &s, &t, &message, push) }).await;
             view.update(cx, |this, cx| {
-                let (tone, text, merged_sha, conflict) = match outcome {
+                let caught = report.as_ref().map(|r| r.caught_up).unwrap_or(0);
+                let caught_note = if caught > 0 { format!(" ({target} first caught up with {caught} commit{} from origin.)", if caught == 1 { "" } else { "s" }) } else { String::new() };
+                let pushed = report.as_ref().ok().and_then(|r| r.pushed.clone());
+                let (mut tone, mut text, merged_sha, conflict) = match report.map(|r| r.outcome) {
                     Ok(MergeOutcome::Merged(sha)) => (Tone::Info, format!("Merged {source} into {target} ({sha})."), Some(sha), Vec::new()),
                     Ok(MergeOutcome::AlreadyMerged) => (Tone::Info, format!("{target} already contains everything from {source}."), Some(String::new()), Vec::new()),
                     Ok(MergeOutcome::Conflict(files)) => (
                         Tone::Warn,
-                        format!("Merge conflicts with {target} in {} file(s); nothing was changed.", files.len()),
+                        format!("Merge conflicts with {target} in {}; nothing was changed.", files_word(files.len())),
                         None,
                         files,
                     ),
                     Ok(MergeOutcome::Blocked(why)) => (Tone::Error, format!("Didn't merge: {why}"), None, Vec::new()),
                     Err(err) => (Tone::Error, format!("Merge failed: {err:#}"), None, Vec::new()),
                 };
-                // A merge that did something rises; one that couldn't, falls.
-                match (&merged_sha, tone) {
-                    (Some(sha), _) if !sha.is_empty() => this.chime(crate::sound::Cue::Success),
-                    (None, Tone::Warn | Tone::Error) => this.chime(crate::sound::Cue::Error),
-                    _ => {}
-                }
-                if let Some(sub_id) = sub_id {
-                    if let Some(sha) = &merged_sha {
-                        let _ = this.store.set_setting(&format!("sub:{sub_id}:merged"), &format!("{target} {sha}"));
-                        if let Some(p) = this.pipelines.get_mut(&sub_id) {
-                            p.note = Some(text.clone());
-                        }
-                        if this.pipelines.contains_key(&sub_id) {
-                            let _ = this.store.save_pipeline(&this.pipelines[&sub_id]);
-                        }
+                text.push_str(&caught_note);
+                match &pushed {
+                    Some(Ok(())) => text.push_str(&format!(" Pushed {target} to origin.")),
+                    Some(Err(why)) => {
+                        tone = Tone::Warn;
+                        let protected = why.contains("protected") || why.contains("declined") || why.contains("GH006");
+                        text.push_str(&format!(
+                            " Pushing {target} failed: {why}{}",
+                            if protected { " The branch looks protected: switch the project to merging through requests (Project overview → Branches)." } else { " Push it from the Git tab." }
+                        ));
                     }
-                    let kind = if merged_sha.is_some() { "merge" } else if !conflict.is_empty() { "conflict" } else { "failed" };
-                    let _ = this.store.log_event(sub_id, None, kind, &text);
-                    let state = this.merge_state(sub_id);
-                    state.busy = false;
-                    state.conflict = conflict;
-                    state.message = Some((tone, text.clone()));
-                    if let Some(sha) = merged_sha {
-                        state.merged = Some((target.clone(), sha));
-                    }
+                    None => {}
                 }
-                this.settle("merge", tone, text, cx);
-                this.advance_merge_queue(cx);
-                this.refresh_branches(project_id, cx);
-                cx.notify();
+                this.finish_merge(project_id, sub_id, &target, tone, text, merged_sha, conflict, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The end of any merge: sound, the event, the state, the queue, the branches.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_merge(&mut self, project_id: i64, sub_id: Option<i64>, target: &str, tone: Tone, text: String, merged_sha: Option<String>, conflict: Vec<String>, cx: &mut Context<Self>) {
+        // A merge that did something rises; one that couldn't, falls.
+        match (&merged_sha, tone) {
+            (Some(sha), _) if !sha.is_empty() => self.chime(crate::sound::Cue::Success),
+            (None, Tone::Warn | Tone::Error) => self.chime(crate::sound::Cue::Error),
+            _ => {}
+        }
+        if let Some(sub_id) = sub_id {
+            if let Some(sha) = &merged_sha {
+                let _ = self.store.set_setting(&format!("sub:{sub_id}:merged"), &format!("{target} {sha}"));
+                if let Some(p) = self.pipelines.get_mut(&sub_id) {
+                    p.note = Some(text.clone());
+                }
+                if self.pipelines.contains_key(&sub_id) {
+                    let _ = self.store.save_pipeline(&self.pipelines[&sub_id]);
+                }
+            }
+            let kind = if merged_sha.is_some() { "merge" } else if !conflict.is_empty() { "conflict" } else { "failed" };
+            let _ = self.store.log_event(sub_id, None, kind, &text);
+            let state = self.merge_state(sub_id);
+            state.busy = false;
+            state.conflict = conflict;
+            state.message = Some((tone, text.clone()));
+            if let Some(sha) = merged_sha {
+                state.merged = Some((target.to_string(), sha));
+            }
+        }
+        self.settle("merge", tone, text, cx);
+        self.advance_merge_queue(cx);
+        self.refresh_branches(project_id, cx);
+        if let Some(sub_id) = sub_id {
+            self.refresh_request(sub_id, cx);
+        }
+        cx.notify();
+    }
+
+    /// Merging through GitHub or GitLab: push the branch, open (or reuse) its
+    /// request, and merge it there if the host allows it now; then catch the
+    /// local target up. Below the quality bar a new request opens as a draft.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_through_request(&mut self, project_id: i64, remote: Remote, source: String, target: String, message: String, sub_id: Option<i64>, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() else { return };
+        let name = remote.provider.map(|p| p.request_name()).unwrap_or("request");
+        let below_bar = sub_id.and_then(|s| self.sub_confidence(s)).is_some_and(|(score, _)| score < self.min_score());
+        let (title, body) = match sub_id {
+            Some(s) => (
+                self.pipelines.get(&s).and_then(|p| p.plan.as_ref()).map(crate::pipeline::plan_title).unwrap_or_else(|| self.sub_name(s)),
+                self.request_body(s),
+            ),
+            None => (message.clone(), format!("{message}.\n\n---\nOpened by Monaged.")),
+        };
+        if let Some(sub_id) = sub_id {
+            let state = self.merge_state(sub_id);
+            state.busy = true;
+            state.conflict.clear();
+            state.message = Some((Tone::Info, format!("Pushing {source} and checking its {name}…")));
+        }
+        self.progress("merge", format!("Merging {source} into {target} through a {name}…"), cx);
+        cx.notify();
+        let distro = self.config.distro.clone();
+        cx.spawn(async move |view, cx| {
+            let (s, t, repo, r) = (source.clone(), target.clone(), project.path.clone(), remote.clone());
+            let result = cx
+                .background_spawn(async move {
+                    git::push_branch(&distro, &repo, &s)?;
+                    let existing = hosting::request_status(&r, &s)?.filter(|q| q.is_open());
+                    if existing.is_none() {
+                        hosting::create_request(&r, &s, &t, &title, &body, below_bar)?;
+                    }
+                    let request = hosting::request_status(&r, &s)?.filter(|q| q.is_open()).ok_or_else(|| anyhow::anyhow!("the {name} didn't show up on {}", r.host))?;
+                    // At the bar now: a draft from earlier is ready.
+                    if request.draft && !below_bar {
+                        hosting::mark_ready(&r, &request)?;
+                    }
+                    // The host works out mergeability in the background; ask a few times.
+                    let mut mergeable = Mergeable::Unknown(String::new());
+                    for attempt in 0..4 {
+                        mergeable = hosting::request_mergeable(&r, request.number)?;
+                        if !matches!(mergeable, Mergeable::Unknown(_)) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(2 + attempt));
+                    }
+                    if mergeable != Mergeable::Ready || below_bar {
+                        return anyhow::Ok((request, RequestOutcome::Waiting(if below_bar { Mergeable::Draft } else { mergeable })));
+                    }
+                    hosting::merge_request(&r, request.number, &message)?;
+                    let caught_up = git::catch_up(&distro, &repo, &t).unwrap_or(0);
+                    Ok((request.clone(), RequestOutcome::Merged { number: request.number, caught_up }))
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                let (tone, text, merged) = match &result {
+                    Ok((_, RequestOutcome::Merged { number, caught_up })) => (
+                        Tone::Info,
+                        format!(
+                            "Merged {name} #{number} into {target} on {}{}.",
+                            remote.host,
+                            if *caught_up > 0 { format!("; {target} here caught up ({caught_up} commit{})", if *caught_up == 1 { "" } else { "s" }) } else { String::new() }
+                        ),
+                        Some(format!("#{number}")),
+                    ),
+                    Ok((request, RequestOutcome::Waiting(why))) => {
+                        let why = if below_bar && matches!(why, Mergeable::Draft) {
+                            format!("is a draft until the score reaches {}/5", this.min_score())
+                        } else {
+                            why.describe()
+                        };
+                        (Tone::Info, format!("{name} #{} is open: it {why}. Monaged merges it once it can (or merge it there).", request.number), None)
+                    }
+                    Err(err) => {
+                        let text = format!("{err:#}");
+                        let hint = if crate::git_auth::looks_like_auth_failure(&text) { " Sign in under Settings → Git accounts." } else { "" };
+                        (Tone::Error, format!("Couldn't merge through a {name}: {text}{hint}"), None)
+                    }
+                };
+                if let (Some(sub_id), Ok((request, _))) = (sub_id, &result) {
+                    this.merge_state(sub_id).request = Some(request.clone());
+                }
+                this.finish_merge(project_id, sub_id, &target, tone, text, merged, Vec::new(), cx);
             })
             .ok();
         })
@@ -430,11 +712,9 @@ impl Monaged {
             .and_then(|p| p.plan.as_ref())
             .map(crate::pipeline::plan_title)
             .unwrap_or_else(|| sub.name.clone());
-        let body = {
-            let summary = self.pipelines.get(&sub_id).and_then(|p| p.plan.as_ref()).and_then(|p| p["summary"].as_str().map(str::to_owned));
-            let confidence = self.sub_confidence(sub_id).map(|(s, from)| format!("\n\nConfidence: {s}/5 ({from})")).unwrap_or_default();
-            format!("{}{}\n\nOpened by Monaged.", summary.unwrap_or_else(|| sub.name.clone()), confidence)
-        };
+        let body = self.request_body(sub_id);
+        // Below the quality bar it opens as a draft: not ready for anyone to merge.
+        let draft = self.sub_confidence(sub_id).is_none_or(|(score, _)| score < self.min_score());
         let state = self.merge_state(sub_id);
         state.busy = true;
         state.message = Some((Tone::Info, format!("Pushing {}…", sub.branch)));
@@ -449,7 +729,7 @@ impl Monaged {
                         return anyhow::Ok(None);
                     }
                     let remote = remote.ok_or_else(|| anyhow::anyhow!("origin isn't on GitHub or GitLab"))?;
-                    Ok(Some(hosting::create_request(&remote, &branch, &target, &title, &body)?))
+                    Ok(Some(hosting::create_request(&remote, &branch, &target, &title, &body, draft)?))
                 })
                 .await;
             view.update(cx, |this, cx| {
@@ -595,6 +875,34 @@ impl Monaged {
             .into_any_element()
     }
 
+    /// How merges reach their branch (click to change).
+    fn method_chip(&self, project_id: i64, cx: &mut Context<Self>) -> AnyElement {
+        let name = self.remote(project_id).and_then(|r| r.provider).map(|p| p.request_name()).unwrap_or("request");
+        let method = self.method(project_id);
+        let explain = match method {
+            Method::Push => "Merges happen here, then the branch is pushed to origin (fetched and caught up first). Click to change.".to_string(),
+            Method::Local => "Merges happen here only; you push when you want to. Click to change.".to_string(),
+            Method::Request => format!("Merges go through a {name}: Monaged pushes the branch, opens the {name} (a draft below the quality bar) and merges it there once the host allows it (reviews, checks). Click to change."),
+        };
+        div()
+            .id(("method-chip", project_id as usize))
+            .flex_none()
+            .whitespace_nowrap()
+            .px(px(6.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(rgb(theme::line_strong()))
+            .font_family(theme::MONO)
+            .text_size(px(11.))
+            .text_color(rgb(theme::text_2()))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text())))
+            .tooltip(crate::shell::tip_text(explain))
+            .child(method.label(name))
+            .on_click(cx.listener(move |this, _, _, cx| this.cycle_method(project_id, cx)))
+            .into_any_element()
+    }
+
     /// The project's branch flow: feature/* → develop → acceptance → main, the
     /// rule on each hop, what's waiting to be promoted, and the remote.
     pub(crate) fn render_branch_panel(&self, project_id: i64, cx: &mut Context<Self>) -> AnyElement {
@@ -714,6 +1022,7 @@ impl Monaged {
                     .pt(px(2.))
                     .child(icon_sized(Icon::Branch, 13.).text_color(rgb(theme::text_3())))
                     .child(div().flex_1().min_w(px(0.)).truncate().child(ui::mono(remote_line)))
+                    .child(self.method_chip(project_id, cx))
                     .when(chain.len() == 1, |d| {
                         d.child(ui::button("setup-branches", Kind::Secondary, None, "Set up develop and acceptance").on_click(cx.listener(
                             move |this, _, _, cx| this.setup_branches(project_id, cx),
@@ -748,6 +1057,9 @@ impl Monaged {
         });
         let busy = state.is_some_and(|s| s.busy);
         let ahead = self.branch_info.get(&project_id).and_then(|i| i.ahead.get(&(sub.branch.clone(), target.clone()))).copied();
+        // What the target has that this branch doesn't (it moved on).
+        let behind = self.branch_info.get(&project_id).and_then(|i| i.ahead.get(&(target.clone(), sub.branch.clone()))).copied().unwrap_or(0);
+        let method = self.method(project_id);
         let remote = self.remote(project_id);
         let provider = remote.as_ref().and_then(|r| r.provider);
         let has_origin = self.branch_info.get(&project_id).is_some_and(|i| i.state.remote_url.is_some());
@@ -780,6 +1092,7 @@ impl Monaged {
                         .child(target.clone()),
                 )
                 .child(kv("Rule", self.policy_chip(project_id, &target, cx)))
+                .child(kv("Method", self.method_chip(project_id, cx)))
                 .child(kv(
                     "Confidence",
                     match confidence {
@@ -799,16 +1112,25 @@ impl Monaged {
                     .child(ui::disabled_button("merge-sub-off", Kind::Primary, Some(Icon::Merge), format!("Merge into {target}"))),
             );
         }
-        if !busy && ahead.unwrap_or(0) > 0 {
-            actions = actions.child(
-                ui::button("merge-sub", Kind::Primary, Some(Icon::Merge), format!("Merge into {target}"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.merge_subproject(sub_id, cx))),
-            );
-        }
+        // Known conflicts come first: merging would only run into them again.
         if !busy && !conflict.is_empty() {
             actions = actions.child(
-                ui::button("resolve", Kind::Secondary, Some(Icon::Agent), "Resolve conflicts with an agent")
+                ui::button("resolve", Kind::Primary, Some(Icon::Agent), "Resolve conflicts with an agent")
                     .on_click(cx.listener(move |this, _, _, cx| this.resolve_conflicts(sub_id, cx))),
+            );
+        }
+        if !busy && ahead.unwrap_or(0) > 0 {
+            let name = provider.map(|p| p.request_name()).unwrap_or("request");
+            let label = if method == Method::Request { format!("Merge into {target} through a {name}") } else { format!("Merge into {target}") };
+            let kind = if conflict.is_empty() { Kind::Primary } else { Kind::Secondary };
+            actions = actions.child(ui::button("merge-sub", kind, Some(Icon::Merge), label).on_click(cx.listener(move |this, _, _, cx| this.merge_subproject(sub_id, cx))));
+        }
+        // The target moved on: bring it in now, so conflicts show up here and not at merge time.
+        if !busy && behind > 0 {
+            actions = actions.child(
+                ui::button("update-from-target", Kind::Secondary, Some(Icon::ArrowDown), format!("Update from {target} ({behind} new)"))
+                    .tooltip(crate::shell::tip_text(format!("{target} has {behind} commit{} this branch doesn't. Merge them in (after catching {target} up with origin); conflicts can go to an agent.", if behind == 1 { "" } else { "s" })))
+                    .on_click(cx.listener(move |this, _, _, cx| this.update_from_target(sub_id, cx))),
             );
         }
         if !busy && has_origin {
@@ -858,7 +1180,7 @@ impl Monaged {
                         .cursor_pointer()
                         .text_size(px(13.))
                         .hover(|s| s.text_color(rgb(theme::text())))
-                        .child(format!("#{} · {}", r.number, r.state))
+                        .child(format!("#{} · {}{}", r.number, r.state, if r.draft && r.is_open() { " · draft" } else { "" }))
                         .child(icon_sized(Icon::External, 13.))
                         .on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &url))),
                 ),
@@ -869,4 +1191,9 @@ impl Monaged {
         }
         col.into_any_element()
     }
+}
+
+/// "1 file", "3 files".
+fn files_word(n: usize) -> String {
+    format!("{n} file{}", if n == 1 { "" } else { "s" })
 }

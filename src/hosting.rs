@@ -108,6 +108,73 @@ pub struct Request {
     pub number: u64,
     pub state: String,
     pub url: String,
+    pub draft: bool,
+    /// GitHub's GraphQL id (to mark a draft ready).
+    pub node_id: String,
+}
+
+impl Request {
+    pub fn is_open(&self) -> bool {
+        matches!(self.state.as_str(), "open" | "opened")
+    }
+}
+
+/// Whether the host would merge a request now.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mergeable {
+    Ready,
+    Draft,
+    /// Required checks are running or failing.
+    Checks,
+    /// It needs approvals (or resolved discussions) first.
+    Reviews,
+    Conflicts,
+    /// The target moved on and the host wants the branch up to date first.
+    Behind,
+    /// The host is still working it out, or said something else.
+    Unknown(String),
+}
+
+impl Mergeable {
+    /// In words, after "The pull request …".
+    pub fn describe(&self) -> String {
+        match self {
+            Mergeable::Ready => "can be merged".into(),
+            Mergeable::Draft => "is a draft".into(),
+            Mergeable::Checks => "waits for its required checks".into(),
+            Mergeable::Reviews => "needs approval (or resolved discussions) first".into(),
+            Mergeable::Conflicts => "has conflicts with its target".into(),
+            Mergeable::Behind => "needs the latest of its target first".into(),
+            Mergeable::Unknown(why) => why.clone(),
+        }
+    }
+}
+
+/// GitHub's `mergeable_state` (REST) or `mergeStateStatus` (gh), any case.
+pub fn github_mergeable(state: &str) -> Mergeable {
+    match state.to_lowercase().as_str() {
+        "clean" | "has_hooks" | "unstable" => Mergeable::Ready,
+        "draft" => Mergeable::Draft,
+        "blocked" => Mergeable::Reviews,
+        "dirty" => Mergeable::Conflicts,
+        "behind" => Mergeable::Behind,
+        "unknown" | "" => Mergeable::Unknown("is still being checked by GitHub".into()),
+        other => Mergeable::Unknown(format!("is {other} on GitHub")),
+    }
+}
+
+/// GitLab's `detailed_merge_status` (or the older `merge_status`).
+pub fn gitlab_mergeable(state: &str) -> Mergeable {
+    match state {
+        "mergeable" | "can_be_merged" => Mergeable::Ready,
+        "draft_status" => Mergeable::Draft,
+        "ci_must_pass" | "ci_still_running" | "external_status_checks" => Mergeable::Checks,
+        "not_approved" | "discussions_not_resolved" | "requested_changes" | "jira_association_missing" => Mergeable::Reviews,
+        "conflict" | "broken_status" | "cannot_be_merged" => Mergeable::Conflicts,
+        "need_rebase" => Mergeable::Behind,
+        "checking" | "unchecked" | "preparing" | "approvals_syncing" | "" => Mergeable::Unknown("is still being checked by GitLab".into()),
+        other => Mergeable::Unknown(format!("is {} on GitLab", other.replace('_', " "))),
+    }
 }
 
 /// The signed-in account's token for the remote's host, if there is one.
@@ -127,11 +194,11 @@ fn encoded(text: &str) -> String {
     out
 }
 
-fn create_request_api(provider: Provider, remote: &Remote, token: &str, source: &str, target: &str, title: &str, body: &str) -> Result<String> {
+fn create_request_api(provider: Provider, remote: &Remote, token: &str, source: &str, target: &str, title: &str, body: &str, draft: bool) -> Result<String> {
     use crate::git_auth::{api, api_error};
     match provider {
         Provider::GitHub => {
-            let payload = serde_json::json!({ "title": title, "head": source, "base": target, "body": body });
+            let payload = serde_json::json!({ "title": title, "head": source, "base": target, "body": body, "draft": draft });
             let (status, reply, _) = api("POST", provider, &remote.host, token, &format!("/repos/{}/pulls", remote.slug), Some(&payload))?;
             if status == 422
                 && reply.to_string().contains("already exists")
@@ -145,6 +212,7 @@ fn create_request_api(provider: Provider, remote: &Remote, token: &str, source: 
             Ok(reply["html_url"].as_str().unwrap_or_default().to_string())
         }
         Provider::GitLab => {
+            let title = if draft { format!("Draft: {title}") } else { title.to_string() };
             let payload = serde_json::json!({ "title": title, "source_branch": source, "target_branch": target, "description": body, "remove_source_branch": false });
             let (status, reply, _) = api("POST", provider, &remote.host, token, &format!("/projects/{}/merge_requests", encoded(&remote.slug)), Some(&payload))?;
             if status == 409
@@ -185,6 +253,8 @@ fn request_status_api(provider: Provider, remote: &Remote, token: &str, source: 
         number: first["number"].as_u64().or_else(|| first["iid"].as_u64()).unwrap_or(0),
         state,
         url: first["html_url"].as_str().or_else(|| first["web_url"].as_str()).unwrap_or_default().to_string(),
+        draft: first["draft"].as_bool().or_else(|| first["work_in_progress"].as_bool()).unwrap_or(false),
+        node_id: first["node_id"].as_str().unwrap_or_default().to_string(),
     }))
 }
 
@@ -227,28 +297,24 @@ fn gitlab_state(status: &str) -> &'static str {
     }
 }
 
-/// Opens a merge/pull request from `source` into `target`; returns its URL.
-pub fn create_request(remote: &Remote, source: &str, target: &str, title: &str, body: &str) -> Result<String> {
+/// Opens a merge/pull request from `source` into `target` (as a draft when
+/// asked); returns its URL. An open one for `source` is reused.
+pub fn create_request(remote: &Remote, source: &str, target: &str, title: &str, body: &str, draft: bool) -> Result<String> {
     let Some(provider) = remote.provider else { bail!("{} isn't GitHub or GitLab", remote.host) };
     if let Some(token) = api_token(remote) {
-        return create_request_api(provider, remote, &token, source, target, title, body);
+        return create_request_api(provider, remote, &token, source, target, title, body, draft);
     }
     let repo = repo_arg(remote);
-    let out = match provider {
-        Provider::GitHub => cli(
-            provider,
-            remote,
-            &["pr", "create", "--repo", &repo, "--head", source, "--base", target, "--title", title, "--body", body],
-        )?,
-        Provider::GitLab => cli(
-            provider,
-            remote,
-            &[
-                "mr", "create", "-R", &repo, "--source-branch", source, "--target-branch", target, "--title", title,
-                "--description", body, "--yes",
-            ],
-        )?,
+    let mut args: Vec<&str> = match provider {
+        Provider::GitHub => vec!["pr", "create", "--repo", &repo, "--head", source, "--base", target, "--title", title, "--body", body],
+        Provider::GitLab => vec![
+            "mr", "create", "-R", &repo, "--source-branch", source, "--target-branch", target, "--title", title, "--description", body, "--yes",
+        ],
     };
+    if draft {
+        args.push("--draft");
+    }
+    let out = cli(provider, remote, &args)?;
     Ok(out.split_whitespace().find(|w| w.starts_with("https://")).unwrap_or(&out).to_string())
 }
 
@@ -263,7 +329,7 @@ pub fn request_status(remote: &Remote, source: &str) -> Result<Option<Request>> 
         Provider::GitHub => cli(
             provider,
             remote,
-            &["pr", "list", "--repo", &repo, "--head", source, "--state", "all", "--json", "number,state,url", "--limit", "1"],
+            &["pr", "list", "--repo", &repo, "--head", source, "--state", "all", "--json", "number,state,url,isDraft,id", "--limit", "1"],
         )?,
         Provider::GitLab => cli(provider, remote, &["mr", "list", "-R", &repo, "--source-branch", source, "--all", "--output", "json"])?,
     };
@@ -273,7 +339,143 @@ pub fn request_status(remote: &Remote, source: &str) -> Result<Option<Request>> 
         number: first["number"].as_u64().or_else(|| first["iid"].as_u64()).unwrap_or(0),
         state: first["state"].as_str().unwrap_or("unknown").to_lowercase(),
         url: first["url"].as_str().or_else(|| first["web_url"].as_str()).unwrap_or_default().to_string(),
+        draft: first["isDraft"].as_bool().or_else(|| first["draft"].as_bool()).unwrap_or(false),
+        node_id: first["id"].as_str().unwrap_or_default().to_string(),
     }))
+}
+
+/// Whether the host would merge the request now.
+pub fn request_mergeable(remote: &Remote, number: u64) -> Result<Mergeable> {
+    use crate::git_auth::{api, api_error};
+    let Some(provider) = remote.provider else { bail!("{} isn't GitHub or GitLab", remote.host) };
+    if let Some(token) = api_token(remote) {
+        return match provider {
+            Provider::GitHub => {
+                let (status, pr, _) = api("GET", provider, &remote.host, &token, &format!("/repos/{}/pulls/{number}", remote.slug), None)?;
+                if status != 200 {
+                    bail!("GitHub: {}", api_error(status, &pr));
+                }
+                if pr["draft"].as_bool() == Some(true) {
+                    return Ok(Mergeable::Draft);
+                }
+                Ok(github_mergeable(pr["mergeable_state"].as_str().unwrap_or_default()))
+            }
+            Provider::GitLab => {
+                let path = format!("/projects/{}/merge_requests/{number}", encoded(&remote.slug));
+                let (status, mr, _) = api("GET", provider, &remote.host, &token, &path, None)?;
+                if status != 200 {
+                    bail!("GitLab: {}", api_error(status, &mr));
+                }
+                let detailed = mr["detailed_merge_status"].as_str().or_else(|| mr["merge_status"].as_str()).unwrap_or_default();
+                Ok(gitlab_mergeable(detailed))
+            }
+        };
+    }
+    let repo = repo_arg(remote);
+    let n = number.to_string();
+    match provider {
+        Provider::GitHub => {
+            let out = cli(provider, remote, &["pr", "view", &n, "--repo", &repo, "--json", "mergeStateStatus,isDraft"])?;
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            if v["isDraft"].as_bool() == Some(true) {
+                return Ok(Mergeable::Draft);
+            }
+            Ok(github_mergeable(v["mergeStateStatus"].as_str().unwrap_or_default()))
+        }
+        Provider::GitLab => {
+            let out = cli(provider, remote, &["mr", "view", &n, "-R", &repo, "--output", "json"])?;
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            Ok(gitlab_mergeable(v["detailed_merge_status"].as_str().or_else(|| v["merge_status"].as_str()).unwrap_or_default()))
+        }
+    }
+}
+
+/// Takes a request out of draft.
+pub fn mark_ready(remote: &Remote, request: &Request) -> Result<()> {
+    use crate::git_auth::{api, api_error, api_url, graphql_url};
+    let Some(provider) = remote.provider else { bail!("{} isn't GitHub or GitLab", remote.host) };
+    let n = request.number.to_string();
+    if let Some(token) = api_token(remote) {
+        match provider {
+            Provider::GitHub => {
+                // The REST API can't do this; GraphQL can.
+                let query = serde_json::json!({ "query": "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { clientMutationId } }", "variables": { "id": request.node_id } });
+                let (status, reply, _) = api_url("POST", provider, &remote.host, &token, &graphql_url(&remote.host), Some(&query))?;
+                if status != 200 || reply["errors"].is_array() {
+                    bail!("GitHub: {}", reply["errors"][0]["message"].as_str().map(str::to_owned).unwrap_or_else(|| api_error(status, &reply)));
+                }
+            }
+            Provider::GitLab => {
+                let path = format!("/projects/{}/merge_requests/{n}", encoded(&remote.slug));
+                let (_, mr, _) = api("GET", provider, &remote.host, &token, &path, None)?;
+                let title = undraft_title(mr["title"].as_str().unwrap_or_default());
+                let (status, reply, _) = api("PUT", provider, &remote.host, &token, &path, Some(&serde_json::json!({ "title": title })))?;
+                if status != 200 {
+                    bail!("GitLab: {}", api_error(status, &reply));
+                }
+            }
+        }
+        return Ok(());
+    }
+    let repo = repo_arg(remote);
+    match provider {
+        Provider::GitHub => cli(provider, remote, &["pr", "ready", &n, "--repo", &repo])?,
+        Provider::GitLab => cli(provider, remote, &["mr", "update", &n, "-R", &repo, "--ready"])?,
+    };
+    Ok(())
+}
+
+/// "Draft: Order history" → "Order history" (GitLab marks drafts in the title).
+pub fn undraft_title(title: &str) -> String {
+    let mut t = title.trim();
+    loop {
+        let before = t;
+        for prefix in ["Draft:", "[Draft]", "(Draft)", "WIP:", "[WIP]"] {
+            if t.len() >= prefix.len() && t[..prefix.len()].eq_ignore_ascii_case(prefix) {
+                t = t[prefix.len()..].trim_start();
+            }
+        }
+        if t == before {
+            return t.to_string();
+        }
+    }
+}
+
+/// Merges the request on the host (a merge commit, the branch kept).
+pub fn merge_request(remote: &Remote, number: u64, message: &str) -> Result<()> {
+    use crate::git_auth::{api, api_error};
+    let Some(provider) = remote.provider else { bail!("{} isn't GitHub or GitLab", remote.host) };
+    if let Some(token) = api_token(remote) {
+        let (status, reply, _) = match provider {
+            Provider::GitHub => api(
+                "PUT",
+                provider,
+                &remote.host,
+                &token,
+                &format!("/repos/{}/pulls/{number}/merge", remote.slug),
+                Some(&serde_json::json!({ "merge_method": "merge", "commit_title": message })),
+            )?,
+            Provider::GitLab => api(
+                "PUT",
+                provider,
+                &remote.host,
+                &token,
+                &format!("/projects/{}/merge_requests/{number}/merge", encoded(&remote.slug)),
+                Some(&serde_json::json!({ "merge_commit_message": message, "should_remove_source_branch": false })),
+            )?,
+        };
+        if status != 200 {
+            bail!("{}: {}", remote.host, api_error(status, &reply));
+        }
+        return Ok(());
+    }
+    let repo = repo_arg(remote);
+    let n = number.to_string();
+    match provider {
+        Provider::GitHub => cli(provider, remote, &["pr", "merge", &n, "--repo", &repo, "--merge"])?,
+        Provider::GitLab => cli(provider, remote, &["mr", "merge", &n, "-R", &repo, "--yes"])?,
+    };
+    Ok(())
 }
 
 /// The latest CI run on a branch.

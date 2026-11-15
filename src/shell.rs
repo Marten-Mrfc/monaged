@@ -80,6 +80,12 @@ pub(crate) fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) ->
     move |_, cx| cx.new(|_| Tip(text.into(), None)).into()
 }
 
+/// A tooltip with text worked out at runtime.
+pub(crate) fn tip_text(text: String) -> impl Fn(&mut Window, &mut gpui::App) -> AnyView {
+    let text: SharedString = text.into();
+    move |_, cx| cx.new(|_| Tip(text.clone(), None)).into()
+}
+
 pub(crate) fn tip_key(text: &'static str, key: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> AnyView {
     move |_, cx| cx.new(|_| Tip(text.into(), (!key.is_empty()).then_some(key))).into()
 }

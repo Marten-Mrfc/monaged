@@ -61,6 +61,9 @@ pub(crate) struct CommitView {
     pub error: Option<String>,
 }
 
+/// Minutes between automatic fetches when you haven't chosen (0 turns it off).
+pub(crate) const AUTOFETCH_DEFAULT: u64 = 15;
+
 impl Monaged {
     /// Where git commands for this panel run.
     fn git_dir(&self, sub_id: i64, target: GitTarget) -> Option<String> {
@@ -443,7 +446,7 @@ impl Monaged {
     }
 
     pub(crate) fn render_git_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let autofetch: u64 = self.store.setting("git:autofetch").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let autofetch: u64 = self.store.setting("git:autofetch").and_then(|v| v.parse().ok()).unwrap_or(crate::git_ui::AUTOFETCH_DEFAULT);
         let suggest = self.store.setting("git:suggest").is_none_or(|v| v == "1");
         let mut col = div().flex().flex_col().gap(px(14.));
         if let Some((name, email)) = &self.git_identity {
@@ -477,7 +480,9 @@ impl Monaged {
 
     /// Fetches each project every few minutes when Settings → Git says so.
     pub(crate) fn maybe_autofetch(&mut self, cx: &mut Context<Self>) {
-        let minutes: u64 = self.store.setting("git:autofetch").and_then(|v| v.parse().ok()).unwrap_or(0);
+        // Every 15 minutes unless you chose otherwise: merges, counts and
+        // "update from develop" depend on knowing what origin has.
+        let minutes: u64 = self.store.setting("git:autofetch").and_then(|v| v.parse().ok()).unwrap_or(AUTOFETCH_DEFAULT);
         if minutes == 0 {
             return;
         }

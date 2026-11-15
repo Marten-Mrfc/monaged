@@ -448,7 +448,7 @@ impl Monaged {
         cx.notify();
     }
 
-    fn sub_name(&self, sub_id: i64) -> String {
+    pub(crate) fn sub_name(&self, sub_id: i64) -> String {
         self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.name.clone()).unwrap_or_default()
     }
 
@@ -786,6 +786,7 @@ impl Monaged {
                         this.check_notifications();
                         this.sync_queue();
                         this.maybe_autofetch(cx);
+                        this.poll_hosts(cx);
                         this.remember_place();
                         if this.needs_clock() {
                             cx.notify();

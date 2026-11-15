@@ -464,6 +464,47 @@ fn only_the_stages_own_agents_move_a_pipeline() {
 }
 
 #[test]
+fn merge_reports_read_back() {
+    use crate::git::{MergeOutcome, parse_merge};
+    let r = parse_merge("MONAGED_CAUGHT_UP 3\nMONAGED_MERGED abc1234\nMONAGED_PUSHED\n");
+    assert_eq!((r.outcome, r.caught_up, r.pushed), (MergeOutcome::Merged("abc1234".into()), 3, Some(Ok(()))));
+    let r = parse_merge("MONAGED_MERGED abc1234\nMONAGED_PUSH_FAILED ! [remote rejected] develop (protected branch hook declined)\n");
+    assert!(matches!(r.pushed, Some(Err(ref e)) if e.contains("protected branch")));
+    let r = parse_merge("MONAGED_CONFLICT\nsrc/a.rs\nsrc/b.rs\n");
+    assert_eq!(r.outcome, MergeOutcome::Conflict(vec!["src/a.rs".into(), "src/b.rs".into()]));
+    assert_eq!(parse_merge("MONAGED_UPTODATE\n").outcome, MergeOutcome::AlreadyMerged);
+    assert!(matches!(parse_merge("MONAGED_BLOCKED develop has commits here and on origin").outcome, MergeOutcome::Blocked(w) if w.contains("origin")));
+    // For trying the script in bash: MONAGED_DUMP_SCRIPTS=<folder>.
+    if let Ok(dir) = std::env::var("MONAGED_DUMP_SCRIPTS") {
+        let script = crate::git::merge_script("REPO", "SRC", "DST", "Merge it", "MWT", true);
+        std::fs::write(std::path::Path::new(&dir).join("merge.sh"), script).unwrap();
+        std::fs::write(std::path::Path::new(&dir).join("catchup.sh"), crate::git::catch_up_script("REPO", "DST")).unwrap();
+    }
+}
+
+#[test]
+fn hosts_say_when_a_request_can_merge() {
+    use crate::hosting::{Mergeable, github_mergeable, gitlab_mergeable, undraft_title};
+    assert_eq!(github_mergeable("clean"), Mergeable::Ready);
+    assert_eq!(github_mergeable("UNSTABLE"), Mergeable::Ready);
+    assert_eq!(github_mergeable("blocked"), Mergeable::Reviews);
+    assert_eq!(github_mergeable("DIRTY"), Mergeable::Conflicts);
+    assert_eq!(github_mergeable("behind"), Mergeable::Behind);
+    assert_eq!(github_mergeable("draft"), Mergeable::Draft);
+    assert!(matches!(github_mergeable("unknown"), Mergeable::Unknown(_)));
+    assert_eq!(gitlab_mergeable("mergeable"), Mergeable::Ready);
+    assert_eq!(gitlab_mergeable("not_approved"), Mergeable::Reviews);
+    assert_eq!(gitlab_mergeable("ci_still_running"), Mergeable::Checks);
+    assert_eq!(gitlab_mergeable("need_rebase"), Mergeable::Behind);
+    assert_eq!(gitlab_mergeable("draft_status"), Mergeable::Draft);
+    assert!(matches!(gitlab_mergeable("checking"), Mergeable::Unknown(_)));
+    assert_eq!(undraft_title("Draft: Order history"), "Order history");
+    assert_eq!(undraft_title("[Draft] WIP: Order history"), "Order history");
+    assert_eq!(undraft_title("Drafting tool"), "Drafting tool");
+    assert!(Mergeable::Reviews.describe().contains("approval"));
+}
+
+#[test]
 fn coordination_paths_overlap() {
     use crate::coord::{glob_match, normalize_path, overlaps};
     assert_eq!(normalize_path(r"./src\api/"), "src/api");

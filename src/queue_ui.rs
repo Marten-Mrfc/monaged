@@ -57,6 +57,29 @@ impl Monaged {
         .detach();
     }
 
+    /// Keeps open requests and running CI current for what you're looking at
+    /// (about once a minute; the hosts are asked only while something's pending).
+    pub(crate) fn poll_hosts(&mut self, cx: &mut Context<Self>) {
+        if self.hosts_polled.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        self.hosts_polled = Some(Instant::now());
+        let Some(project_id) = self.sel_project else { return };
+        if self.remote(project_id).is_none_or(|r| r.provider.is_none()) {
+            return;
+        }
+        let subs: Vec<i64> = self.subprojects.iter().filter(|s| s.project_id == project_id).map(|s| s.id).collect();
+        let ci_running = subs.iter().any(|id| self.ci.get(id).and_then(|(_, c)| c.as_ref()).is_some_and(|c| c.state == "running"));
+        if ci_running {
+            self.refresh_ci(project_id, cx);
+        }
+        for sub_id in subs {
+            if self.merges.get(&sub_id).and_then(|m| m.request.as_ref()).is_some_and(|r| r.is_open()) {
+                self.refresh_request(sub_id, cx);
+            }
+        }
+    }
+
     fn readiness(&self, sub_id: i64) -> (Readiness, String) {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id) else { return (Readiness::Merged, String::new()) };
         let target = self.merge_target(sub_id).unwrap_or_default();
@@ -79,7 +102,11 @@ impl Monaged {
             Some(0) => (Readiness::Merged, format!("nothing new for {target}")),
             Some(n) if running || working => (Readiness::InProgress, format!("{n} commit{} · still working", if n == 1 { "" } else { "s" })),
             Some(n) => match self.sub_confidence(sub_id) {
-                Some((score, _)) if score <= 2 => (Readiness::NeedsYou, format!("{n} commit{} · confidence {score}/5", if n == 1 { "" } else { "s" })),
+                // Below the quality bar isn't ready, whatever else is.
+                Some((score, _)) if score < self.min_score() => (
+                    Readiness::NeedsYou,
+                    format!("{n} commit{} · confidence {score}/5, below the {}/5 bar", if n == 1 { "" } else { "s" }, self.min_score()),
+                ),
                 _ if ci.as_ref().is_some_and(|c| c.state == "running") => (Readiness::InProgress, "CI running".into()),
                 _ => (Readiness::Ready, format!("{n} commit{} ready for {target}", if n == 1 { "" } else { "s" })),
             },

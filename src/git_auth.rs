@@ -339,12 +339,25 @@ pub struct TokenInfo {
 
 /// Calls the host's REST API with a token. Returns (status, body, token info).
 pub fn api(method: &str, provider: Provider, host: &str, token: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value, TokenInfo)> {
-    let url = format!("{}{}", api_base(provider, host), path);
+    api_url(method, provider, host, token, &format!("{}{}", api_base(provider, host), path), body)
+}
+
+/// GitHub's GraphQL endpoint (it isn't under the REST base on Enterprise).
+pub fn graphql_url(host: &str) -> String {
+    if host == "github.com" { "https://api.github.com/graphql".into() } else { format!("https://{host}/api/graphql") }
+}
+
+/// `api` with the full URL given.
+pub fn api_url(method: &str, provider: Provider, host: &str, token: &str, url: &str, body: Option<&Value>) -> Result<(u16, Value, TokenInfo)> {
+    let url = url.to_string();
     let agent = agent();
     let auth = format!("Bearer {token}");
-    let sent = match (method, body) {
-        ("POST", Some(b)) => agent.post(&url).header("Authorization", &auth).header("Accept", accept(provider)).header("User-Agent", "Monaged").send_json(b),
-        ("DELETE", _) => agent.delete(&url).header("Authorization", &auth).header("Accept", accept(provider)).header("User-Agent", "Monaged").call(),
+    let empty = serde_json::json!({});
+    let sent = match method {
+        "POST" => agent.post(&url).header("Authorization", &auth).header("Accept", accept(provider)).header("User-Agent", "Monaged").send_json(body.unwrap_or(&empty)),
+        "PUT" => agent.put(&url).header("Authorization", &auth).header("Accept", accept(provider)).header("User-Agent", "Monaged").send_json(body.unwrap_or(&empty)),
+        "PATCH" => agent.patch(&url).header("Authorization", &auth).header("Accept", accept(provider)).header("User-Agent", "Monaged").send_json(body.unwrap_or(&empty)),
+        "DELETE" => agent.delete(&url).header("Authorization", &auth).header("Accept", accept(provider)).header("User-Agent", "Monaged").call(),
         _ => agent.get(&url).header("Authorization", &auth).header("Accept", accept(provider)).header("User-Agent", "Monaged").call(),
     };
     let mut response = sent.map_err(|e| anyhow!("couldn't reach {host}: {e}"))?;
