@@ -244,6 +244,8 @@ pub fn fix_defaults(accounts: &mut [Account]) {
         if let Some(i) = marked {
             let _ = set_default_login(&host, &accounts[i].login);
         }
+        let logins: Vec<&str> = accounts.iter().filter(|a| a.host == host).map(|a| a.login.as_str()).collect();
+        let _ = set_host_logins(&host, &logins);
     }
 }
 
@@ -322,9 +324,20 @@ fn default_login(host: &str) -> Option<String> {
 }
 
 pub fn clear_default_login(host: &str) {
-    if let Ok(e) = entry(&format!("git-default:{host}")) {
-        let _ = e.delete_credential();
+    for name in [format!("git-default:{host}"), format!("git-logins:{host}")] {
+        if let Ok(e) = entry(&name) {
+            let _ = e.delete_credential();
+        }
     }
+}
+
+/// Every login with a token for a host (the helper can't read Monaged's database).
+fn set_host_logins(host: &str, logins: &[&str]) -> Result<()> {
+    entry(&format!("git-logins:{host}"))?.set_password(&logins.join("\n")).context("couldn't save the account list")
+}
+
+fn host_logins(host: &str) -> Vec<String> {
+    entry(&format!("git-logins:{host}")).ok().and_then(|e| e.get_password().ok()).map(|t| t.lines().map(str::to_owned).collect()).unwrap_or_default()
 }
 
 /// The token for `host` (as `login`, or the default account), renewed first
@@ -334,9 +347,52 @@ pub fn token_for(host: &str, login: Option<&str>) -> Option<Stored> {
     let login = login.map(str::to_owned).or_else(|| default_login(&host))?;
     let stored = load_secret(&host, &login)?;
     if stored.expired() {
-        return renew(&host, &login, &stored).ok();
+        // Refresh tokens are used once: several git processes at once must
+        // not all renew. Whoever gets the lock renews; the rest re-read.
+        let _lock = RenewLock::take();
+        let stored = load_secret(&host, &login)?;
+        if !stored.expired() {
+            return Some(stored);
+        }
+        let renewed = renew(&host, &login, &stored).ok()?;
+        crate::env::add_git_token_mask(crate::env::Secret::new(renewed.token.clone()), format!("git token {host}/{login}"));
+        return Some(renewed);
     }
     Some(stored)
+}
+
+/// A lock file next to Monaged's database, shared by every Monaged process.
+struct RenewLock(Option<std::path::PathBuf>);
+
+impl RenewLock {
+    fn take() -> RenewLock {
+        let Some(path) = std::env::var("APPDATA").ok().map(|a| std::path::PathBuf::from(a).join("Monaged").join("git-renew.lock")) else { return RenewLock(None) };
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+        let started = std::time::Instant::now();
+        loop {
+            if std::fs::OpenOptions::new().write(true).create_new(true).open(&path).is_ok() {
+                return RenewLock(Some(path));
+            }
+            // A lock older than half a minute belongs to a process that died.
+            let stale = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(30));
+            if stale {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                return RenewLock(None);
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+}
+
+impl Drop for RenewLock {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Swaps a refresh token for a new access token and saves both.
@@ -375,7 +431,8 @@ fn post_form(url: &str, form: &[(&str, &str)]) -> Result<Value> {
         .map_err(|e| anyhow!("couldn't reach {url}: {e}"))?;
     let status = response.status().as_u16();
     let text = response.body_mut().read_to_string().unwrap_or_default();
-    let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "error": "unreadable", "error_description": text.chars().take(200).collect::<String>() }));
+    // A reply that isn't JSON is never shown: it could carry a token.
+    let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "error": "unreadable", "error_description": format!("{url} sent a reply Monaged can't read (HTTP {status})") }));
     if status >= 500 {
         bail!("{url} answered {status}");
     }
@@ -585,7 +642,7 @@ pub fn poll_device(code: &DeviceCode) -> Result<Poll> {
     })
 }
 
-/// Turns approved tokens into a saved account.
+/// Turns approved tokens into an account (the caller saves it with `save_secret`).
 pub fn finish_device(code: &DeviceCode, tokens: Tokens) -> Result<(Account, Stored)> {
     let profile = whoami(code.provider, &code.host, &tokens.access)?;
     let scopes = if profile.scopes.is_empty() {
@@ -612,7 +669,6 @@ pub fn finish_device(code: &DeviceCode, tokens: Tokens) -> Result<(Account, Stor
         added: now(),
         default: false,
     };
-    save_secret(&account.host, &account.login, &stored)?;
     Ok((account, stored))
 }
 
@@ -777,12 +833,32 @@ pub fn configure_hosts(distro: &str, hosts: &[String]) -> Result<()> {
     );
     for host in hosts {
         let key = quote(&format!("credential.https://{host}.helper"));
-        // An empty value first: only Monaged answers for this host.
-        script.push_str(&format!("git config --global --unset-all {key} 2>/dev/null; git config --global --add {key} '' && git config --global --add {key} {}\n", quote(&helper)));
+        // Git runs every matching helper in file order, and an empty value only
+        // clears the ones before it. So the host's section is written afresh at
+        // the end of the file, after any general helper (Git Credential Manager),
+        // with an empty value first: then only Monaged answers for this host.
+        script.push_str(&format!(
+            "git config --global --unset-all {key} 2>/dev/null\n\
+             [ -z \"$(git config --global --get-regexp {section} 2>/dev/null)\" ] && git config --global --remove-section {name} 2>/dev/null\n\
+             git config --global --add {key} '' && git config --global --add {key} {}\n",
+            quote(&helper),
+            section = quote(&format!("^credential\\.https://{}\\.", host.replace('.', "\\."))),
+            name = quote(&format!("credential.https://{host}")),
+        ));
     }
     script.push_str("true");
-    run(distro, &script)?;
-    Ok(())
+    // Two writers at once (start-up repair and a sign-in) trip git's config lock: try again.
+    let mut last = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(700));
+        }
+        match run(distro, &script) {
+            Ok(_) => return Ok(()),
+            Err(err) => last = Some(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("couldn't write git's config")))
 }
 
 /// How git in WSL signs in right now.
@@ -853,6 +929,10 @@ pub fn run_helper(operation: &str) -> Result<()> {
         "erase" => {
             // The host turned the token down: renew it next time if it can be,
             // and let Settings say so. The token itself stays until you sign out.
+            // Git sends back what it was given (`oauth2` for GitLab), so the
+            // account is the one whose token matches.
+            let password = fields.get("password").copied().unwrap_or_default();
+            let login = host_logins(&host).into_iter().find(|l| !password.is_empty() && load_secret(&host, l).is_some_and(|s| s.token == password)).unwrap_or(login);
             if let Some(mut stored) = load_secret(&host, &login)
                 && stored.refresh.is_some()
             {
@@ -978,8 +1058,9 @@ pub fn find_gcm() -> Option<String> {
 }
 
 /// Makes Git Credential Manager git's general helper in WSL (or removes it).
-/// Hosts with a Monaged account keep Monaged.
-pub fn configure_gcm(distro: &str, on: bool) -> Result<()> {
+/// Hosts with a Monaged account keep Monaged (their sections are rewritten
+/// after the general helper, see `configure_hosts`).
+pub fn configure_gcm(distro: &str, on: bool, hosts: &[String]) -> Result<()> {
     if on {
         let path = find_gcm().ok_or_else(|| anyhow!("Git Credential Manager isn't installed on Windows. Install Git for Windows (it includes it), or sign in with a Monaged account instead."))?;
         run(
@@ -990,6 +1071,7 @@ pub fn configure_gcm(distro: &str, on: bool) -> Result<()> {
                 quote(&format!("!{}", quote(&path)))
             ),
         )?;
+        configure_hosts(distro, hosts)?;
     } else {
         run(distro, "if git config --global --get-all credential.helper | grep -q git-credential-manager; then git config --global --unset-all credential.helper; fi; true")?;
     }

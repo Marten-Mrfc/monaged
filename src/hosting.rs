@@ -31,6 +31,9 @@ pub struct Remote {
     pub host: String,
     /// "owner/repo" or "group/subgroup/repo".
     pub slug: String,
+    /// The account this project signs in as, when it isn't the host's default
+    /// (Settings → Git accounts; the Git tab switches it).
+    pub login: Option<String>,
 }
 
 /// Understands `git@host:owner/repo.git`, `https://host/owner/repo(.git)` and
@@ -58,7 +61,7 @@ pub fn parse_remote(url: &str) -> Option<Remote> {
     } else {
         None
     };
-    Some(Remote { provider, host, slug })
+    Some(Remote { provider, host, slug, login: None })
 }
 
 fn cli(provider: Provider, remote: &Remote, args: &[&str]) -> Result<String> {
@@ -71,7 +74,7 @@ fn cli(provider: Provider, remote: &Remote, args: &[&str]) -> Result<String> {
     if provider == Provider::GitLab && remote.host != "gitlab.com" {
         command.env("GITLAB_HOST", format!("https://{}", remote.host));
     }
-    if let Some(stored) = crate::git_auth::token_for(&remote.host, None) {
+    if let Some(stored) = crate::git_auth::token_for(&remote.host, remote.login.as_deref()) {
         match provider {
             Provider::GitHub if remote.host == "github.com" => drop(command.env("GH_TOKEN", &stored.token)),
             Provider::GitHub => drop(command.env("GH_ENTERPRISE_TOKEN", &stored.token).env("GH_HOST", &remote.host)),
@@ -110,7 +113,7 @@ pub struct Request {
 /// The signed-in account's token for the remote's host, if there is one.
 fn api_token(remote: &Remote) -> Option<String> {
     remote.provider?;
-    crate::git_auth::token_for(&remote.host, None).map(|s| s.token)
+    crate::git_auth::token_for(&remote.host, remote.login.as_deref()).map(|s| s.token)
 }
 
 fn encoded(text: &str) -> String {

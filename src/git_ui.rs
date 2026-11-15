@@ -146,6 +146,10 @@ impl Monaged {
                     panel.stashes = stashes;
                     panel.remote = remote;
                     panel.graph = graph;
+                    // Amending only makes sense while the last commit isn't pushed.
+                    if !matches!(last, Some((_, _, false))) {
+                        panel.amend = false;
+                    }
                     panel.last = last;
                     panel.login = login;
                 }
@@ -235,8 +239,10 @@ impl Monaged {
         let Some(dir) = self.git_dir(sub_id, panel.target) else { return };
         let input = panel.message.clone();
         let subject = panel.last.as_ref().map(|(_, s, _)| s.clone()).unwrap_or_default();
-        // The message comes back so you can commit again with it.
-        input.update(cx, |input, cx| input.set_text(subject, cx));
+        // The message comes back so you can commit again with it (unless you're typing one).
+        if input.read(cx).text().trim().is_empty() {
+            input.update(cx, |input, cx| input.set_text(subject, cx));
+        }
         self.git_job(sub_id, "Undoing the commit…", move |distro| git_ops::undo_commit(&distro, &dir).map(|s| format!("Took back \"{s}\"; its changes are uncommitted again.")), cx);
     }
 

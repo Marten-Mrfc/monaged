@@ -744,6 +744,7 @@ impl Monaged {
                         this.check_notifications();
                         this.sync_queue();
                         this.maybe_autofetch(cx);
+                        this.maybe_refresh_git_masks(cx);
                         this.remember_place();
                         if this.needs_clock() {
                             cx.notify();

@@ -338,6 +338,14 @@ pub(crate) fn set_git_token_masks(list: Vec<(Secret, String)>) {
     rebuild_masks();
 }
 
+/// One more git token (a renewed one), until the next full refresh.
+pub(crate) fn add_git_token_mask(value: Secret, name: String) {
+    if let Ok(mut sources) = MASK_SOURCES.write() {
+        sources.1.push((value, name));
+    }
+    rebuild_masks();
+}
+
 fn rebuild_masks() {
     let list: Vec<(Secret, String)> = MASK_SOURCES.read().map(|s| s.0.iter().chain(s.1.iter()).cloned().collect()).unwrap_or_default();
     let mut list: Vec<(Secret, String)> = list.into_iter().filter(|(v, _)| v.expose().len() >= MIN_MASKED).collect();

@@ -41,6 +41,10 @@ pub(crate) struct GitAuthUi {
     pub ssh_results: HashMap<String, (bool, String)>,
     /// Bumped to stop a browser sign-in that's waiting.
     pub device_gen: u64,
+    /// Projects that sign in as an account other than the host's default.
+    pub project_logins: HashMap<i64, String>,
+    /// When the token masks were last rebuilt (renewals happen in other processes too).
+    pub masks_at: Option<std::time::Instant>,
 }
 
 /// The open sign-in form.
@@ -95,6 +99,7 @@ impl Monaged {
                 .await;
             view.update(cx, |this, cx| {
                 let (helper, gcm, keys, rejected) = result;
+                this.git_auth.masks_at = Some(std::time::Instant::now());
                 this.creds_ok = Some(helper.as_ref().is_ok_and(|h| !h.hosts.is_empty() || h.uses_gcm()));
                 this.git_auth.helper = Some(helper);
                 this.git_auth.gcm_path = Some(gcm);
@@ -103,6 +108,25 @@ impl Monaged {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// Rebuilds the token masks every ten minutes: GitLab sign-ins renew
+    /// themselves, also inside git's helper process, and the new token must
+    /// be masked too.
+    pub(crate) fn maybe_refresh_git_masks(&mut self, cx: &mut Context<Self>) {
+        if self.git_auth.accounts.is_empty() || self.git_auth.masks_at.is_none_or(|at| at.elapsed() < Duration::from_secs(600)) {
+            return;
+        }
+        self.git_auth.masks_at = Some(std::time::Instant::now());
+        let accounts = self.git_auth.accounts.clone();
+        cx.background_spawn(async move {
+            let masks = accounts
+                .iter()
+                .filter_map(|a| git_auth::load_secret(&a.host, &a.login).map(|s| (crate::env::Secret::new(s.token.clone()), format!("git token {}", a.key()))))
+                .collect();
+            crate::env::set_git_token_masks(masks);
         })
         .detach();
     }
@@ -354,7 +378,12 @@ impl Monaged {
             let code = match started {
                 Ok(code) => code,
                 Err(err) => {
-                    view.update(cx, |this, cx| this.set_sign_in_error(Some(format!("{err:#}")), cx)).ok();
+                    view.update(cx, |this, cx| {
+                        if this.git_auth.device_gen == generation {
+                            this.set_sign_in_error(Some(format!("{err:#}")), cx)
+                        }
+                    })
+                    .ok();
                     return;
                 }
             };
@@ -387,7 +416,7 @@ impl Monaged {
                 let polled = cx
                     .background_spawn(async move {
                         match git_auth::poll_device(&c)? {
-                            Poll::Done(tokens) => git_auth::finish_device(&c, tokens).map(|(account, _)| Some(Ok(account))),
+                            Poll::Done(tokens) => git_auth::finish_device(&c, tokens).map(|found| Some(Ok(found))),
                             Poll::SlowDown => Ok(Some(Err(()))),
                             Poll::Waiting => Ok(None),
                         }
@@ -396,10 +425,15 @@ impl Monaged {
                 match polled {
                     Ok(None) => continue,
                     Ok(Some(Err(()))) => interval += 5,
-                    Ok(Some(Ok(account))) => {
+                    Ok(Some(Ok((account, stored)))) => {
                         view.update(cx, |this, cx| {
-                            if this.git_auth.device_gen == generation {
-                                this.add_git_account(account, cx);
+                            // Cancelled at the last moment: nothing is saved.
+                            if this.git_auth.device_gen != generation {
+                                return;
+                            }
+                            match git_auth::save_secret(&account.host, &account.login, &stored) {
+                                Ok(()) => this.add_git_account(account, cx),
+                                Err(err) => this.set_sign_in_error(Some(format!("{err:#}")), cx),
                             }
                         })
                         .ok();
@@ -534,10 +568,11 @@ impl Monaged {
     // ---- Git Credential Manager ------------------------------------------------------------------
 
     pub(crate) fn set_gcm(&mut self, on: bool, cx: &mut Context<Self>) {
+        let hosts = git_auth::hosts(&self.git_auth.accounts);
         self.auth_job(
             if on { "Setting up Git Credential Manager…" } else { "Turning Git Credential Manager off…" },
             move |distro| {
-                git_auth::configure_gcm(&distro, on)?;
+                git_auth::configure_gcm(&distro, on, &hosts)?;
                 Ok(if on {
                     "Git in WSL uses Git Credential Manager for hosts without a Monaged account.".into()
                 } else {
@@ -988,6 +1023,10 @@ impl Monaged {
         if let Some(panel) = self.git_panels.get_mut(&sub_id) {
             panel.login = Some(next.clone());
         }
+        match &next {
+            Some(login) => drop(self.git_auth.project_logins.insert(project_id, login.clone())),
+            None => drop(self.git_auth.project_logins.remove(&project_id)),
+        }
         let label = next.clone().unwrap_or_else(|| "the default account".into());
         let distro = self.config.distro.clone();
         cx.notify();
@@ -1006,12 +1045,9 @@ impl Monaged {
         self.git_job(sub_id, "Testing the connection…", move |distro| git_auth::test_remote(&distro, &repo), cx);
     }
 
-    pub(crate) fn switch_origin(&mut self, sub_id: i64, project_id: i64, repo: String, url: String, cx: &mut Context<Self>) {
-        let u = url.clone();
+    pub(crate) fn switch_origin(&mut self, sub_id: i64, repo: String, url: String, cx: &mut Context<Self>) {
+        let u = url;
         self.git_job(sub_id, "Changing origin…", move |distro| git_auth::set_origin(&distro, &repo, &u).map(|_| format!("origin is now {u}")), cx);
-        if let Some(info) = self.branch_info.get_mut(&project_id) {
-            info.state.remote_url = Some(url);
-        }
     }
 
     /// The Origin section's first rows: the address, who it signs in as, a
@@ -1025,6 +1061,9 @@ impl Monaged {
         let current = panel.login.clone().flatten();
         let (line, needs_sign_in) = if !https {
             ("SSH key in WSL".to_string(), false)
+        } else if let Some(user) = url.split_once("://").and_then(|(_, rest)| rest.split('/').next()).and_then(|auth| auth.rsplit_once('@')).map(|(user, _)| user.to_string()) {
+            // Git uses a username in the address before anything else.
+            (format!("{user} (named in origin's address; use the account switch after removing it)"), false)
         } else if let Some(login) = &current {
             (format!("{login} (chosen for this project)"), false)
         } else if let Some(default) = accounts.iter().find(|a| a.default) {
@@ -1067,7 +1106,7 @@ impl Monaged {
                         d.child(
                             ui::button("origin-switch", Kind::Ghost, None, if https { "Use SSH instead" } else { "Use HTTPS instead" })
                                 .tooltip(crate::session_ui::tip_static(format!("origin becomes {to}")))
-                                .on_click(cx.listener(move |this, _, _, cx| this.switch_origin(sub_id, project_id, r2.clone(), to.clone(), cx))),
+                                .on_click(cx.listener(move |this, _, _, cx| this.switch_origin(sub_id, r2.clone(), to.clone(), cx))),
                         )
                     }),
             )

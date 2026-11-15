@@ -81,9 +81,11 @@ pub fn commit(distro: &str, worktree: &str, message: &str, paths: &[String]) -> 
     } else {
         format!("git add -A -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" "))
     };
+    // With paths, only those go in, even if other files were staged before.
+    let only = if paths.is_empty() { String::new() } else { format!(" -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ")) };
     let out = run(
         distro,
-        &format!("cd {} || exit 1\n{add} && git commit -q -m {} && git rev-parse --short HEAD", quote(worktree), quote(message)),
+        &format!("cd {} || exit 1\n{add} && git commit -q -m {}{only} && git rev-parse --short HEAD", quote(worktree), quote(message)),
     )?;
     Ok(out.lines().last().unwrap_or_default().trim().to_string())
 }
@@ -109,12 +111,13 @@ pub fn last_commit(distro: &str, worktree: &str) -> Result<Option<(String, Strin
 pub fn amend(distro: &str, worktree: &str, message: &str, paths: &[String]) -> Result<String> {
     let add = if paths.is_empty() { "git add -A".to_string() } else { format!("git add -A -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ")) };
     let msg = if message.trim().is_empty() { "--no-edit".to_string() } else { format!("-m {}", quote(message)) };
+    let only = if paths.is_empty() { String::new() } else { format!(" -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ")) };
     let out = run(
         distro,
         &format!(
             "cd {} || exit 1\n\
              if [ -n \"$(git branch -r --contains HEAD 2>/dev/null | head -n 1)\" ]; then echo 'The last commit is already pushed; make a new commit instead.' >&2; exit 1; fi\n\
-             {add} && git commit -q --amend {msg} && git rev-parse --short HEAD",
+             {add} && git commit -q --amend {msg}{only} && git rev-parse --short HEAD",
             quote(worktree)
         ),
     )?;
@@ -154,10 +157,12 @@ pub fn pull_merge(distro: &str, repo: &str, branch: &str) -> Result<String> {
            git -C \"$wt\" checkout -q \"$b\" || exit 1\n\
            release=1\n\
          fi\n\
-         if git -C \"$wt\" merge --no-edit -q \"origin/$b\" >/dev/null 2>&1; then sha=$(git -C \"$wt\" rev-parse --short HEAD); ok=1\n\
+         if out=$(git -C \"$wt\" merge --no-edit -q \"origin/$b\" 2>&1); then sha=$(git -C \"$wt\" rev-parse --short HEAD); ok=1\n\
          else files=$(git -C \"$wt\" diff --name-only --diff-filter=U | tr '\\n' ' '); git -C \"$wt\" merge --abort >/dev/null 2>&1; ok=0; fi\n\
          [ \"$release\" = 1 ] && git -C \"$wt\" checkout -q --detach\n\
-         if [ \"$ok\" = 1 ]; then echo \"$sha\"; else echo \"$b and origin/$b conflict in: $files\" >&2; exit 1; fi",
+         if [ \"$ok\" = 1 ]; then echo \"$sha\"\n\
+         elif [ -n \"$files\" ]; then echo \"$b and origin/$b conflict in: $files\" >&2; exit 1\n\
+         else echo \"$out\" | grep -v '^[[:space:]]*$' | tail -n 1 >&2; exit 1; fi",
         repo = quote(repo),
         b = quote(branch),
         mwt = quote(&merge_worktree),
