@@ -120,6 +120,22 @@ Right-click a project → **Project settings**:
 
 Change any of them in Settings → Keyboard.
 
+## Sounds
+
+Monaged plays a few short sounds, only for moments you might miss because you're looking elsewhere:
+
+| Sound | When |
+|---|---|
+| **Needs you**: two quick, bright notes going up | An agent asks permission or a question, or a plan or decision waits for you |
+| **An agent is done**: a soft rising pair | An agent finished its turn while you were looking at something else |
+| **A feature is complete**: a rising run of four notes | A pipeline merged its feature together, or setting up is done |
+| **Finished**: a short, quiet lift | Something you started that takes a while worked: an install, a clone, a merge, a push, a sign-in, an update |
+| **Something went wrong**: two low notes going down | A session failed, the connection to Claude dropped, or something you started failed |
+
+Nothing plays for messages, tool calls, typing or clicks, or for the agent you're looking at (unless you want that too). Several things at once play as one sound, and the most important one wins. Sounds stay off while you present, while a full-screen game or video runs, and while you're away from the PC. While they're on, Monaged's Windows notifications come without Windows' own ding, so nothing plays twice.
+
+Settings → Sounds turns them off or each one separately, sets the volume (quiet, normal, loud) and plays each one. **Ctrl K → Mute sounds** silences them in one go.
+
 ## Appearance
 
 Settings → Appearance: **Carbon** (near-black, the default), **Graphite**, **Clay**, **Paper** (light), or follow Windows. Drag the sidebar, inspector and pane edges (double-click resets), save layouts per project, and switch to compact density in Settings → General.

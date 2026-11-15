@@ -51,6 +51,7 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/health.rs` | The health check |
 | `src/settings_ui.rs` | Settings: agents, message box, notifications, general |
 | `src/install.rs`, `src/update.rs` | The per-user installer and its Settings → Apps entry; updates from GitHub releases, verified by checksum |
+| `src/sound.rs` | Sounds: five synthesized cues (soft bell-like notes, rising for good news, falling for trouble), played from memory with PlaySound; when they may play (settings, Windows' busy and away states, bursts as one, the important one wins) |
 | `src/native.rs` | Windows' own APIs where Monaged used to start helper programs: the registry, Start menu shortcuts (IShellLink), running itself as administrator (ShellExecuteEx "runas"), moving the running exe out of its folder. Monaged starts no script hosts or shells |
 | `src/uninstall.rs` | The uninstaller: what Monaged put on the PC (database, registry, Credential Manager, folders, each distro it used), a choice per part, removing them in a safe order with progress, and `--uninstall --quiet` |
 | `src/add_project.rs` | Adding a project: live checks, one-click fixes, step-by-step progress, cancelling a clone |

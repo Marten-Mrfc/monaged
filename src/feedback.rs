@@ -782,6 +782,20 @@ impl Monaged {
         let inbox = self.inbox();
         let keys: std::collections::HashSet<String> =
             inbox.iter().map(|i| format!("{}|{}|{:?}", i.title, i.sub_id, i.agent_id)).collect();
+        // A sound for what's new since the last look (not for what was already
+        // waiting when Monaged started), unless it's right in front of you.
+        if self.inbox_primed {
+            let cue = inbox
+                .iter()
+                .filter(|item| !self.seen_inbox.contains(&format!("{}|{}|{:?}", item.title, item.sub_id, item.agent_id)))
+                .filter(|item| !self.inbox_item_in_view(item))
+                .filter_map(|item| inbox_cue(&item.title))
+                .max_by_key(|cue| u8::from(*cue == crate::sound::Cue::NeedsYou));
+            if let Some(cue) = cue {
+                self.chime(cue);
+            }
+        }
+        self.inbox_primed = true;
         let os = self.store.setting("notify:os").is_none_or(|v| v == "1");
         let flash = self.store.setting("notify:flash").is_none_or(|v| v == "1");
         if !self.window_active {
@@ -833,6 +847,37 @@ impl Monaged {
         self.saved_queue = current;
     }
 
+    /// Plays a sound (see `sound`), if the settings and the moment allow it.
+    pub(crate) fn chime(&mut self, cue: crate::sound::Cue) {
+        self.sound.play(cue, self.window_active);
+    }
+
+    /// You're looking at this agent right now: Monaged is the active window,
+    /// nothing covers the agents, and it's on screen.
+    pub(crate) fn watching(&self, agent_id: i64) -> bool {
+        self.window_active
+            && self.form.is_none()
+            && self.agent(agent_id).is_some_and(|a| self.sel_sub == Some(a.record.subproject_id))
+            && (self.sel_agent == Some(agent_id) || self.pinned.contains(&agent_id))
+    }
+
+    /// A "Needs you" item you can already see (unless you asked for sounds anyway).
+    fn inbox_item_in_view(&self, item: &crate::shell::Inbox) -> bool {
+        if self.sound.settings.while_watching {
+            return false;
+        }
+        match item.agent_id {
+            Some(agent_id) => self.watching(agent_id),
+            None => {
+                self.window_active
+                    && self.form.is_none()
+                    && self.sel_sub == Some(item.sub_id)
+                    && self.inspector_open
+                    && self.inspector_tab == crate::shell::InspectorTab::Pipeline
+            }
+        }
+    }
+
     /// An agent finished while you're elsewhere (Settings → Notifications).
     pub(crate) fn notify_finished(&self, agent_id: i64) {
         if self.window_active || self.store.setting("notify:finished").is_some_and(|v| v == "0") || self.store.setting("notify:os").is_some_and(|v| v == "0") {
@@ -853,5 +898,16 @@ impl Monaged {
         self.inspector_open = true;
         self.inspector_tab = tab;
         cx.notify();
+    }
+}
+
+/// The sound for a "Needs you" item: asking, waiting for a decision, or a
+/// failed session. A budget pause is expected, so it stays quiet.
+fn inbox_cue(title: &str) -> Option<crate::sound::Cue> {
+    use crate::sound::Cue;
+    match title {
+        "Session failed" => Some(Cue::Error),
+        "Paused by the budget" => None,
+        _ => Some(Cue::NeedsYou),
     }
 }

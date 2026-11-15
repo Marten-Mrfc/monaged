@@ -6,7 +6,7 @@
 //! - Notifications;
 //! - General: where Monaged opens, and its data folder.
 
-use gpui::{AnyElement, Context, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, SharedString, div, prelude::*, px, rgb};
 use serde_json::{Value, json};
 
 use crate::agent::Tone;
@@ -206,6 +206,74 @@ impl Monaged {
             .child(toggle("notify-flash", "notify:flash", "Flash the taskbar button until you come back", flag("notify:flash"), cx))
             .child(ui::meta("They come from Monaged's tray icon; clicking one opens the agent. Windows' Do not disturb holds them back."))
             .into_any_element()
+    }
+
+    /// Settings → Sounds: on or off, how loud, each cue with a preview.
+    pub(crate) fn render_sound_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::sound::{Cue, Volume};
+        let settings = self.sound.settings.clone();
+        let volume = div().flex().items_center().gap(px(6.)).child(div().w(px(70.)).child(ui::meta("Volume"))).children(Volume::ALL.into_iter().map(|v| {
+            ui::choice(SharedString::from(format!("sound-volume-{}", v.key())), v.title(), settings.volume == v).on_click(cx.listener(move |this, _, _, cx| {
+                this.change_sounds(|s| s.volume = v, cx);
+                this.sound.preview(Cue::Done);
+            }))
+        }));
+        let cues = div().flex().flex_col().gap(px(10.)).children(Cue::ALL.into_iter().map(|cue| {
+            let on = !settings.off.contains(&cue);
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(ui::switch(SharedString::from(format!("sound-cue-{}", cue.key())), cue.title(), on).on_click(cx.listener(move |this, _, _, cx| {
+                            this.change_sounds(
+                                |s| {
+                                    if !s.off.remove(&cue) {
+                                        s.off.insert(cue);
+                                    }
+                                },
+                                cx,
+                            )
+                        })))
+                        .child(div().pl(px(42.)).child(ui::meta(cue.when()))),
+                )
+                .child(
+                    ui::button(SharedString::from(format!("sound-play-{}", cue.key())), Kind::Ghost, Some(Icon::Play), "Play")
+                        .tooltip(crate::shell::tip("Hear it"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sound.preview(cue);
+                            cx.notify();
+                        })),
+                )
+        }));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(ui::switch("sound-on", "Play sounds", settings.on).on_click(cx.listener(|this, _, _, cx| this.change_sounds(|s| s.on = !s.on, cx))))
+            .when(settings.on, |d| {
+                d.child(volume)
+                    .child(ui::switch("sound-watching", "Also for the agent you're looking at", settings.while_watching).on_click(cx.listener(|this, _, _, cx| this.change_sounds(|s| s.while_watching = !s.while_watching, cx))))
+                    .child(cues)
+            })
+            .child(ui::meta(
+                "Only for moments you might miss: nothing for messages, tool calls or clicks. Several at once play as one. Silent while you present, play a full-screen game or video, or are away; and Windows' own notification sound stays off while these are on, so nothing plays twice.",
+            ))
+            .into_any_element()
+    }
+
+    /// Changes the sound settings, saves them, and applies them.
+    pub(crate) fn change_sounds(&mut self, change: impl FnOnce(&mut crate::sound::Settings), cx: &mut Context<Self>) {
+        change(&mut self.sound.settings);
+        self.sound.settings.save(&self.store);
+        self.sound.apply();
+        cx.notify();
     }
 
     pub(crate) fn render_general_settings(&self, cx: &mut Context<Self>) -> AnyElement {

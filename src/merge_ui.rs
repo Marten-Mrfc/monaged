@@ -338,6 +338,12 @@ impl Monaged {
                     Ok(MergeOutcome::Blocked(why)) => (Tone::Error, format!("Didn't merge: {why}"), None, Vec::new()),
                     Err(err) => (Tone::Error, format!("Merge failed: {err:#}"), None, Vec::new()),
                 };
+                // A merge that did something rises; one that couldn't, falls.
+                match (&merged_sha, tone) {
+                    (Some(sha), _) if !sha.is_empty() => this.chime(crate::sound::Cue::Success),
+                    (None, Tone::Warn | Tone::Error) => this.chime(crate::sound::Cue::Error),
+                    _ => {}
+                }
                 match sub_id {
                     Some(sub_id) => {
                         if let Some(sha) = &merged_sha {
@@ -442,6 +448,7 @@ impl Monaged {
                     Ok(None) => drop(this.store.log_event(sub_id, None, "push", &format!("Pushed {} to origin", sub.branch))),
                     Err(err) => drop(this.store.log_event(sub_id, None, "failed", &format!("Push failed: {err:#}"))),
                 }
+                this.chime(if result.is_ok() { crate::sound::Cue::Success } else { crate::sound::Cue::Error });
                 let state = this.merge_state(sub_id);
                 state.busy = false;
                 state.message = Some(match result {

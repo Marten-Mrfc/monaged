@@ -86,6 +86,8 @@ icons! {
     ArrowUp => "arrow-up",
     ChevronLeft => "chevron-left",
     Undo => "undo",
+    Sound => "sound",
+    SoundOff => "sound-off",
 }
 
 /// Serves the embedded icons to GPUI.

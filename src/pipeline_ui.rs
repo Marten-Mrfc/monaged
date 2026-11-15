@@ -351,6 +351,7 @@ impl Monaged {
                 }
                 self.save_pipeline(sub_id);
                 self.record_pipeline_run(sub_id);
+                self.chime(crate::sound::Cue::Complete);
                 if let Some(project_id) = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.project_id) {
                     self.refresh_branches(project_id, cx);
                 }

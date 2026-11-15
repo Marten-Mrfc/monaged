@@ -315,9 +315,13 @@ impl Monaged {
                 match result {
                     Ok(()) => {
                         this.update.ready = true;
+                        this.chime(crate::sound::Cue::Success);
                         this.settle("update", Tone::Info, format!("Monaged {} is installed. Restart to use it.", release.version), cx);
                     }
-                    Err(err) => this.settle("update", Tone::Error, format!("The update failed: {err:#}"), cx),
+                    Err(err) => {
+                        this.chime(crate::sound::Cue::Error);
+                        this.settle("update", Tone::Error, format!("The update failed: {err:#}"), cx);
+                    }
                 }
                 cx.notify();
             })

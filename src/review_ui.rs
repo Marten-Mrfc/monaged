@@ -13,7 +13,7 @@ use crate::markdown::{self, Block, Inline, Style};
 use crate::review::{self, TurnInfo};
 use crate::{Form, Monaged, dots, secrets, theme, tone_color, ui};
 
-const SETTINGS_SECTIONS: [(&str, Icon); 13] = [
+const SETTINGS_SECTIONS: [(&str, Icon); 14] = [
     ("Appearance", Icon::Eye),
     ("Agents", Icon::Agent),
     ("Message box", Icon::Send),
@@ -25,6 +25,7 @@ const SETTINGS_SECTIONS: [(&str, Icon); 13] = [
     ("Git", Icon::Branch),
     ("Git accounts", Icon::User),
     ("Notifications", Icon::Alert),
+    ("Sounds", Icon::Sound),
     ("General", Icon::Sliders),
     ("Updates", Icon::ArrowDown),
 ];
@@ -83,6 +84,14 @@ impl Monaged {
         self.take_checkpoint(agent_id, cx);
         self.flush_queued_prompt(agent_id);
         self.notify_finished(agent_id);
+        // A free agent you weren't watching is done, and doesn't need you (that
+        // sound comes from the inbox). Pipeline agents' milestones have their own.
+        if self.agent(agent_id).is_some_and(|a| a.role() == crate::pipeline::Role::Free)
+            && (self.sound.settings.while_watching || !self.watching(agent_id))
+            && !self.inbox().iter().any(|i| i.agent_id == Some(agent_id))
+        {
+            self.chime(crate::sound::Cue::Done);
+        }
         // A free agent you aren't looking at finished: say so, with a way there.
         if let Some(agent) = self.agent(agent_id)
             && agent.role() == crate::pipeline::Role::Free
@@ -570,6 +579,7 @@ impl Monaged {
                             .child(self.render_git_accounts(cx)),
                         ))
                         .child(column(section("Notifications", None).child(self.render_notification_settings(cx))))
+                        .child(column(section("Sounds", Some("A few short sounds for moments you might miss because you're looking elsewhere.")).child(self.render_sound_settings(cx))))
                         .child(column(section("General", Some("Density, where Monaged opens, and where it keeps its data.")).child(self.render_general_settings(cx))))
                         .child(column(section("Updates", None).child(self.render_update_settings(cx)))),
             )

@@ -47,6 +47,7 @@ Monaged gives each **project** its **subprojects**, each subproject its **agents
 - **Budget-aware.** Your weekly usage, Monaged's share of it and a cap you choose. Cost estimates on plans; automatic work pauses before your limit.
 - **Undo anything.** Every turn is checkpointed: roll back to before any message, undo the rollback, or replay an agent's work turn by turn.
 - **Secrets stay secret.** Environment variables encrypted with DPAPI; agents see names, never values; values are masked everywhere and block pushes.
+- **Sounds that mean something.** A few short sounds for when an agent needs you or is done while you look elsewhere, and silence the rest of the time.
 - **Native and keyboard-first.** Built on GPUI (Zed's UI framework). Ctrl K for everything, shortcuts you can change, four themes, and Zed one click away.
 - **Set up in minutes.** A setup guide installs WSL, Ubuntu and the Claude agent and signs you in, asking before each step, all inside Monaged with real progress: no console windows, no commands to copy.
 

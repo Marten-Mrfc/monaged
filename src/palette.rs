@@ -62,6 +62,7 @@ pub(crate) enum Command {
     SaveLayout(i64),
     DeleteLayout(i64, String),
     Zen,
+    ToggleSounds,
     Density(bool),
     Health,
     SubChanges(i64),
@@ -215,6 +216,16 @@ impl Monaged {
         out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: crate::keys::hint("settings"), command: Command::Settings });
         out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: crate::keys::hint("shortcuts"), command: Command::Shortcuts });
         out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: crate::keys::hint("zen"), command: Command::Zen });
+        let sounds_on = self.sound.settings.on;
+        out.push(Entry {
+            group: "App",
+            glyph: if sounds_on { Icon::SoundOff } else { Icon::Sound },
+            title: if sounds_on { "Mute sounds".into() } else { "Turn sounds on".into() },
+            detail: "Monaged's sounds for agents that need you or are done (Settings → Sounds)".into(),
+            state: None,
+            hint: None,
+            command: Command::ToggleSounds,
+        });
         let compact = ui::compact();
         out.push(Entry { group: "App", glyph: Icon::Lines, title: if compact { "Comfortable density".into() } else { "Compact density".into() }, detail: String::new(), state: None, hint: None, command: Command::Density(!compact) });
         out.push(Entry { group: "App", glyph: Icon::ArrowDown, title: "Check for updates".into(), detail: format!("Monaged {}", crate::update::current()), state: None, hint: None, command: Command::CheckUpdates });
@@ -356,6 +367,11 @@ impl Monaged {
             }
             Command::DeleteLayout(project_id, name) => self.delete_layout(project_id, &name, cx),
             Command::Zen => self.toggle_zen(cx),
+            Command::ToggleSounds => {
+                self.change_sounds(|s| s.on = !s.on, cx);
+                let on = self.sound.settings.on;
+                self.toast(crate::agent::Tone::Info, if on { "Sounds are on." } else { "Sounds are muted. Ctrl K → Turn sounds on brings them back." }, cx);
+            }
             Command::Density(compact) => self.set_density(compact, cx),
             Command::Health => self.open_health(cx),
             Command::Setup => self.open_setup(cx),

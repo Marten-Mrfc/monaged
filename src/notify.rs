@@ -11,6 +11,14 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 /// What the last notification was about: (subproject, agent).
 static TARGET: Mutex<Option<(i64, Option<i64>)>> = Mutex::new(None);
 static CLICKED: AtomicBool = AtomicBool::new(false);
+/// Monaged plays its own sound for what notifications are about (see
+/// `sound`): then Windows' notification ding stays off, so nothing plays twice.
+static SILENT: AtomicBool = AtomicBool::new(false);
+
+/// Notifications without Windows' own sound (while Monaged's sounds are on).
+pub fn set_silent(on: bool) {
+    SILENT.store(on, Ordering::Relaxed);
+}
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -35,6 +43,7 @@ mod win {
     const NIF_SHOWTIP: u32 = 0x80;
     const NIIF_INFO: u32 = 0x1;
     const NIIF_RESPECT_QUIET_TIME: u32 = 0x80;
+    const NIIF_NOSOUND: u32 = 0x10;
     const NIN_SELECT: u32 = 0x400;
     const NIN_BALLOONUSERCLICK: u32 = 0x405;
     const WM_LBUTTONUP: u32 = 0x202;
@@ -243,7 +252,7 @@ mod win {
         }
         let mut data = icon_data(hwnd);
         data.flags = NIF_INFO;
-        data.info_flags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        data.info_flags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME | if SILENT.load(Ordering::Relaxed) { NIIF_NOSOUND } else { 0 };
         copy_into(&mut data.info_title, title);
         copy_into(&mut data.info, body);
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &mut data) };

@@ -923,6 +923,9 @@ impl Monaged {
                 }
             }
             Event::Finished(Err(failure)) => {
+                if failure.title != "Stopped" {
+                    self.chime(crate::sound::Cue::Error);
+                }
                 if let Some(run) = self.run_mut(run_id) {
                     for step in run.steps.iter_mut().filter(|s| s.state == StepState::Running) {
                         step.state = StepState::Failed;
@@ -952,6 +955,7 @@ impl Monaged {
                             self.toast_action(Tone::Warn, "Git inside WSL has no name or email yet, so agents can't commit.", "Fix in Settings", crate::feedback::ToastAction::OpenSettings, cx);
                         }
                         self.toast(Tone::Info, format!("Added {}", plan.name), cx);
+                        self.chime(crate::sound::Cue::Success);
                         if still_open {
                             // A moment on the finished steps, then the project.
                             cx.spawn(async move |view, cx| {

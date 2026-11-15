@@ -2,6 +2,16 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-11-15
+
+### Added
+
+- **Sounds.** A few short, soft sounds for moments you might miss because you're looking elsewhere: an agent needs you (a question, a permission, a plan to approve), an agent is done, a pipeline's feature is complete, something long you started finished (an install, a clone, a merge, a push, a sign-in, an update), or something went wrong. Nothing plays for messages, tool calls or clicks, or for the agent you're looking at. Several at once play as one, the most important wins, and they stay quiet while you present, play full screen or are away. The sounds are made by Monaged itself (rising for good news, falling for trouble), not Windows' own. Settings → Sounds turns them off or one by one, sets the volume and plays each; Ctrl K → Mute sounds.
+
+### Changed
+
+- While Monaged's sounds are on, its Windows notifications come without Windows' own ding, so nothing plays twice.
+
 ## [0.4.1] - 2026-11-15
 
 ### Fixed
@@ -96,6 +106,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.5.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.5.0
 [0.4.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.3.0

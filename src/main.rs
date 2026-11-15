@@ -59,6 +59,7 @@ mod session_ui;
 mod settings_ui;
 mod side_chat;
 mod signin;
+mod sound;
 mod shell;
 mod store;
 mod syntax;
@@ -374,6 +375,10 @@ struct Monaged {
     _activation: Subscription,
     /// "Needs you" items already notified about.
     seen_inbox: HashSet<String>,
+    /// The inbox was looked at once: what's there at startup doesn't chime.
+    inbox_primed: bool,
+    /// Monaged's sounds (Settings → Sounds).
+    pub(crate) sound: sound::Player,
     last_tip: String,
     _events: Task<()>,
     _quit: Subscription,
@@ -585,6 +590,8 @@ impl Monaged {
             window_active: true,
             _activation: activation,
             seen_inbox: HashSet::new(),
+            inbox_primed: false,
+            sound: sound::Player::default(),
             last_tip: String::new(),
             _events: Task::ready(()),
             _quit: quit,
@@ -610,6 +617,7 @@ impl Monaged {
         // Git accounts for Settings; git's helper in WSL is set up (and
         // repaired if Monaged moved) once WSL is there, in `after_setup`.
         this.git_auth.accounts = git_auth::load_accounts(&this.store);
+        this.sound = sound::Player::new(sound::Settings::load(&this.store));
         // A fresh PC gets the setup guide first; it connects when it's done.
         if this.setup_needed(std::env::args().any(|a| a == "--setup")) {
             this.setup.pending = true;
@@ -734,12 +742,18 @@ impl Monaged {
             AgentEvent::Message(message) => self.on_message(message),
             AgentEvent::Log(line) => eprintln!("[agent] {line}"),
             AgentEvent::Failed(err) => {
+                if matches!(self.conn, Conn::Ready) {
+                    self.chime(sound::Cue::Error);
+                }
                 self.conn = Conn::Failed(err);
                 self.writer = None;
                 self.drop_live_sessions();
                 self.schedule_reconnect(cx);
             }
             AgentEvent::Exited(code) => {
+                if matches!(self.conn, Conn::Ready) {
+                    self.chime(sound::Cue::Error);
+                }
                 let code = code.map_or("unknown".into(), |c| c.to_string());
                 self.conn = Conn::Failed(format!("The Claude process stopped (exit code {code})."));
                 self.writer = None;

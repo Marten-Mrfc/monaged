@@ -555,6 +555,7 @@ impl Monaged {
 
     fn on_setup_probe(&mut self, found: Probe, cx: &mut Context<Self>) {
         self.setup.probing = false;
+        let was_ready = self.setup.probe.is_some() && self.setup_ready();
         // Use the distro that's there (and remember it) when the preferred one isn't.
         if let Some(distro) = &found.distro
             && *distro != self.config.distro
@@ -587,7 +588,12 @@ impl Monaged {
             self.logged_in = None;
         }
         let signed_in_now = found.login == Some(true) && !was_signed_in && self.setup.probe.is_some();
+        let had_probe = self.setup.probe.is_some();
         self.setup.probe = Some(found);
+        // The last required step just got done in the guide: that's the moment.
+        if !was_ready && had_probe && self.setup_ready() && matches!(self.form, Some(Form::Setup)) {
+            self.chime(crate::sound::Cue::Complete);
+        }
         if let Some((step, _)) = &self.setup.error
             && self.step_done(*step)
         {
@@ -670,6 +676,7 @@ impl Monaged {
     }
 
     fn fail_step(&mut self, step: StepId, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.chime(crate::sound::Cue::Error);
         self.setup.generation += 1;
         self.setup.job = None;
         self.stop_live();
@@ -752,6 +759,7 @@ impl Monaged {
                 match code {
                     Ok(0) | Ok(3010) => {
                         this.set_job(None, cx);
+                        this.chime(crate::sound::Cue::Success);
                         this.setup.restart = true;
                         let _ = this.store.set_setting("setup:restart", &crate::usage::now_unix().to_string());
                         reopen_after_restart(true);
@@ -877,6 +885,7 @@ impl Monaged {
                     self.use_distro(name.clone(), cx);
                 }
                 self.toast(Tone::Info, format!("{name} is ready, with your user."), cx);
+                self.chime(crate::sound::Cue::Success);
                 self.run_setup_probe(cx);
             }
             Err(message) if current => {
@@ -952,6 +961,7 @@ impl Monaged {
                             this.run_setup_probe(cx);
                         }
                         this.toast(Tone::Info, "The Claude agent is installed.", cx);
+                        this.chime(crate::sound::Cue::Success);
                         // A connection that failed for want of the agent can work now.
                         if matches!(this.form, Some(Form::Setup)) {
                             this.setup.reconnect = true;
@@ -1025,6 +1035,7 @@ impl Monaged {
                 self.set_job(None, cx);
                 self.logged_in = None;
                 self.toast(Tone::Info, "Signed in to Claude.", cx);
+                self.chime(crate::sound::Cue::Success);
                 if !matches!(self.form, Some(Form::Setup)) {
                     self.reconnect_when_idle(cx);
                 }
@@ -1175,6 +1186,7 @@ impl Monaged {
                             this.set_job(None, cx);
                         }
                         this.toast(Tone::Info, format!("Installed {}.", extra.title()), cx);
+                        this.chime(crate::sound::Cue::Success);
                         this.run_setup_probe(cx);
                         if extra == Extra::Sandbox {
                             this.check_sandbox(cx);
@@ -1241,6 +1253,7 @@ impl Monaged {
                                     Ok(()) => {
                                         this.set_job(None, cx);
                                         this.toast(Tone::Info, "Signed in to GitHub.", cx);
+                                        this.chime(crate::sound::Cue::Success);
                                         this.run_setup_probe(cx);
                                     }
                                     Err(why) => this.fail_step(StepId::Extras, format!("GitHub's sign-in didn't finish: {why}"), cx),
