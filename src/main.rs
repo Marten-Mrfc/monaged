@@ -1496,7 +1496,7 @@ impl Monaged {
     /// Esc closes the innermost thing first: a dialog, a menu, the palette, a
     /// form; otherwise it stops the agent you're typing to.
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.lightbox.take().is_some() {
+        if self.lightbox.take().is_some() || self.away.take().is_some() {
             cx.notify();
             return;
         }

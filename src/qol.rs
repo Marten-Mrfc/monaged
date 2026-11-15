@@ -296,6 +296,16 @@ impl Monaged {
         cx.notify();
     }
 
+    /// The status bar's "N working": the next agent that's working.
+    pub(crate) fn next_working_agent(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<i64> = self.agents.iter().filter(|a| a.is_working()).map(|a| a.record.id).collect();
+        let Some(&first) = ids.first() else { return };
+        let next = self.sel_agent.and_then(|cur| ids.iter().position(|&i| i == cur)).map_or(first, |at| ids[(at + 1) % ids.len()]);
+        self.form = None;
+        self.open_agent(next, cx);
+        cx.notify();
+    }
+
     // ---- Names ----------------------------------------------------------------------------
 
     /// Your first message to an agent you started names it (it was "agent-3").

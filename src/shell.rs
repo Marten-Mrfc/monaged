@@ -1082,7 +1082,16 @@ impl Monaged {
             )
             .child(item("status-distro").child(format!("{} · WSL", self.config.distro)))
             .when(working > 0, |d| {
-                d.child(item("status-working").child(ui::status_dot("working-dot", State::Working)).child(format!("{working} working")))
+                // Click: the next working agent (round the ones that are).
+                d.child(
+                    item("status-working")
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(theme::hover())))
+                        .tooltip(tip("Go to the next working agent"))
+                        .child(ui::status_dot("working-dot", State::Working))
+                        .child(format!("{working} working"))
+                        .on_click(cx.listener(|this, _, _, cx| this.next_working_agent(cx))),
+                )
             })
             .child(div().flex_1())
             .children(branch.map(|b| item("status-branch").child(icon_sized(Icon::Branch, 13.)).child(b)))
