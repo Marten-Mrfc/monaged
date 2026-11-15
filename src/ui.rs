@@ -238,22 +238,41 @@ pub fn spinner(id: impl Into<ElementId>, size: f32, color: u32) -> AnyElement {
 
 /// A thin progress bar: filled to `fraction`, or (None) a short segment that
 /// slides along while it isn't known how far along the work is.
+///
+/// Built from flex-grow shares rather than percentage widths, and meant for a
+/// flex column (`.flex().flex_col()`): inside a plain (block) `div()` without a
+/// fixed width, the bar gets no width and stays empty.
 pub fn progress_bar(id: impl Into<ElementId>, fraction: Option<f32>) -> AnyElement {
-    let track = div().id(id).relative().w_full().h(px(3.)).rounded_full().overflow_hidden().bg(rgb(theme::line()));
+    let id: ElementId = id.into();
+    let track = div().id(id.clone()).flex().w_full().h(px(3.)).rounded_full().overflow_hidden().bg(rgb(theme::line()));
+    // A part of the bar taking `share` of its width.
+    let part = |share: f32| {
+        let mut d = div().h_full().flex_shrink_0();
+        d.style().flex_grow = Some(share.max(0.0));
+        d.style().flex_basis = Some(px(0.).into());
+        d
+    };
     match fraction {
-        Some(f) => track
-            .child(div().absolute().top_0().left_0().h_full().w(gpui::relative(f.clamp(0., 1.))).rounded_full().bg(rgb(theme::text_2())))
-            .into_any_element(),
-        None if !motion() => track.child(div().absolute().top_0().left_0().h_full().w(gpui::relative(0.3)).bg(rgb(theme::text_3()))).into_any_element(),
-        None => track
-            .child(
-                div().absolute().top_0().h_full().w(gpui::relative(0.28)).rounded_full().bg(rgb(theme::text_2())).with_animation(
-                    "slide",
-                    Animation::new(Duration::from_millis(1300)).repeat().with_easing(gpui::ease_in_out),
-                    |el, t| el.left(gpui::relative(-0.28 + 1.28 * t)),
-                ),
-            )
-            .into_any_element(),
+        Some(f) => {
+            let f = f.clamp(0., 1.);
+            track.child(part(f).rounded_full().bg(rgb(theme::text_2()))).child(part(1.0 - f)).into_any_element()
+        }
+        None if !motion() => track.child(part(0.3).bg(rgb(theme::text_3()))).child(part(0.7)).into_any_element(),
+        None => {
+            // Space before the segment grows from 0 to 0.72 while the space after shrinks.
+            let animation = || Animation::new(Duration::from_millis(1300)).repeat().with_easing(gpui::ease_in_out);
+            track
+                .child(part(0.0).with_animation(SharedString::from(format!("{id:?}-before")), animation(), |mut el, t| {
+                    el.style().flex_grow = Some(0.72 * t);
+                    el
+                }))
+                .child(part(0.28).rounded_full().bg(rgb(theme::text_2())))
+                .child(part(0.72).with_animation(SharedString::from(format!("{id:?}-after")), animation(), |mut el, t| {
+                    el.style().flex_grow = Some(0.72 * (1.0 - t));
+                    el
+                }))
+                .into_any_element()
+        }
     }
 }
 
@@ -341,7 +360,7 @@ pub fn steps(id: impl Into<SharedString>, items: &[StepView]) -> Div {
                     )
                     .children(step.detail.clone().map(|d| div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(d)))
                     .when_some(step.progress.filter(|_| step.state == StepState::Running), |d, p| {
-                        d.child(div().pt(px(4.)).max_w(px(360.)).child(progress_bar(SharedString::from(format!("{id}-bar-{i}")), p)))
+                        d.child(div().pt(px(4.)).flex().flex_col().max_w(px(360.)).child(progress_bar(SharedString::from(format!("{id}-bar-{i}")), p)))
                     }),
             )
     }))

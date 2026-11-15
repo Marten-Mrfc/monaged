@@ -373,8 +373,8 @@ impl Monaged {
                     .flex()
                     .items_end()
                     .gap(px(10.))
-                    .child(div().flex_1().child(ui::field("Name", None, name.clone())))
-                    .child(div().flex_1().child(ui::field("Email", None, email.clone())))
+                    .child(div().flex_1().min_w(px(0.)).flex().flex_col().child(ui::field("Name", None, name.clone())))
+                    .child(div().flex_1().min_w(px(0.)).flex().flex_col().child(ui::field("Email", None, email.clone())))
                     .child(ui::button("git-identity-save", Kind::Secondary, None, "Save").on_click(cx.listener(|this, _, _, cx| this.save_git_identity(cx)))),
             );
         }

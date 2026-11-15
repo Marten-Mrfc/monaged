@@ -17,7 +17,9 @@ mod checkpoints;
 mod coord;
 mod coord_ui;
 mod diff;
+mod distro;
 mod env;
+mod extras;
 mod dots;
 mod feedback;
 mod git;
@@ -52,6 +54,7 @@ mod secrets;
 mod session_ui;
 mod settings_ui;
 mod side_chat;
+mod signin;
 mod shell;
 mod store;
 mod syntax;
@@ -1331,6 +1334,9 @@ impl Monaged {
         }
         if let Some(agent_id) = self.focused_side_chat(window, cx) {
             self.ask_side_chat(agent_id, cx);
+            return;
+        }
+        if self.setup_enter(window, cx) {
             return;
         }
         if self.form.is_some() {

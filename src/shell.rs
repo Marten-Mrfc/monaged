@@ -1040,22 +1040,17 @@ impl Monaged {
         if self.logged_in != Some(false) {
             return None;
         }
-        let command = self.login_command();
         let text = div()
             .flex()
             .flex_col()
             .gap(px(2.))
-            .child("Claude isn't signed in inside WSL. Sign in once (a terminal window opens), then reconnect.")
-            .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).child(command.clone()))
+            .child("Claude isn't signed in inside WSL.")
+            .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child("Sign in once: Claude's page opens in your browser and you paste the code it shows. Monaged reconnects by itself."))
             .into_any_element();
         Some(
             self.notice_bar(text, true)
-                .child(ui::button("copy-login", Kind::Ghost, Some(Icon::Copy), "Copy command").on_click(cx.listener(move |this, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
-                    this.toast(Tone::Info, "Copied. Paste it in a terminal and follow the sign-in.", cx);
-                })))
-                .child(ui::button("login-open", Kind::Secondary, Some(Icon::Key), "Sign in").on_click(cx.listener(|this, _, _, cx| this.sign_in_window(cx))))
-                .child(ui::button("login-reconnect", Kind::Primary, Some(Icon::Refresh), "Reconnect").on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))))
+                .child(ui::button("login-open", Kind::Primary, Some(Icon::Key), "Sign in").on_click(cx.listener(|this, _, _, cx| this.sign_in_window(cx))))
+                .child(ui::button("login-reconnect", Kind::Ghost, Some(Icon::Refresh), "Reconnect").on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))))
                 .into_any_element(),
         )
     }

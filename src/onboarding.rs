@@ -1,24 +1,24 @@
 //! The setup guide: what a new PC needs before Monaged works, checked and
-//! installed one step at a time, each one asked first.
+//! installed one step at a time, each one asked first. Everything happens in
+//! this window, with its progress; no console windows, no commands to copy.
 //!
-//! 1. WSL itself: one administrator prompt (`wsl --install --no-distribution`),
-//!    usually followed by a restart; Monaged opens again afterwards.
-//! 2. Ubuntu, installed in its own window (`wsl --install -d Ubuntu`), where
-//!    you pick your Linux username and password.
+//! 1. WSL itself: one administrator prompt (`wsl --install --no-distribution`,
+//!    hidden; its output shows here), usually followed by a restart; Monaged
+//!    opens again afterwards.
+//! 2. Ubuntu: downloaded from WSL's own catalog with megabytes and speed,
+//!    installed, started for the first time, and your Linux user created from
+//!    the username and password you type here (see `distro`).
 //! 3. The Claude agent (claude-agent-acp, which bundles the Claude CLI),
 //!    downloaded into `~/.local/share/claude-agent-acp` in WSL. No sudo.
-//! 4. Signing in to Claude in a terminal window (`claude auth login`).
+//! 4. Signing in to Claude: the sign-in page opens in your browser and you
+//!    paste the code it shows into the guide (see `signin`).
 //! 5. Git's name and email inside WSL, so agents can commit.
 //! 6. Extras that make some features work (Zed, gh, glab, pytest, the
-//!    sandbox tools): checked, with the command to install each.
-//!
-//! Steps that wait for you in another window are watched, and the guide moves
-//! on by itself when they're done.
+//!    sandbox tools), each with an Install button, and sign-ins for gh and glab.
 
 use std::collections::HashSet;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
@@ -26,22 +26,22 @@ use futures::channel::mpsc::unbounded;
 use gpui::{AnyElement, ClipboardItem, Context, Entity, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px, rgb};
 
 use crate::agent::Tone;
+use crate::extras::Extra;
 use crate::icons::{Icon, icon_sized};
+use crate::signin::{Account, Live};
 use crate::text_input::TextInput;
-use crate::ui::{self, Kind};
-use crate::{Form, Monaged, theme, wsl};
+use crate::ui::{self, Kind, StepState, StepView};
+use crate::{Form, Monaged, distro, signin, theme, wsl};
 
 /// Where the Claude agent (with the Claude CLI bundled) is published.
 pub const AGENT_REPO: &str = "agentclientprotocol/claude-agent-acp";
 /// Used when GitHub can't say which release is the newest.
 const AGENT_FALLBACK_VERSION: &str = "0.107.0";
-/// The distro Monaged installs and prefers.
-pub const DEFAULT_DISTRO: &str = "Ubuntu";
 /// Where the agent goes inside WSL; `current` points at the active version.
 pub const AGENT_HOME: &str = "~/.local/share/claude-agent-acp";
-
-#[cfg(windows)]
-const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+/// The setting naming the WSL distro the setup guide installed (absent when
+/// you brought your own).
+pub const INSTALLED_DISTRO_SETTING: &str = "setup:installed_distro";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum StepId {
@@ -99,7 +99,9 @@ pub(crate) struct Probe {
     pub win_git: Option<(String, String)>,
     pub zed: bool,
     pub gh: bool,
+    pub gh_auth: bool,
     pub glab: bool,
+    pub glab_auth: bool,
 }
 
 impl Probe {
@@ -112,20 +114,40 @@ impl Probe {
     }
 }
 
-/// Something running for a step: an installer, or a window Monaged waits on.
-#[derive(Clone, PartialEq, Debug)]
+/// Signing in to Claude: where it is.
+#[derive(Clone, Debug)]
+pub(crate) struct SignIn {
+    pub account: Account,
+    /// The sign-in page, once the CLI has said it.
+    pub url: Option<String>,
+    /// The last thing it said (a wrong code, a warning).
+    pub note: Option<String>,
+    /// A code was sent and the CLI is checking it.
+    pub checking: bool,
+}
+
+/// Something running for a step, shown in place of the step's buttons.
+#[derive(Clone, Debug)]
 pub(crate) enum Job {
-    /// Monaged runs it and shows its output.
+    /// One line of what it's doing, with a bar.
     Running { step: StepId, line: String, fraction: Option<f32> },
-    /// A window of its own is open (Ubuntu's first start, the sign-in); the
-    /// guide checks every few seconds whether it's done.
-    Waiting { step: StepId, note: String },
+    /// A longer job as a list of steps (installing Ubuntu, creating the user).
+    Steps { step: StepId, items: Vec<StepView> },
+    /// Signing in to Claude: the link and a box for the code.
+    SignIn(SignIn),
+    /// An extra installing.
+    Installing { extra: Extra, line: String, fraction: Option<f32> },
+    /// GitHub's sign-in: the code to enter on its page.
+    GitHub { code: Option<String>, url: Option<String>, note: Option<String> },
 }
 
 impl Job {
     fn step(&self) -> StepId {
         match self {
-            Job::Running { step, .. } | Job::Waiting { step, .. } => *step,
+            Job::Running { step, .. } | Job::Steps { step, .. } => *step,
+            Job::SignIn(_) => StepId::Login,
+            Job::Installing { extra: Extra::Curl, .. } => StepId::Agent,
+            Job::Installing { .. } | Job::GitHub { .. } => StepId::Extras,
         }
     }
 }
@@ -145,9 +167,25 @@ pub(crate) struct Setup {
     pub root_ok: bool,
     pub name: Option<Entity<TextInput>>,
     pub email: Option<Entity<TextInput>>,
-    /// The window Monaged opened for a step, while it's open.
-    window: Option<Arc<Mutex<Child>>>,
-    /// Bumped by every job so stale polls stop.
+    /// Your Linux username and password, for the user Monaged creates.
+    pub linux_user: Option<Entity<TextInput>>,
+    pub linux_password: Option<Entity<TextInput>>,
+    pub linux_password_again: Option<Entity<TextInput>>,
+    /// The code Claude's sign-in page shows.
+    pub code: Option<Entity<TextInput>>,
+    /// glab's sign-in: the GitLab server and a token.
+    pub glab_host: Option<Entity<TextInput>>,
+    pub glab_token: Option<Entity<TextInput>>,
+    pub glab_open: bool,
+    /// A sign-in running in the background (Claude's or GitHub's).
+    live: Option<Live>,
+    /// The Ubuntu install's steps as they were when it failed.
+    failed_steps: Option<Vec<StepView>>,
+    /// The extra that last failed to install (its row offers its website).
+    failed_extra: Option<Extra>,
+    /// The running distro job is a full install (not just creating the user).
+    installing_distro: bool,
+    /// Bumped by every job so stale updates stop.
     generation: u64,
     /// The distro, the agent or the sign-in changed: reconnect when the guide closes.
     reconnect: bool,
@@ -280,66 +318,59 @@ pub fn claude_cli(agent_cmd: &str) -> String {
     }
 }
 
-/// Opens a visible terminal window running `wsl.exe <args>`.
-fn open_window(args: &[String]) -> Result<Child> {
-    let mut command = Command::new("wsl.exe");
-    command.args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NEW_CONSOLE);
-    }
-    command.spawn().context("couldn't open a window for WSL")
-}
-
-/// Opens a visible terminal window running a cmd.exe command line (so it can
-/// pause when something fails and the window doesn't vanish with the error).
-fn open_cmd_window(line: &str) -> Result<Child> {
-    let mut command = Command::new("cmd.exe");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NEW_CONSOLE);
-        command.raw_arg(format!("/c {line}"));
-    }
-    #[cfg(not(windows))]
-    command.args(["/c", line]);
-    command.spawn().context("couldn't open a window for WSL")
-}
-
-/// Runs a PowerShell script as administrator (one UAC prompt) in its own
-/// window and waits for it. Returns its exit code; 1223 means the prompt was
-/// declined. The script travels Base64-encoded, so nothing needs quoting.
+/// Runs a PowerShell script as administrator (one UAC prompt), hidden, and
+/// waits for it. Returns its exit code; 1223 means the prompt was declined.
+/// The script travels Base64-encoded, so nothing needs quoting.
 fn run_elevated(script: &str) -> Result<i32> {
     let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     let encoded = crate::attach::base64(&utf16);
     let outer = format!(
-        "try {{ $p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}' -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} catch {{ exit 1223 }}"
+        "try {{ $p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} catch {{ exit 1223 }}"
     );
     let out = quiet("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &outer]).output().context("couldn't run PowerShell")?;
     Ok(out.status.code().unwrap_or(-1))
 }
 
-/// What the administrator window runs: WSL without a distro (Ubuntu installs
-/// as you, in the next step), or on older Windows 10 builds that don't know
-/// --no-distribution, the classic install without launching a distro.
-const INSTALL_WSL_SCRIPT: &str = r#"$Host.UI.RawUI.WindowTitle = 'Installing WSL for Monaged'
-Write-Host 'Installing the Windows Subsystem for Linux for Monaged. This takes a few minutes.'
-Write-Host ''
-wsl.exe --install --no-distribution
-$code = $LASTEXITCODE
-if ($code -ne 0 -and $code -ne 3010) {
-  Write-Host ''
-  Write-Host 'Trying the older way to install WSL...'
-  wsl.exe --install --no-launch
-  $code = $LASTEXITCODE
+/// Where the hidden WSL install writes what it says, for the guide to show.
+fn wsl_install_log() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    base.join("Monaged").join("wsl-install.log")
 }
-if ($code -ne 0 -and $code -ne 3010) {
-  Write-Host ''
-  Read-Host 'WSL did not install (see above). Press Enter to close this window'
-}
+
+/// What the administrator PowerShell runs, hidden: WSL without a distro
+/// (Ubuntu comes in the next step), or on older Windows 10 builds that don't
+/// know --no-distribution, the classic install without launching a distro.
+/// wsl.exe's output goes to `log` (through cmd.exe, so it arrives as it's
+/// written), which the guide reads to show what it's doing.
+fn install_wsl_script(log: &str) -> String {
+    // In a PowerShell single-quoted string, ' is written ''.
+    let log = log.replace('\'', "''");
+    format!(
+        r#"$env:WSL_UTF8 = '1'
+$log = '{log}'
+function Install($how) {{
+  $line = 'wsl.exe ' + $how + ' > "' + $log + '" 2>&1'
+  $p = Start-Process -FilePath cmd.exe -ArgumentList '/d', '/c', $line -WindowStyle Hidden -Wait -PassThru
+  return $p.ExitCode
+}}
+$code = Install '--install --no-distribution'
+if ($code -ne 0 -and $code -ne 3010) {{
+  $code = Install '--install --no-launch'
+}}
 exit $code
-"#;
+"#
+    )
+}
+
+/// The last thing a growing log says, and the percentage in it if any.
+fn log_tail(bytes: &[u8]) -> Option<(String, Option<f32>)> {
+    let text = wsl::decode(bytes).replace('\0', "");
+    let line = text.split(['\n', '\r']).map(str::trim).rfind(|l| l.chars().any(char::is_alphanumeric))?.to_string();
+    let fraction = distro::percent_in(&line);
+    // A progress bar alone ("[=====   42.0%   ]") reads better as words.
+    let shown = if line.starts_with('[') { "Installing…".to_string() } else { line };
+    Some((shown, fraction))
+}
 
 /// Makes Windows start Monaged once after the next sign-in (to carry on after a restart).
 pub fn reopen_after_restart(on: bool) {
@@ -407,7 +438,9 @@ pub fn probe(preferred: &str, agent_cmd: &str) -> Probe {
     p.win_git = windows_git("user.name").zip(windows_git("user.email"));
     p.zed = works("zed");
     p.gh = works("gh");
+    p.gh_auth = p.gh && quiet("gh").args(["auth", "status", "--hostname", "github.com"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     p.glab = works("glab");
+    p.glab_auth = p.glab && quiet("glab").args(["auth", "status"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if !wsl_present() {
         p.wsl_error = Some("WSL isn't installed on this PC.".into());
         return p;
@@ -498,18 +531,6 @@ true"#,
     )
 }
 
-/// What the sign-in window runs (through `wsl.exe --exec bash -lc`). No double
-/// quotes, to be safe with how wsl.exe passes arguments.
-fn sign_in_script(cli: &str) -> String {
-    let cli = match cli.strip_prefix("~/") {
-        Some(rest) => format!("$HOME/{}", wsl::quote(rest)),
-        None => wsl::quote(cli),
-    };
-    format!(
-        "c={cli}; echo 'Sign in to Claude for Monaged. A browser opens; if it does not, open the link shown below.'; echo; $c auth login; echo; read -r -p 'Done? Press Enter to close this window. ' _"
-    )
-}
-
 /// curl's progress bar ends in a percentage ("####   42.7%").
 fn percent(line: &str) -> Option<f32> {
     let token = line.split_whitespace().last()?;
@@ -547,6 +568,21 @@ impl Monaged {
         if self.setup.name.is_none() {
             self.setup.name = Some(cx.new(|cx| TextInput::new("Your name", cx)));
             self.setup.email = Some(cx.new(|cx| TextInput::new("you@example.com", cx)));
+            let suggested = distro::suggest_username(&std::env::var("USERNAME").unwrap_or_default());
+            self.setup.linux_user = Some(cx.new(|cx| {
+                let mut input = TextInput::new("username", cx);
+                input.set_text(suggested, cx);
+                input
+            }));
+            self.setup.linux_password = Some(cx.new(|cx| TextInput::new("Password", cx).masked()));
+            self.setup.linux_password_again = Some(cx.new(|cx| TextInput::new("The same password again", cx).masked()));
+            self.setup.code = Some(cx.new(|cx| TextInput::new("Paste the code here", cx)));
+            self.setup.glab_host = Some(cx.new(|cx| {
+                let mut input = TextInput::new("gitlab.com", cx);
+                input.set_text("gitlab.com".to_string(), cx);
+                input
+            }));
+            self.setup.glab_token = Some(cx.new(|cx| TextInput::new("glpat-…", cx).masked()));
         }
         self.run_setup_probe(cx);
         cx.notify();
@@ -613,16 +649,6 @@ impl Monaged {
             self.setup.reconnect = false;
             self.reconnect_when_idle(cx);
         }
-        // A window we were waiting on did its job: stop waiting.
-        if let Some(Job::Waiting { step, .. }) = &self.setup.job
-            && self.step_done(*step)
-        {
-            let step = *step;
-            self.setup.job = None;
-            self.setup.window = None;
-            self.setup.generation += 1;
-            self.toast(Tone::Info, format!("{}: done.", step.title()), cx);
-        }
         cx.notify();
     }
 
@@ -668,17 +694,27 @@ impl Monaged {
     fn set_job(&mut self, job: Option<Job>, cx: &mut Context<Self>) {
         self.setup.generation += 1;
         if job.is_none() {
-            self.setup.window = None;
+            self.stop_live();
+        } else {
+            self.setup.failed_steps = None;
+            self.setup.failed_extra = None;
         }
         self.setup.job = job;
         self.setup.error = None;
         cx.notify();
     }
 
-    /// Another step is running or waiting on its window: one at a time.
+    /// Stops a sign-in running in the background.
+    fn stop_live(&mut self) {
+        if let Some(live) = self.setup.live.take() {
+            live.stop();
+        }
+    }
+
+    /// Another step is running: one at a time.
     fn setup_busy(&mut self, cx: &mut Context<Self>) -> bool {
         if self.setup.job.is_some() {
-            self.toast(Tone::Info, "Another setup step is still running; wait for it, or stop waiting first.", cx);
+            self.toast(Tone::Info, "Another setup step is still running; wait for it, or cancel it first.", cx);
             return true;
         }
         false
@@ -687,67 +723,80 @@ impl Monaged {
     fn fail_step(&mut self, step: StepId, message: impl Into<String>, cx: &mut Context<Self>) {
         self.setup.generation += 1;
         self.setup.job = None;
-        self.setup.window = None;
+        self.stop_live();
         self.setup.error = Some((step, message.into()));
         cx.notify();
     }
 
-    /// Checks every few seconds until the step is done, the window closes and
-    /// a last check is in, or another job starts.
-    fn watch_step(&mut self, cx: &mut Context<Self>) {
+    /// Updates the running job if it's still the one started at `generation`.
+    /// False when it isn't (cancelled, or the guide was closed).
+    fn update_job(&mut self, generation: u64, cx: &mut Context<Self>, f: impl FnOnce(&mut Job)) -> bool {
+        if self.setup.generation != generation {
+            return false;
+        }
+        if let Some(job) = &mut self.setup.job {
+            f(job);
+            cx.notify();
+        }
+        true
+    }
+
+    // ---- Actions --------------------------------------------------------------------------
+
+    /// Step 1: WSL itself, as administrator, hidden; what wsl.exe says shows
+    /// in the guide as it says it.
+    pub(crate) fn setup_install_wsl(&mut self, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
+        self.set_job(Some(Job::Running { step: StepId::Wsl, line: "Windows asks for permission first…".into(), fraction: None }), cx);
         let generation = self.setup.generation;
+        let log = wsl_install_log();
+        if let Some(dir) = log.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::remove_file(&log);
+        let script = install_wsl_script(&log.display().to_string());
+        let worker = cx.background_spawn(async move { run_elevated(&script) });
+        // Shows the log's last line while the install runs.
         cx.spawn(async move |view, cx| {
-            let mut closed_checks = 0;
+            let started = Instant::now();
             loop {
-                cx.background_executor().timer(Duration::from_secs(3)).await;
-                let go = view
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                let said = std::fs::read(&log).ok().and_then(|b| log_tail(&b));
+                let alive = view
                     .update(cx, |this, cx| {
-                        if this.setup.generation != generation || this.setup.job.is_none() {
-                            return false;
-                        }
-                        let closed = this.setup.window.as_ref().is_some_and(|w| w.lock().ok().is_none_or(|mut c| c.try_wait().ok().flatten().is_some()));
-                        if closed {
-                            closed_checks += 1;
-                        }
-                        if closed_checks > 2 {
-                            // The window is gone and the step still isn't done.
-                            let step = this.setup.job.as_ref().map(Job::step).unwrap_or(StepId::Wsl);
-                            this.setup.job = None;
-                            this.setup.window = None;
-                            if !this.step_done(step) {
-                                this.setup.error = Some((step, "The window closed before this step was done. Try again, or check again if you finished it.".into()));
+                        this.update_job(generation, cx, |job| {
+                            if let Job::Running { line, fraction, .. } = job {
+                                let secs = started.elapsed().as_secs();
+                                let time = format!("{}:{:02}", secs / 60, secs % 60);
+                                match &said {
+                                    Some((text, f)) => {
+                                        *line = format!("{text} · {time}");
+                                        if f.is_some() {
+                                            *fraction = *f;
+                                        }
+                                    }
+                                    None if secs > 3 => *line = format!("Installing WSL… · {time}"),
+                                    None => {}
+                                }
                             }
-                            cx.notify();
-                            return false;
-                        }
-                        this.run_setup_probe(cx);
-                        true
+                        })
                     })
                     .unwrap_or(false);
-                if !go {
+                if !alive {
                     break;
                 }
             }
         })
         .detach();
-    }
-
-    // ---- Actions --------------------------------------------------------------------------
-
-    /// Step 1: WSL itself, as administrator, without a distro (that installs
-    /// as you, in step 2).
-    pub(crate) fn setup_install_wsl(&mut self, cx: &mut Context<Self>) {
-        if self.setup_busy(cx) {
-            return;
-        }
-        self.set_job(Some(Job::Running { step: StepId::Wsl, line: "Windows asks for permission, then installs WSL in its own window…".into(), fraction: None }), cx);
-        let generation = self.setup.generation;
         cx.spawn(async move |view, cx| {
-            let code = cx.background_spawn(async move { run_elevated(INSTALL_WSL_SCRIPT) }).await;
+            let code = worker.await;
             view.update(cx, |this, cx| {
                 if this.setup.generation != generation {
                     return;
                 }
+                let said = std::fs::read(wsl_install_log()).ok().and_then(|b| log_tail(&b)).map(|(t, _)| t).unwrap_or_default();
                 match code {
                     Ok(0) | Ok(3010) => {
                         this.set_job(None, cx);
@@ -759,7 +808,10 @@ impl Monaged {
                     Ok(1223) => this.fail_step(StepId::Wsl, "Windows didn't get permission (the administrator prompt was declined or closed).", cx),
                     Ok(code) => this.fail_step(
                         StepId::Wsl,
-                        format!("WSL didn't install (code {code}); its window said why. If it mentions virtualization, turn it on in your PC's BIOS or UEFI settings, then try again."),
+                        format!(
+                            "WSL didn't install (code {code}){}. If it mentions virtualization, turn it on in your PC's BIOS or UEFI settings, then try again.",
+                            if said.is_empty() { String::new() } else { format!(": {}", said.trim_end_matches('.')) }
+                        ),
                         cx,
                     ),
                     Err(err) => this.fail_step(StepId::Wsl, format!("{err:#}"), cx),
@@ -770,46 +822,134 @@ impl Monaged {
         .detach();
     }
 
-    /// Step 2: Ubuntu in a window of its own: it downloads, then asks for a
-    /// Linux username and password.
+    /// The username and password typed in the Ubuntu step, checked.
+    fn linux_account(&mut self, cx: &mut Context<Self>) -> Option<(String, String)> {
+        let (Some(user), Some(password), Some(again)) = (&self.setup.linux_user, &self.setup.linux_password, &self.setup.linux_password_again) else { return None };
+        let user_text = user.read(cx).text().trim().to_string();
+        let (pw, pw2) = (password.read(cx).text().to_string(), again.read(cx).text().to_string());
+        let problem = distro::check_username(&user_text).err().or_else(|| distro::check_password(&pw, &pw2).err());
+        if let Some(problem) = problem {
+            self.setup.error = Some((StepId::Distro, problem.into()));
+            cx.notify();
+            return None;
+        }
+        Some((user_text, pw))
+    }
+
+    /// Step 2: downloads Ubuntu from WSL's catalog, installs it, starts it and
+    /// creates your user, all in the guide with its progress.
     pub(crate) fn setup_install_distro(&mut self, cx: &mut Context<Self>) {
         if self.setup_busy(cx) {
             return;
         }
-        match open_cmd_window(&format!("wsl.exe --install -d {DEFAULT_DISTRO} || pause")) {
-            Ok(child) => {
-                self.set_job(
-                    Some(Job::Waiting {
-                        step: StepId::Distro,
-                        note: "Ubuntu is installing in its own window. When it asks, pick a Linux username and password (they're only for WSL), then close that window.".into(),
-                    }),
-                    cx,
-                );
-                self.setup.window = Some(Arc::new(Mutex::new(child)));
-                self.watch_step(cx);
-            }
-            Err(err) => self.fail_step(StepId::Distro, format!("{err:#}"), cx),
+        if distro::INSTALLING.load(std::sync::atomic::Ordering::SeqCst) {
+            self.toast(Tone::Info, "Ubuntu is still installing in the background; this step updates when it's done.", cx);
+            return;
         }
+        let Some((user, password)) = self.linux_account(cx) else { return };
+        let taken: Vec<String> = registered_distros().into_iter().map(|(name, _)| name).collect();
+        self.setup.installing_distro = true;
+        self.run_distro_job(&distro::STEPS, move |send| distro::install(&user, &password, &taken, send), cx);
     }
 
-    /// Step 2 when the distro is there but only has root: open it so its
-    /// first start asks for a user.
-    pub(crate) fn setup_open_distro(&mut self, cx: &mut Context<Self>) {
+    /// Step 2 when the distro is there but only has root: its first start and
+    /// your user, without a console.
+    pub(crate) fn setup_create_user(&mut self, cx: &mut Context<Self>) {
         if self.setup_busy(cx) {
             return;
         }
-        let distro = self.distro_name();
-        match open_window(&["-d".into(), distro.clone(), "--cd".into(), "~".into()]) {
-            Ok(child) => {
-                self.set_job(
-                    Some(Job::Waiting { step: StepId::Distro, note: format!("{distro} opened in its own window. Create your user when it asks, then close the window.") }),
-                    cx,
-                );
-                self.setup.window = Some(Arc::new(Mutex::new(child)));
-                self.watch_step(cx);
-            }
-            Err(err) => self.fail_step(StepId::Distro, format!("{err:#}"), cx),
+        let Some((user, password)) = self.linux_account(cx) else { return };
+        let name = self.distro_name();
+        self.setup.installing_distro = false;
+        self.run_distro_job(&distro::USER_STEPS, move |send| distro::provision(&name, &user, &password, 0, send).map(|()| name.clone()), cx);
+    }
+
+    /// Runs a distro job on its own thread, showing its steps; uses the distro
+    /// it names when it worked.
+    fn run_distro_job(&mut self, labels: &[&str], work: impl FnOnce(&(dyn Fn(distro::Event) + Sync)) -> Result<String> + Send + 'static, cx: &mut Context<Self>) {
+        let items = labels.iter().map(|l| StepView { label: SharedString::from(l.to_string()), detail: None, state: StepState::Waiting, progress: None }).collect();
+        self.set_job(Some(Job::Steps { step: StepId::Distro, items }), cx);
+        // The passwords aren't needed any more.
+        for input in [self.setup.linux_password.clone(), self.setup.linux_password_again.clone()].into_iter().flatten() {
+            input.update(cx, |i, cx| i.set_text(String::new(), cx));
         }
+        let generation = self.setup.generation;
+        let (tx, mut rx) = unbounded::<Result<distro::Event, Result<String, String>>>();
+        distro::INSTALLING.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let events = tx.clone();
+            let send = move |event: distro::Event| {
+                let _ = events.unbounded_send(Ok(event));
+            };
+            let result = work(&send).map_err(|e| format!("{e:#}"));
+            distro::INSTALLING.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = tx.unbounded_send(Err(result));
+        });
+        cx.spawn(async move |view, cx| {
+            while let Some(message) = rx.next().await {
+                let finished = message.is_err();
+                view.update(cx, |this, cx| match message {
+                    Ok(event) => {
+                        this.update_job(generation, cx, |job| {
+                            if let Job::Steps { items, .. } = job {
+                                apply_distro_event(items, event);
+                            }
+                        });
+                    }
+                    Err(result) => this.on_distro_job(generation, result, cx),
+                })
+                .ok();
+                if finished {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn on_distro_job(&mut self, generation: u64, result: Result<String, String>, cx: &mut Context<Self>) {
+        let current = self.setup.generation == generation;
+        match result {
+            Ok(name) => {
+                if current {
+                    self.set_job(None, cx);
+                }
+                // Remember a distro Monaged installed itself: the uninstaller
+                // offers to remove that one (and only that one).
+                if std::mem::take(&mut self.setup.installing_distro) {
+                    let _ = self.store.set_setting(INSTALLED_DISTRO_SETTING, &name);
+                }
+                // Left the guide meanwhile? The install still counts.
+                self.root_ok_off();
+                if name != self.config.distro {
+                    self.use_distro(name.clone(), cx);
+                }
+                self.toast(Tone::Info, format!("{name} is ready, with your user."), cx);
+                self.run_setup_probe(cx);
+            }
+            Err(message) if current => {
+                // Keep the steps on screen (where it stopped) with the reason under them.
+                let items = match self.setup.job.take() {
+                    Some(Job::Steps { mut items, .. }) => {
+                        for item in items.iter_mut().filter(|i| i.state == StepState::Running) {
+                            item.state = StepState::Failed;
+                            item.progress = None;
+                        }
+                        Some(items)
+                    }
+                    _ => None,
+                };
+                self.fail_step(StepId::Distro, message, cx);
+                self.setup.failed_steps = items;
+                self.run_setup_probe(cx);
+            }
+            Err(message) => self.toast_error(format!("Installing Ubuntu failed: {message}"), cx),
+        }
+    }
+
+    fn root_ok_off(&mut self) {
+        self.setup.root_ok = false;
+        let _ = self.store.delete_setting("setup:root_ok");
     }
 
     /// Step 3: download claude-agent-acp into WSL, with its progress.
@@ -876,28 +1016,132 @@ impl Monaged {
         .detach();
     }
 
-    /// Step 4: `claude auth login` in a terminal window.
-    pub(crate) fn setup_sign_in(&mut self, cx: &mut Context<Self>) {
+    /// Step 4: `claude auth login`, hidden in WSL. The guide shows the
+    /// sign-in page's link (and opens it) and a box for the code it shows.
+    pub(crate) fn setup_sign_in(&mut self, account: Account, cx: &mut Context<Self>) {
         if self.setup_busy(cx) {
             return;
         }
         let distro = self.distro_name();
-        let script = sign_in_script(&claude_cli(&self.config.agent_cmd));
-        // --exec: no shell between wsl.exe and bash, so the script arrives as written.
-        match open_window(&["-d".into(), distro, "--cd".into(), "~".into(), "--exec".into(), "bash".into(), "-lc".into(), script]) {
-            Ok(child) => {
-                self.set_job(
-                    Some(Job::Waiting {
-                        step: StepId::Login,
-                        note: "A terminal window opened. Pick how you sign in (a Claude Pro or Max subscription, or an Anthropic Console account) and finish in your browser. Monaged notices by itself.".into(),
-                    }),
-                    cx,
-                );
-                self.setup.window = Some(Arc::new(Mutex::new(child)));
-                self.watch_step(cx);
-            }
-            Err(err) => self.fail_step(StepId::Login, format!("{err:#}"), cx),
+        let cli = claude_cli(&self.config.agent_cmd);
+        self.set_job(Some(Job::SignIn(SignIn { account, url: None, note: None, checking: false })), cx);
+        if let Some(code) = &self.setup.code {
+            code.update(cx, |i, cx| i.set_text(String::new(), cx));
         }
+        let generation = self.setup.generation;
+        let (tx, mut rx) = unbounded::<signin::Event>();
+        match signin::start_claude(&distro, &cli, account, move |event| {
+            let _ = tx.unbounded_send(event);
+        }) {
+            Ok(live) => self.setup.live = Some(live),
+            Err(err) => return self.fail_step(StepId::Login, format!("{err:#}"), cx),
+        }
+        cx.spawn(async move |view, cx| {
+            while let Some(event) = rx.next().await {
+                let alive = view.update(cx, |this, cx| this.on_sign_in_event(generation, event, cx)).unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn on_sign_in_event(&mut self, generation: u64, event: signin::Event, cx: &mut Context<Self>) -> bool {
+        if self.setup.generation != generation {
+            return false;
+        }
+        match event {
+            signin::Event::Url(url) => {
+                let first = matches!(&self.setup.job, Some(Job::SignIn(s)) if s.url.is_none());
+                if let Some(Job::SignIn(s)) = &mut self.setup.job {
+                    s.url = Some(url.clone());
+                }
+                if first {
+                    cx.open_url(&url);
+                }
+            }
+            signin::Event::Note(note) => {
+                if let Some(Job::SignIn(s)) = &mut self.setup.job {
+                    s.note = Some(note);
+                    s.checking = false;
+                }
+            }
+            signin::Event::Code(_) => {}
+            signin::Event::Finished(Ok(())) => {
+                self.setup.live = None;
+                self.set_job(None, cx);
+                self.logged_in = None;
+                self.toast(Tone::Info, "Signed in to Claude.", cx);
+                if !matches!(self.form, Some(Form::Setup)) {
+                    self.reconnect_when_idle(cx);
+                }
+                self.run_setup_probe(cx);
+                return false;
+            }
+            signin::Event::Finished(Err(why)) => {
+                self.setup.live = None;
+                self.fail_step(StepId::Login, format!("Signing in didn't finish: {why}"), cx);
+                return false;
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Sends the code from Claude's page to the waiting sign-in.
+    pub(crate) fn setup_submit_code(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.setup.code.clone() else { return };
+        let code = match signin::check_claude_code(input.read(cx).text()) {
+            Ok(code) => code,
+            Err(problem) => {
+                if let Some(Job::SignIn(s)) = &mut self.setup.job {
+                    s.note = Some(problem.into());
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let sent = self.setup.live.as_ref().map(|live| live.send_line(&code));
+        if let Some(Job::SignIn(s)) = &mut self.setup.job {
+            match sent {
+                Some(Ok(())) => {
+                    s.checking = true;
+                    s.note = None;
+                }
+                Some(Err(err)) => s.note = Some(format!("{err:#}")),
+                None => s.note = Some("The sign-in stopped; start it again.".into()),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Enter in one of the guide's fields does what its step's main button does.
+    pub(crate) fn setup_enter(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        use gpui::Focusable as _;
+        if !matches!(self.form, Some(Form::Setup)) {
+            return false;
+        }
+        let focused = |inputs: &[&Option<Entity<TextInput>>], cx: &Context<Self>| inputs.iter().any(|i| i.as_ref().is_some_and(|i| i.focus_handle(cx).is_focused(window)));
+        if focused(&[&self.setup.code], cx) {
+            self.setup_submit_code(cx);
+        } else if focused(&[&self.setup.linux_user, &self.setup.linux_password, &self.setup.linux_password_again], cx) {
+            if self.setup.probe.as_ref().is_some_and(|p| p.distro.is_none()) {
+                self.setup_install_distro(cx);
+            } else {
+                self.setup_create_user(cx);
+            }
+        } else if focused(&[&self.setup.glab_host, &self.setup.glab_token], cx) {
+            self.setup_glab_login(cx);
+        } else if focused(&[&self.setup.name, &self.setup.email], cx) {
+            self.setup_save_git(cx);
+        }
+        true
+    }
+
+    /// Stops whatever is running (a sign-in, or waiting on one).
+    pub(crate) fn setup_cancel(&mut self, cx: &mut Context<Self>) {
+        self.set_job(None, cx);
     }
 
     /// Step 5: git's name and email inside WSL.
@@ -932,6 +1176,177 @@ impl Monaged {
         .detach();
     }
 
+    /// Installs an extra: Windows programs with winget, Linux tools with apt
+    /// as root in WSL. Its progress shows in its row.
+    pub(crate) fn setup_install_extra(&mut self, extra: Extra, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
+        let distro = self.distro_name();
+        self.set_job(Some(Job::Installing { extra, line: "Starting…".into(), fraction: None }), cx);
+        let generation = self.setup.generation;
+        let (tx, mut rx) = unbounded::<String>();
+        let worker = cx.background_spawn(async move {
+            let on_line = |line: &str| {
+                let _ = tx.unbounded_send(line.to_string());
+            };
+            match extra.winget_id() {
+                Some(id) => crate::extras::winget_install(id, on_line),
+                None => crate::extras::apt_install(&distro, extra.apt_packages(), on_line),
+            }
+        });
+        cx.spawn(async move |view, cx| {
+            while let Some(line) = rx.next().await {
+                let (text, fraction) = crate::extras::read_progress(&line);
+                let alive = view
+                    .update(cx, |this, cx| {
+                        this.update_job(generation, cx, |job| {
+                            if let Job::Installing { line, fraction: shown, .. } = job {
+                                if let Some(text) = text {
+                                    *line = text;
+                                }
+                                if fraction.is_some() {
+                                    *shown = fraction;
+                                }
+                            }
+                        })
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+            let result = worker.await;
+            view.update(cx, |this, cx| {
+                let current = this.setup.generation == generation;
+                match result {
+                    Ok(()) => {
+                        if current {
+                            this.set_job(None, cx);
+                        }
+                        this.toast(Tone::Info, format!("Installed {}.", extra.title()), cx);
+                        this.run_setup_probe(cx);
+                        if extra == Extra::Sandbox {
+                            this.check_sandbox(cx);
+                        }
+                    }
+                    Err(err) if current => {
+                        let step = if extra == Extra::Curl { StepId::Agent } else { StepId::Extras };
+                        this.fail_step(step, format!("Installing {} failed: {err:#}", extra.title()), cx);
+                        this.setup.failed_extra = Some(extra);
+                    }
+                    Err(err) => this.toast_error(format!("Installing {} failed: {err:#}", extra.title()), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `gh auth login` in the browser: shows GitHub's one-time code and opens
+    /// the page to enter it on.
+    pub(crate) fn setup_github_login(&mut self, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
+        self.set_job(Some(Job::GitHub { code: None, url: None, note: None }), cx);
+        let generation = self.setup.generation;
+        let (tx, mut rx) = unbounded::<signin::Event>();
+        match signin::start_github(move |event| {
+            let _ = tx.unbounded_send(event);
+        }) {
+            Ok(live) => self.setup.live = Some(live),
+            Err(err) => return self.fail_step(StepId::Extras, format!("{err:#}"), cx),
+        }
+        cx.spawn(async move |view, cx| {
+            while let Some(event) = rx.next().await {
+                let alive = view
+                    .update(cx, |this, cx| {
+                        if this.setup.generation != generation {
+                            return false;
+                        }
+                        match event {
+                            signin::Event::Code(code) => {
+                                if let Some(Job::GitHub { code: c, .. }) = &mut this.setup.job {
+                                    *c = Some(code);
+                                }
+                            }
+                            signin::Event::Url(url) => {
+                                let first = matches!(&this.setup.job, Some(Job::GitHub { url: None, .. }));
+                                if let Some(Job::GitHub { url: u, .. }) = &mut this.setup.job {
+                                    *u = Some(url.clone());
+                                }
+                                if first {
+                                    cx.open_url(&url);
+                                }
+                            }
+                            signin::Event::Note(note) => {
+                                if let Some(Job::GitHub { note: n, .. }) = &mut this.setup.job {
+                                    *n = Some(note);
+                                }
+                            }
+                            signin::Event::Finished(result) => {
+                                this.setup.live = None;
+                                match result {
+                                    Ok(()) => {
+                                        this.set_job(None, cx);
+                                        this.toast(Tone::Info, "Signed in to GitHub.", cx);
+                                        this.run_setup_probe(cx);
+                                    }
+                                    Err(why) => this.fail_step(StepId::Extras, format!("GitHub's sign-in didn't finish: {why}"), cx),
+                                }
+                                return false;
+                            }
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// `glab auth login` with the token typed in the guide.
+    pub(crate) fn setup_glab_login(&mut self, cx: &mut Context<Self>) {
+        if self.setup_busy(cx) {
+            return;
+        }
+        let (Some(host), Some(token)) = (self.setup.glab_host.clone(), self.setup.glab_token.clone()) else { return };
+        let host_text = host.read(cx).text().trim().trim_start_matches("https://").trim_end_matches('/').to_string();
+        let token_text = token.read(cx).text().trim().to_string();
+        if host_text.is_empty() || token_text.is_empty() {
+            self.setup.error = Some((StepId::Extras, "Enter your GitLab server and a token.".into()));
+            cx.notify();
+            return;
+        }
+        self.set_job(Some(Job::Installing { extra: Extra::Glab, line: "Signing in to GitLab…".into(), fraction: None }), cx);
+        let generation = self.setup.generation;
+        cx.spawn(async move |view, cx| {
+            let result = cx.background_spawn(async move { signin::glab_token(&host_text, &token_text) }).await;
+            view.update(cx, |this, cx| {
+                if this.setup.generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        token.update(cx, |i, cx| i.set_text(String::new(), cx));
+                        this.setup.glab_open = false;
+                        this.set_job(None, cx);
+                        this.toast(Tone::Info, "Signed in to GitLab.", cx);
+                        this.run_setup_probe(cx);
+                    }
+                    Err(err) => this.fail_step(StepId::Extras, format!("{err:#}"), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn setup_skip(&mut self, step: StepId, cx: &mut Context<Self>) {
         if step == StepId::Distro && self.setup.probe.as_ref().is_some_and(|p| p.user.as_deref() == Some("root")) {
             self.setup.root_ok = true;
@@ -952,7 +1367,7 @@ impl Monaged {
             reopen_after_restart(false);
         }
         self.setup.job = None;
-        self.setup.window = None;
+        self.stop_live();
         self.setup.generation += 1;
         self.form = None;
         window.focus(&self.focus);
@@ -977,7 +1392,7 @@ impl Monaged {
             reopen_after_restart(false);
         }
         self.setup.job = None;
-        self.setup.window = None;
+        self.stop_live();
         self.setup.generation += 1;
         self.after_setup(cx);
     }
@@ -1018,15 +1433,16 @@ impl Monaged {
         }
     }
 
-    /// The login command for a terminal (the banner and the health check).
-    pub(crate) fn login_command(&self) -> String {
-        format!("wsl -d {} -- bash -lc \"{} auth login\"", self.config.distro, claude_cli(&self.config.agent_cmd))
-    }
-
-    /// Opens the sign-in window from outside the guide (the not-logged-in bar).
+    /// Signs in from outside the guide (the not-signed-in bar, the health
+    /// check): opens the guide at its sign-in step and starts it.
     pub(crate) fn sign_in_window(&mut self, cx: &mut Context<Self>) {
-        self.setup_sign_in(cx);
-        self.toast(Tone::Info, "Sign in in the terminal window, then press Reconnect.", cx);
+        if !matches!(self.form, Some(Form::Setup)) {
+            self.open_setup(cx);
+        }
+        self.setup.skipped.remove(&StepId::Login);
+        if self.setup.job.is_none() {
+            self.setup_sign_in(Account::Subscription, cx);
+        }
     }
 
     // ---- Rendering ------------------------------------------------------------------------
@@ -1249,26 +1665,23 @@ impl Monaged {
         let text = |t: String| div().text_size(px(13.)).line_height(px(20.)).text_color(rgb(theme::text_2())).child(t);
         let mut col = div().flex().flex_col().gap(px(12.));
         if let Some(job) = job {
-            return match job {
-                Job::Running { line, fraction, .. } => col
-                    .child(div().text_size(px(12.5)).font_family(theme::MONO).text_color(rgb(theme::text_2())).truncate().child(line.clone()))
-                    .child(div().max_w(px(420.)).child(ui::progress_bar(SharedString::from(format!("setup-job-{step:?}")), *fraction)))
-                    .into_any_element(),
-                Job::Waiting { note, .. } => col
-                    .child(text(note.clone()))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(ui::spinner("setup-wait", 14., theme::text_3()))
-                            .child(ui::meta("Waiting; this page moves on by itself."))
-                            .child(div().flex_1())
-                            .child(ui::button("setup-wait-check", Kind::Secondary, Some(Icon::Refresh), "Check now").on_click(cx.listener(|this, _, _, cx| this.run_setup_probe(cx))))
-                            .child(ui::button("setup-wait-stop", Kind::Ghost, None, "Stop waiting").on_click(cx.listener(|this, _, _, cx| this.set_job(None, cx)))),
-                    )
-                    .into_any_element(),
-            };
+            match job {
+                Job::Running { line, fraction, .. } => {
+                    return col
+                        .child(one_line(line.clone(), 12.5))
+                        .child(div().flex().flex_col().max_w(px(420.)).child(ui::progress_bar(SharedString::from(format!("setup-job-{step:?}")), *fraction)))
+                        .into_any_element();
+                }
+                Job::Steps { items, .. } => {
+                    return col
+                        .child(ui::steps("setup-distro-steps", items))
+                        .child(ui::meta("You can keep using Windows meanwhile; this takes a few minutes."))
+                        .into_any_element();
+                }
+                Job::SignIn(sign_in) => return self.render_sign_in(sign_in, cx),
+                // An extra's progress shows in its own row.
+                Job::Installing { .. } | Job::GitHub { .. } => {}
+            }
         }
         let skip = |id: &'static str, label: &'static str, step: StepId, cx: &mut Context<Self>| {
             ui::button(id, Kind::Ghost, None, label).on_click(cx.listener(move |this, _, _, cx| this.setup_skip(step, cx)))
@@ -1308,6 +1721,9 @@ impl Monaged {
             }
             StepId::Distro => {
                 let others: Vec<String> = p.distros.iter().filter(|d| Some(*d) != p.distro.as_ref()).cloned().collect();
+                if let Some(items) = &self.setup.failed_steps {
+                    col = col.child(ui::steps("setup-distro-failed", items));
+                }
                 if let Some(err) = &p.distro_error {
                     col = col
                         .child(text(format!(
@@ -1321,22 +1737,24 @@ impl Monaged {
                                 .child(ui::button("setup-distro-restart", Kind::Secondary, Some(Icon::Refresh), "Restart Windows").on_click(cx.listener(|this, _, window, cx| {
                                     this.ask_confirm(crate::feedback::ConfirmAction::RestartWindows, window, cx);
                                 })))
-                                .child(ui::button("setup-distro-open", Kind::Ghost, Some(Icon::Terminal), format!("Open {distro}")).on_click(cx.listener(|this, _, _, cx| this.setup_open_distro(cx)))),
+                                .child(ui::button("setup-distro-retry", Kind::Ghost, Some(Icon::Refresh), "Try again").on_click(cx.listener(|this, _, _, cx| this.run_setup_probe(cx)))),
                         );
                 } else if p.distro.is_none() {
                     col = col
                         .child(text(
-                            "Ubuntu installs in its own window (a download of about 500 MB). When it's done it asks you to pick a Linux username and password: your account inside WSL, separate from Windows. Remember the password; installing Linux packages asks for it.".into(),
+                            "Monaged downloads Ubuntu from WSL's own catalog (about 420 MB) and sets it up right here. Pick a Linux username and password: your account inside WSL, separate from Windows. Installing Linux packages with sudo asks for this password.".into(),
                         ))
-                        .child(ui::button("setup-ubuntu", Kind::Primary, Some(Icon::Plus), "Install Ubuntu").on_click(cx.listener(|this, _, _, cx| this.setup_install_distro(cx))));
+                        .child(self.render_linux_account(cx))
+                        .child(div().flex().child(ui::button("setup-ubuntu", Kind::Primary, Some(Icon::ArrowDown), "Install Ubuntu").on_click(cx.listener(|this, _, _, cx| this.setup_install_distro(cx)))));
                 } else if !p.user_ok(self.setup.root_ok) {
                     col = col
-                        .child(text(format!("{distro} is installed but has no user of your own yet. Open it, pick a username and password when it asks, then close the window.")))
+                        .child(text(format!("{distro} is installed but has no user of your own yet. Pick a Linux username and password, and Monaged creates the user.")))
+                        .child(self.render_linux_account(cx))
                         .child(
                             div()
                                 .flex()
                                 .gap(px(8.))
-                                .child(ui::button("setup-open-distro", Kind::Primary, Some(Icon::Terminal), format!("Open {distro}")).on_click(cx.listener(|this, _, _, cx| this.setup_open_distro(cx))))
+                                .child(ui::button("setup-create-user", Kind::Primary, Some(Icon::Plus), "Create my user").on_click(cx.listener(|this, _, _, cx| this.setup_create_user(cx))))
                                 .child(skip("setup-root", "Keep using root", StepId::Distro, cx)),
                         );
                 }
@@ -1359,12 +1777,12 @@ impl Monaged {
                 }
             }
             StepId::Agent => {
-                if !p.has("curl") || !p.has("tar") {
-                    let command = "sudo apt update && sudo apt install -y curl tar";
+                if let Some(Job::Installing { extra: Extra::Curl, line, fraction }) = &self.setup.job {
+                    col = col.child(install_progress("setup-curl-progress", line, *fraction));
+                } else if !p.has("curl") || !p.has("tar") {
                     col = col
-                        .child(text(format!("Downloading the agent needs curl and tar, and {distro} doesn't have them. Open {distro}, run this command (it asks for your Linux password), then check again:")))
-                        .child(command_row("setup-curl", command, cx))
-                        .child(ui::button("setup-curl-open", Kind::Secondary, Some(Icon::Terminal), format!("Open {distro}")).on_click(cx.listener(|this, _, _, cx| this.open_distro_terminal(cx))));
+                        .child(text(format!("Downloading the agent needs curl and tar, and {distro} doesn't have them yet. Monaged installs them in {distro} for you (no password needed).")))
+                        .child(div().flex().child(ui::button("setup-curl", Kind::Primary, Some(Icon::ArrowDown), "Install curl and tar").on_click(cx.listener(|this, _, _, cx| this.setup_install_extra(Extra::Curl, cx)))));
                 } else {
                     col = col
                         .child(text(format!(
@@ -1382,13 +1800,23 @@ impl Monaged {
             StepId::Login => {
                 col = col
                     .child(text(
-                        "Agents use your own Claude account: a Claude Pro or Max subscription, or an Anthropic Console account with API billing. Signing in happens in a terminal window and your browser; Monaged never sees your password.".into(),
+                        "Agents use your own Claude account. Claude's sign-in page opens in your browser; afterwards it shows a code, which you paste here. Monaged never sees your password.".into(),
                     ))
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap(px(8.))
-                            .child(ui::button("setup-login", Kind::Primary, Some(Icon::Key), "Sign in").on_click(cx.listener(|this, _, _, cx| this.setup_sign_in(cx))))
+                            .child(
+                                ui::button("setup-login", Kind::Primary, Some(Icon::Key), "Sign in with Claude")
+                                    .tooltip(crate::shell::tip("A Claude Pro, Max, Team or Enterprise subscription"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.setup_sign_in(Account::Subscription, cx))),
+                            )
+                            .child(
+                                ui::button("setup-login-console", Kind::Secondary, None, "Use an Anthropic Console account")
+                                    .tooltip(crate::shell::tip("Pay per use with API billing from console.anthropic.com"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.setup_sign_in(Account::Console, cx))),
+                            )
                             .child(skip("setup-login-skip", "Skip", StepId::Login, cx)),
                     );
             }
@@ -1405,8 +1833,8 @@ impl Monaged {
                                 .flex()
                                 .items_end()
                                 .gap(px(10.))
-                                .child(div().flex_1().child(ui::field("Name", None, name.clone())))
-                                .child(div().flex_1().child(ui::field("Email", None, email.clone())))
+                                .child(div().flex_1().min_w(px(0.)).flex().flex_col().child(ui::field("Name", None, name.clone())))
+                                .child(div().flex_1().min_w(px(0.)).flex().flex_col().child(ui::field("Email", None, email.clone())))
                                 .child(ui::button("setup-git-save", Kind::Primary, None, "Save").on_click(cx.listener(|this, _, _, cx| this.setup_save_git(cx))))
                                 .child(skip("setup-git-skip", "Skip", StepId::Git, cx)),
                         );
@@ -1414,12 +1842,17 @@ impl Monaged {
             }
             StepId::Extras => {
                 let wsl_ready = self.step_done(StepId::Distro);
-                let row = |ok: bool, title: &'static str, detail: &'static str, fix: Option<AnyElement>| {
-                    div()
+                let running = self.setup.job.clone();
+                // One extra: a row, with what it's doing (progress, a sign-in) as a
+                // sibling under it. Keep this shape: a row nested in a column, or a
+                // flex row with vertical padding, made the layout overestimate the
+                // list's height when text wrapped, which pushed the guide's own
+                // buttons out of reach.
+                let row = |ok: bool, title: &'static str, detail: &'static str, fix: Option<AnyElement>, below: Option<AnyElement>| -> Vec<AnyElement> {
+                    let line = div()
                         .flex()
                         .items_center()
                         .gap(px(12.))
-                        .py(px(6.))
                         .child(
                             div().w(px(16.)).flex_none().child(if ok {
                                 icon_sized(Icon::Check, 14.).text_color(rgb(theme::text_2())).into_any_element()
@@ -1436,46 +1869,288 @@ impl Monaged {
                                 .child(div().text_size(px(13.)).text_color(rgb(theme::text())).child(title))
                                 .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(detail)),
                         )
-                        .children((!ok).then_some(fix).flatten())
-                        .into_any_element()
+                        .children(fix);
+                    let line = div().child(line).into_any_element();
+                    std::iter::once(line).chain(below.map(|b| div().pl(px(28.)).pb(px(6.)).flex().flex_col().child(b).into_any_element())).collect()
                 };
+                // The Install button, or this extra's progress while it installs.
+                let install = |extra: Extra, id: &'static str, cx: &mut Context<Self>| -> (Option<AnyElement>, Option<AnyElement>) {
+                    match &running {
+                        Some(Job::Installing { extra: e, line, fraction }) if *e == extra => (None, Some(install_progress(id, line, *fraction))),
+                        _ => {
+                            let website = extra.website().filter(|_| self.setup.failed_extra == Some(extra));
+                            let buttons = div()
+                                .flex()
+                                .gap(px(6.))
+                                .when_some(website, |d, site| {
+                                    d.child(
+                                        ui::button(SharedString::from(format!("{id}-site")), Kind::Ghost, Some(Icon::External), "Website")
+                                            .tooltip(crate::shell::tip("Download it from its website instead"))
+                                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(site))),
+                                    )
+                                })
+                                .child(ui::button(id, Kind::Secondary, Some(Icon::ArrowDown), "Install").on_click(cx.listener(move |this, _, _, cx| this.setup_install_extra(extra, cx))));
+                            (Some(buttons.into_any_element()), None)
+                        }
+                    }
+                };
+                let (zed_fix, zed_below) = if p.zed { (None, None) } else { install(Extra::Zed, "setup-x-zed", cx) };
+                // gh: install, then sign in (GitHub's one-time code shows here).
+                let (gh_fix, gh_below): (Option<AnyElement>, Option<AnyElement>) = if !p.gh {
+                    install(Extra::Gh, "setup-x-gh", cx)
+                } else if !p.gh_auth {
+                    match &running {
+                        Some(Job::GitHub { code, url, note }) => (None, Some(self.render_github_code(code.clone(), url.clone(), note.clone(), cx))),
+                        _ => (
+                            Some(ui::button("setup-x-gh-login", Kind::Secondary, Some(Icon::Key), "Sign in").on_click(cx.listener(|this, _, _, cx| this.setup_github_login(cx))).into_any_element()),
+                            None,
+                        ),
+                    }
+                } else {
+                    (None, None)
+                };
+                let (glab_fix, glab_below): (Option<AnyElement>, Option<AnyElement>) = if !p.glab {
+                    install(Extra::Glab, "setup-x-glab", cx)
+                } else if !p.glab_auth {
+                    match &running {
+                        Some(Job::Installing { extra: Extra::Glab, line, fraction }) => (None, Some(install_progress("setup-x-glab-login", line, *fraction))),
+                        _ if self.setup.glab_open => (None, Some(self.render_glab_form(cx))),
+                        _ => (
+                            Some(ui::button("setup-x-glab-login", Kind::Secondary, Some(Icon::Key), "Sign in").on_click(cx.listener(|this, _, _, cx| {
+                                this.setup.glab_open = true;
+                                cx.notify();
+                            })).into_any_element()),
+                            None,
+                        ),
+                    }
+                } else {
+                    (None, None)
+                };
+                let gh_ok = p.gh && p.gh_auth;
+                let glab_ok = p.glab && p.glab_auth;
                 col = col
-                    .child(row(p.zed, "Zed", "Open any worktree or file in Zed with one click.", Some(copy_button("setup-x-zed", "winget install -e --id ZedIndustries.Zed", cx))))
-                    .child(row(p.gh,
+                    .children(row(p.zed, "Zed", "Open any worktree or file in Zed with one click.", zed_fix, zed_below))
+                    .children(row(
+                        gh_ok,
                         "GitHub CLI (gh)",
-                        "Pull requests, CI status, and updates while Monaged's repo is private. Run gh auth login afterwards.",
-                        Some(copy_button("setup-x-gh", "winget install -e --id GitHub.cli", cx)),
+                        if p.gh && !p.gh_auth { "Installed; sign in to use pull requests, CI status, and updates while Monaged's repo is private." } else { "Pull requests, CI status, and updates while Monaged's repo is private." },
+                        gh_fix,
+                        gh_below,
                     ))
-                    .child(row(p.glab, "GitLab CLI (glab)", "Merge requests and pipelines for GitLab projects. Run glab auth login afterwards.", Some(copy_button("setup-x-glab", "winget install -e --id GLab.GLab", cx))))
+                    .children(row(
+                        glab_ok,
+                        "GitLab CLI (glab)",
+                        if p.glab && !p.glab_auth { "Installed; sign in to use merge requests and pipelines." } else { "Merge requests and pipelines for GitLab projects." },
+                        glab_fix,
+                        glab_below,
+                    ))
                     .when(wsl_ready, |d| {
-                        d.child(row(self.creds_ok == Some(true),
+                        let (sandbox_fix, sandbox_below) = if p.has("bwrap") && p.has("socat") { (None, None) } else { install(Extra::Sandbox, "setup-x-sandbox", cx) };
+                        let (pytest_fix, pytest_below) = if p.has("pytest") { (None, None) } else { install(Extra::Pytest, "setup-x-pytest", cx) };
+                        d.children(row(
+                            self.creds_ok == Some(true),
                             "Git logins from Windows",
                             "Push and clone from WSL with the logins Git Credential Manager keeps on Windows.",
-                            Some(ui::button("setup-x-gcm", Kind::Secondary, None, "Turn on").on_click(cx.listener(|this, _, _, cx| this.enable_windows_credentials(cx))).into_any_element()),
+                            (self.creds_ok != Some(true))
+                                .then(|| ui::button("setup-x-gcm", Kind::Secondary, None, "Turn on").on_click(cx.listener(|this, _, _, cx| this.enable_windows_credentials(cx))).into_any_element()),
+                            None,
                         ))
-                        .child(row(p.has("bwrap") && p.has("socat"),
+                        .children(row(
+                            p.has("bwrap") && p.has("socat"),
                             "Sandbox tools (bubblewrap, socat)",
                             "Let Claude Code's sandbox keep agents' commands away from Windows and your other files.",
-                            Some(copy_button("setup-x-sandbox", "sudo apt install -y bubblewrap socat", cx)),
+                            sandbox_fix,
+                            sandbox_below,
                         ))
-                        .child(row(p.has("pytest"), "pytest", "Run Python projects' tests for the confidence score and the Run tab.", Some(copy_button("setup-x-pytest", "sudo apt install -y python3-pytest", cx))))
+                        .children(row(p.has("pytest"), "pytest", "Run Python projects' tests for the confidence score and the Run tab.", pytest_fix, pytest_below))
                     })
-                    .child(row(self.api_key.is_some(),
+                    .children(row(
+                        self.api_key.is_some(),
                         "Anthropic API key",
                         "Optional: pay for Haiku summaries and reviews from API credit instead of your plan.",
-                        Some(ui::button("setup-x-key", Kind::Secondary, None, "Settings").on_click(cx.listener(|this, _, window, cx| this.open_settings_at("API key", window, cx))).into_any_element()),
+                        self.api_key
+                            .is_none()
+                            .then(|| ui::button("setup-x-key", Kind::Secondary, None, "Settings").on_click(cx.listener(|this, _, window, cx| this.open_settings_at("API key", window, cx))).into_any_element()),
+                        None,
                     ))
-                    .child(ui::meta("Commands starting with sudo run in WSL (open your distro's terminal); winget commands run in Windows Terminal or PowerShell."));
+                    .child(ui::meta("Linux tools install in WSL as root, without asking for your Linux password. Windows programs install with winget; Windows may ask for permission."));
             }
         }
         col.into_any_element()
     }
 
-    /// A terminal in the distro (for commands the guide asks you to run).
-    pub(crate) fn open_distro_terminal(&mut self, cx: &mut Context<Self>) {
-        let distro = self.distro_name();
-        if let Err(err) = open_window(&["-d".into(), distro, "--cd".into(), "~".into()]) {
-            self.toast_error(format!("{err:#}"), cx);
+    /// The Linux username and password fields.
+    fn render_linux_account(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (Some(user), Some(password), Some(again)) = (self.setup.linux_user.clone(), self.setup.linux_password.clone(), self.setup.linux_password_again.clone()) else {
+            return div().into_any_element();
+        };
+        let _ = cx;
+        let column = || div().flex_1().min_w(px(0.)).flex().flex_col();
+        div()
+            .flex()
+            .items_start()
+            .gap(px(10.))
+            .child(column().child(ui::field("Linux username", Some("Lowercase letters, digits, _ and -"), user)))
+            .child(column().child(ui::field("Password", None, password)))
+            .child(column().child(ui::field("Repeat password", None, again)))
+            .into_any_element()
+    }
+
+    /// Signing in to Claude: the page's link, and the box for its code.
+    fn render_sign_in(&self, sign_in: &SignIn, cx: &mut Context<Self>) -> AnyElement {
+        let text = |t: String| div().text_size(px(13.)).line_height(px(20.)).text_color(rgb(theme::text_2())).child(t);
+        let mut col = div().flex().flex_col().gap(px(12.));
+        let Some(url) = sign_in.url.clone() else {
+            return col
+                .child(div().flex().items_center().gap(px(8.)).child(ui::spinner("setup-signin-start", 14., theme::text_3())).child(ui::meta("Starting the sign-in…")))
+                .child(div().flex().child(ui::button("setup-signin-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| this.setup_cancel(cx)))))
+                .into_any_element();
+        };
+        let account = match sign_in.account {
+            Account::Subscription => "your Claude account",
+            Account::Console => "your Anthropic Console account",
+        };
+        let link = url.clone();
+        let copy = url.clone();
+        col = col
+            .child(text(format!("1. Sign in with {account} on the page that opened in your browser. If it didn't open, open it from here:")))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme::line()))
+                    .bg(rgb(theme::bg()))
+                    .child(div().flex_1().min_w(px(0.)).font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).truncate().child(url.clone()))
+                    .child(ui::button("setup-signin-open", Kind::Secondary, Some(Icon::External), "Open the page").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&link))))
+                    .child(ui::button("setup-signin-copy", Kind::Ghost, Some(Icon::Copy), "Copy link").on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                        this.toast(Tone::Info, "Copied the sign-in link.", cx);
+                    }))),
+            )
+            .child(text("2. When the page shows a code, copy it and paste it here:".into()));
+        if let Some(code) = self.setup.code.clone() {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w(px(0.)).flex().flex_col().child(code))
+                    .child(if sign_in.checking {
+                        ui::busy_button("setup-signin-send", Kind::Primary, "Checking…").into_any_element()
+                    } else {
+                        ui::button("setup-signin-send", Kind::Primary, Some(Icon::Check), "Sign in").on_click(cx.listener(|this, _, _, cx| this.setup_submit_code(cx))).into_any_element()
+                    }),
+            );
+        }
+        col.when_some(sign_in.note.clone(), |d, note| d.child(div().text_size(px(12.5)).text_color(rgb(theme::red_text())).child(note)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::meta("Monaged never sees your password; the code only lets this PC's Claude CLI sign in."))
+                    .child(div().flex_1())
+                    .child(ui::button("setup-signin-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| this.setup_cancel(cx)))),
+            )
+            .into_any_element()
+    }
+
+    /// GitHub's sign-in: the one-time code to type on its page.
+    fn render_github_code(&self, code: Option<String>, url: Option<String>, note: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+        let Some(code) = code else {
+            return div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(ui::spinner("setup-gh-start", 14., theme::text_3()))
+                .child(ui::meta("Asking GitHub for a code…"))
+                .child(div().flex_1())
+                .child(ui::button("setup-gh-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| this.setup_cancel(cx))))
+                .into_any_element();
+        };
+        let page = url.unwrap_or_else(|| "https://github.com/login/device".into());
+        let copy = code.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child("Enter this code on GitHub's page (it opened in your browser):"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().px(px(10.)).py(px(4.)).rounded(px(6.)).border_1().border_color(rgb(theme::line_strong())).font_family(theme::MONO).text_size(px(16.)).child(code))
+                    .child(ui::button("setup-gh-copy", Kind::Ghost, Some(Icon::Copy), "Copy code").on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                        this.toast(Tone::Info, "Copied the code.", cx);
+                    })))
+                    .child(ui::button("setup-gh-open", Kind::Secondary, Some(Icon::External), "Open GitHub").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&page))))
+                    .child(div().flex_1())
+                    .child(ui::button("setup-gh-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| this.setup_cancel(cx)))),
+            )
+            .child(div().flex().items_center().gap(px(8.)).child(ui::spinner("setup-gh-wait", 13., theme::text_3())).child(ui::meta(note.unwrap_or_else(|| "Waiting for GitHub…".into()))))
+            .into_any_element()
+    }
+
+    /// glab's sign-in: the server and a token made on GitLab.
+    fn render_glab_form(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (Some(host), Some(token)) = (self.setup.glab_host.clone(), self.setup.glab_token.clone()) else {
+            return div().into_any_element();
+        };
+        let page_host = host.read(cx).text().trim().trim_start_matches("https://").trim_end_matches('/').to_string();
+        let page = signin::gitlab_token_page(if page_host.is_empty() { "gitlab.com" } else { &page_host });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child("Make a token on GitLab (the page opens with the right scopes ticked), then paste it here."))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_end()
+                    .gap(px(8.))
+                    .child(div().w(px(170.)).flex().flex_col().child(ui::field("Server", None, host)))
+                    .child(div().flex_1().min_w(px(200.)).flex().flex_col().child(ui::field("Token", None, token)))
+                    .child(ui::button("setup-glab-page", Kind::Ghost, Some(Icon::External), "Make a token").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&page))))
+                    .child(ui::button("setup-glab-save", Kind::Primary, None, "Sign in").on_click(cx.listener(|this, _, _, cx| this.setup_glab_login(cx))))
+                    .child(ui::button("setup-glab-close", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| {
+                        this.setup.glab_open = false;
+                        cx.notify();
+                    }))),
+            )
+            .into_any_element()
+    }
+}
+
+/// Moves the steps of a distro job along.
+fn apply_distro_event(items: &mut [StepView], event: distro::Event) {
+    match event {
+        distro::Event::Running(index, detail, fraction) => {
+            for (i, item) in items.iter_mut().enumerate() {
+                if i < index && item.state != StepState::Done {
+                    item.state = StepState::Done;
+                    item.progress = None;
+                }
+            }
+            if let Some(item) = items.get_mut(index) {
+                item.state = StepState::Running;
+                item.detail = Some(detail.into());
+                item.progress = Some(fraction);
+            }
+        }
+        distro::Event::Done(index, detail) => {
+            if let Some(item) = items.get_mut(index) {
+                item.state = StepState::Done;
+                item.detail = Some(detail.into());
+                item.progress = None;
+            }
         }
     }
 }
@@ -1493,31 +2168,20 @@ fn tag(text: &'static str) -> impl IntoElement {
     div().px(px(6.)).rounded(px(4.)).border_1().border_color(rgb(theme::line_strong())).text_size(px(10.5)).text_color(rgb(theme::text_3())).child(text)
 }
 
-/// A copy button for an install command (shows the command in its tooltip).
-fn copy_button(id: &'static str, command: &'static str, cx: &mut Context<Monaged>) -> AnyElement {
-    ui::button(id, Kind::Ghost, Some(Icon::Copy), "Copy command")
-        .tooltip(crate::shell::tip(command))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(command.to_string()));
-            this.toast(Tone::Info, format!("Copied: {command}"), cx);
-        }))
-        .into_any_element()
+/// One line of output in mono, cut off with … when it's too long.
+fn one_line(text: String, size: f32) -> impl IntoElement {
+    div().flex().child(div().flex_1().min_w(px(0.)).text_size(px(size)).font_family(theme::MONO).text_color(rgb(theme::text_2())).truncate().child(text))
 }
 
-/// A command in mono with a copy button.
-fn command_row(id: &'static str, command: &'static str, cx: &mut Context<Monaged>) -> impl IntoElement {
+/// A line of what's installing, with its bar.
+fn install_progress(id: &'static str, line: &str, fraction: Option<f32>) -> AnyElement {
     div()
         .flex()
-        .items_center()
-        .gap(px(8.))
-        .px(px(10.))
-        .py(px(6.))
-        .rounded(px(6.))
-        .border_1()
-        .border_color(rgb(theme::line()))
-        .bg(rgb(theme::bg()))
-        .child(div().flex_1().min_w(px(0.)).font_family(theme::MONO).text_size(px(12.)).child(command))
-        .child(copy_button(id, command, cx))
+        .flex_col()
+        .gap(px(6.))
+        .child(one_line(line.to_string(), 12.))
+        .child(div().flex().flex_col().max_w(px(420.)).child(ui::progress_bar(SharedString::from(format!("{id}-bar")), fraction)))
+        .into_any_element()
 }
 
 /// Monaged's mark, as in the app icon: a dark rounded square with a
@@ -1565,18 +2229,21 @@ HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{b}\r\n  
     }
 
     #[test]
-    fn the_sign_in_script_has_no_double_quotes() {
-        let script = sign_in_script("~/.local/share/claude-agent-acp/current/claude");
-        assert!(!script.contains('"'));
-        assert!(script.starts_with("c=$HOME/'.local/share/claude-agent-acp/current/claude';"));
-        assert!(script.contains("$c auth login"));
+    fn the_wsl_install_is_hidden_falls_back_and_logs() {
+        let script = install_wsl_script(r"C:\Users\O'Brien\AppData\Local\Monaged\wsl-install.log");
+        assert!(script.contains("Install '--install --no-distribution'"));
+        assert!(script.contains("Install '--install --no-launch'"));
+        assert!(script.contains("$log = 'C:\\Users\\O''Brien\\AppData"));
+        assert!(script.contains("-WindowStyle Hidden"));
+        assert!(!script.contains("Read-Host"));
+        assert!(script.trim_end().ends_with("exit $code"));
     }
 
     #[test]
-    fn the_wsl_install_script_falls_back_and_reports() {
-        assert!(INSTALL_WSL_SCRIPT.contains("wsl.exe --install --no-distribution"));
-        assert!(INSTALL_WSL_SCRIPT.contains("wsl.exe --install --no-launch"));
-        assert!(INSTALL_WSL_SCRIPT.trim_end().ends_with("exit $code"));
+    fn shows_the_last_thing_the_wsl_install_said() {
+        assert_eq!(log_tail(b"Downloading: WSL 2.6.1\r\n[====    42.0%    ]\r"), Some(("Installing…".to_string(), Some(0.42))));
+        assert_eq!(log_tail(b"Installing: Windows Subsystem for Linux\r\n\r\n"), Some(("Installing: Windows Subsystem for Linux".to_string(), None)));
+        assert_eq!(log_tail(b"  \r\n"), None);
     }
 
     #[test]

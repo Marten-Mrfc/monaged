@@ -1,9 +1,8 @@
 //! The health check (Ctrl K → Health check): everything Monaged depends on,
 //! checked in one go, each with what's wrong and the button that fixes it.
 
-use gpui::{AnyElement, ClipboardItem, Context, FontWeight, IntoElement, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, px, rgb};
 
-use crate::agent::Tone;
 use crate::icons::{Icon, icon_sized};
 use crate::ui::{self, Kind};
 use crate::{Conn, Form, Monaged, theme};
@@ -19,7 +18,7 @@ pub(crate) enum Check {
 #[derive(Clone)]
 pub(crate) enum HealthFix {
     Reconnect,
-    CopyLogin,
+    SignIn,
     CopyIdentity,
     EnableGcm,
     Settings,
@@ -113,7 +112,7 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                 title: "Claude login",
                 state: Check::Fail,
                 detail: "Claude isn't logged in inside WSL.".into(),
-                fix: Some(("Copy the sign-in command", HealthFix::CopyLogin)),
+                fix: Some(("Sign in", HealthFix::SignIn)),
             },
             Conn::Ready => HealthItem { title: "Claude connection", state: Check::Ok, detail: "Connected; sessions open on demand.".into(), fix: None },
             Conn::Failed(reason) => HealthItem { title: "Claude connection", state: Check::Fail, detail: reason.clone(), fix: Some(("Reconnect", HealthFix::Reconnect)) },
@@ -240,10 +239,7 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
     fn run_health_fix(&mut self, fix: HealthFix, cx: &mut Context<Self>) {
         match fix {
             HealthFix::Reconnect => self.reconnect_now(cx),
-            HealthFix::CopyLogin => {
-                cx.write_to_clipboard(ClipboardItem::new_string(self.login_command()));
-                self.toast(Tone::Info, "Copied. Paste it in a terminal and follow the sign-in.", cx);
-            }
+            HealthFix::SignIn => self.sign_in_window(cx),
             HealthFix::CopyIdentity => self.copy_git_identity(cx),
             HealthFix::EnableGcm => self.enable_windows_credentials(cx),
             HealthFix::Settings => self.open_settings(cx),

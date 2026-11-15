@@ -96,13 +96,27 @@ pub fn run(distro: &str, script: &str) -> Result<String> {
 /// Runs a script and hands over its output as it comes, split at line ends
 /// and at carriage returns (git redraws its progress with `\r`). stderr is
 /// merged into stdout. Returns all of it; fails when the script does.
-pub fn stream(distro: &str, script: &str, mut on_line: impl FnMut(&str)) -> Result<String> {
+pub fn stream(distro: &str, script: &str, on_line: impl FnMut(&str)) -> Result<String> {
+    let mut command = command(distro);
+    command.args(["--", "bash", "-l", "-s"]);
+    stream_with(command, script, on_line)
+}
+
+/// `stream` as root (`wsl.exe -u root`): installs Linux packages without
+/// asking for the Linux password, as WSL lets the Windows user do.
+pub fn stream_root(distro: &str, script: &str, on_line: impl FnMut(&str)) -> Result<String> {
+    let mut command = Command::new("wsl.exe");
+    command.args(["-d", distro, "-u", "root", "--cd", "/", "--exec", "bash", "-s"]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    stream_with(command, script, on_line)
+}
+
+fn stream_with(mut command: Command, script: &str, mut on_line: impl FnMut(&str)) -> Result<String> {
     if !installed() {
         bail!(NOT_INSTALLED);
     }
     use std::io::Read;
-    let mut command = command(distro);
-    command.args(["--", "bash", "-l", "-s"]);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
