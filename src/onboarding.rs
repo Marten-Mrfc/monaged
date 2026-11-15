@@ -238,47 +238,19 @@ fn short(text: &str) -> String {
 /// installs things when you click. Looks for the WSL package, its services,
 /// and distros registered for this user.
 pub fn wsl_present() -> bool {
+    use crate::native::{Hive, reg_key_exists};
     let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
     if std::path::Path::new(&program_files).join("WSL").join("wsl.exe").exists() {
         return true;
     }
-    let key_exists = |key: &str| quiet("reg.exe").args(["query", key]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-    key_exists(r"HKLM\SYSTEM\CurrentControlSet\Services\WSLService")
-        || key_exists(r"HKLM\SYSTEM\CurrentControlSet\Services\LxssManager")
+    reg_key_exists(Hive::LocalMachine, r"SYSTEM\CurrentControlSet\Services\WSLService")
+        || reg_key_exists(Hive::LocalMachine, r"SYSTEM\CurrentControlSet\Services\LxssManager")
         || !registered_distros().is_empty()
 }
 
 /// Distros registered for this user (from the registry), with their default user id.
 pub fn registered_distros() -> Vec<(String, Option<u32>)> {
-    let Ok(out) = quiet("reg.exe").args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss", "/s"]).output() else { return Vec::new() };
-    parse_lxss(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// `reg query …\Lxss /s` output: one block per distro key.
-fn parse_lxss(text: &str) -> Vec<(String, Option<u32>)> {
-    let mut found = Vec::new();
-    let mut name: Option<String> = None;
-    let mut uid: Option<u32> = None;
-    let flush = |name: &mut Option<String>, uid: &mut Option<u32>, found: &mut Vec<(String, Option<u32>)>| {
-        if let Some(n) = name.take() {
-            found.push((n, uid.take()));
-        }
-        *uid = None;
-    };
-    for line in text.lines() {
-        if line.starts_with("HKEY_") {
-            flush(&mut name, &mut uid, &mut found);
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        match parts.as_slice() {
-            ["DistributionName", "REG_SZ", rest @ ..] if !rest.is_empty() => name = Some(rest.join(" ")),
-            ["DefaultUid", "REG_DWORD", value] => uid = u32::from_str_radix(value.trim_start_matches("0x"), 16).ok(),
-            _ => {}
-        }
-    }
-    flush(&mut name, &mut uid, &mut found);
-    found
+    crate::native::wsl_distros().into_iter().map(|d| (d.name, d.default_uid)).collect()
 }
 
 /// Distros WSL has, without the ones container tools install for themselves.
@@ -313,48 +285,39 @@ pub fn claude_cli(agent_cmd: &str) -> String {
     }
 }
 
-/// Runs a PowerShell script as administrator (one UAC prompt), hidden, and
-/// waits for it. Returns its exit code; 1223 means the prompt was declined.
-/// The script travels Base64-encoded, so nothing needs quoting.
-fn run_elevated(script: &str) -> Result<i32> {
-    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
-    let encoded = crate::attach::base64(&utf16);
-    let outer = format!(
-        "try {{ $p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} catch {{ exit 1223 }}"
-    );
-    let out = quiet("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &outer]).output().context("couldn't run PowerShell")?;
-    Ok(out.status.code().unwrap_or(-1))
-}
-
-/// Where the hidden WSL install writes what it says, for the guide to show.
+/// Where the WSL install writes what it says, for the guide to show.
 fn wsl_install_log() -> std::path::PathBuf {
     let base = std::env::var("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
     base.join("Monaged").join("wsl-install.log")
 }
 
-/// What the administrator PowerShell runs, hidden: WSL without a distro
-/// (Ubuntu comes in the next step), or on older Windows 10 builds that don't
-/// know --no-distribution, the classic install without launching a distro.
-/// wsl.exe's output goes to `log` (through cmd.exe, so it arrives as it's
-/// written), which the guide reads to show what it's doing.
-fn install_wsl_script(log: &str) -> String {
-    // In a PowerShell single-quoted string, ' is written ''.
-    let log = log.replace('\'', "''");
-    format!(
-        r#"$env:WSL_UTF8 = '1'
-$log = '{log}'
-function Install($how) {{
-  $line = 'wsl.exe ' + $how + ' > "' + $log + '" 2>&1'
-  $p = Start-Process -FilePath cmd.exe -ArgumentList '/d', '/c', $line -WindowStyle Hidden -Wait -PassThru
-  return $p.ExitCode
-}}
-$code = Install '--install --no-distribution'
-if ($code -ne 0 -and $code -ne 3010) {{
-  $code = Install '--install --no-launch'
-}}
-exit $code
-"#
-    )
+/// What Monaged asks Windows to run as administrator to install WSL: itself,
+/// with `--install-wsl <log>` (see `install_wsl_here`). Not PowerShell: an
+/// app that starts script hosts (let alone hidden, encoded ones) is what
+/// security software like Sophos stops as malicious.
+pub fn install_wsl_args(log: &std::path::Path) -> String {
+    format!("--install-wsl {}", crate::native::quote_arg(&log.display().to_string()))
+}
+
+/// `monaged.exe --install-wsl <log>`, running as administrator: installs WSL
+/// without a distro (Ubuntu comes in the next step), or on older Windows 10
+/// builds that don't know --no-distribution, the classic install without
+/// launching a distro. What wsl.exe says goes to `log` as it says it, for the
+/// guide to show. Returns wsl.exe's exit code (3010: restart needed).
+pub fn install_wsl_here(log: Option<std::path::PathBuf>) -> i32 {
+    let run = |args: &[&str]| -> i32 {
+        let file = log.as_ref().and_then(|l| std::fs::OpenOptions::new().create(true).append(true).open(l).ok());
+        let (out, err) = match file.as_ref().and_then(|f| f.try_clone().ok().map(|c| (c, f))) {
+            Some((a, b)) => (Stdio::from(a), b.try_clone().map(Stdio::from).unwrap_or_else(|_| Stdio::null())),
+            None => (Stdio::null(), Stdio::null()),
+        };
+        quiet("wsl.exe").args(args).env("WSL_UTF8", "1").stdout(out).stderr(err).status().ok().and_then(|s| s.code()).unwrap_or(1)
+    };
+    let code = run(&["--install", "--no-distribution"]);
+    if code == 0 || code == 3010 {
+        return code;
+    }
+    run(&["--install", "--no-launch"])
 }
 
 /// The last thing a growing log says, and the percentage in it if any.
@@ -369,15 +332,14 @@ fn log_tail(bytes: &[u8]) -> Option<(String, Option<f32>)> {
 
 /// Makes Windows start Monaged once after the next sign-in (to carry on after a restart).
 pub fn reopen_after_restart(on: bool) {
-    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce";
-    let mut command = quiet("reg.exe");
+    use crate::native::{Hive, reg_delete_value, reg_set_string};
+    let key = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
     if on {
         let Ok(exe) = std::env::current_exe() else { return };
-        command.args(["add", key, "/v", "Monaged", "/t", "REG_SZ", "/d", &format!("\"{}\" --setup", exe.display()), "/f"]);
+        let _ = reg_set_string(Hive::CurrentUser, key, "Monaged", &format!("\"{}\" --setup", exe.display()));
     } else {
-        command.args(["delete", key, "/v", "Monaged", "/f"]);
+        let _ = reg_delete_value(Hive::CurrentUser, key, "Monaged");
     }
-    let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
 /// When Windows last started, in Unix seconds.
@@ -743,8 +705,11 @@ impl Monaged {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::remove_file(&log);
-        let script = install_wsl_script(&log.display().to_string());
-        let worker = cx.background_spawn(async move { run_elevated(&script) });
+        let args = install_wsl_args(&log);
+        let worker = cx.background_spawn(async move {
+            let exe = std::env::current_exe().context("couldn't find Monaged's own program file")?;
+            crate::native::run_elevated(&exe, &args).map(|code| code as i32)
+        });
         // Shows the log's last line while the install runs.
         cx.spawn(async move |view, cx| {
             let started = Instant::now();
@@ -2108,29 +2073,17 @@ mod tests {
     }
 
     #[test]
-    fn reads_distros_from_the_registry() {
-        let text = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\r\n    DefaultDistribution    REG_SZ    {a}\r\n\r\n\
-HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{a}\r\n    State    REG_DWORD    0x1\r\n    DistributionName    REG_SZ    Ubuntu\r\n    DefaultUid    REG_DWORD    0x3e8\r\n\r\n\
-HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{b}\r\n    DistributionName    REG_SZ    docker-desktop\r\n    DefaultUid    REG_DWORD    0x0\r\n";
-        assert_eq!(parse_lxss(text), vec![("Ubuntu".to_string(), Some(1000)), ("docker-desktop".to_string(), Some(0))]);
-        assert!(parse_lxss("").is_empty());
-    }
-
-    #[test]
     fn finds_the_claude_cli_next_to_the_agent() {
         assert_eq!(claude_cli("~/.local/share/claude-agent-acp/current/claude-agent-acp"), "~/.local/share/claude-agent-acp/current/claude");
         assert_eq!(claude_cli("claude-agent-acp"), "claude");
     }
 
     #[test]
-    fn the_wsl_install_is_hidden_falls_back_and_logs() {
-        let script = install_wsl_script(r"C:\Users\O'Brien\AppData\Local\Monaged\wsl-install.log");
-        assert!(script.contains("Install '--install --no-distribution'"));
-        assert!(script.contains("Install '--install --no-launch'"));
-        assert!(script.contains("$log = 'C:\\Users\\O''Brien\\AppData"));
-        assert!(script.contains("-WindowStyle Hidden"));
-        assert!(!script.contains("Read-Host"));
-        assert!(script.trim_end().ends_with("exit $code"));
+    fn the_wsl_install_runs_monaged_itself_with_the_log() {
+        assert_eq!(
+            install_wsl_args(std::path::Path::new(r"C:\Users\Sam Rivera\AppData\Local\Monaged\wsl-install.log")),
+            r#"--install-wsl "C:\Users\Sam Rivera\AppData\Local\Monaged\wsl-install.log""#
+        );
     }
 
     #[test]

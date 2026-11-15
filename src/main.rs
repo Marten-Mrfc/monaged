@@ -41,6 +41,7 @@ mod media;
 mod menu;
 mod merge_ui;
 mod notify;
+mod native;
 mod onboarding;
 mod palette;
 mod pipeline;
@@ -1714,6 +1715,11 @@ fn main() {
             eprintln!("monaged git-credential: {err:#}");
         }
         return;
+    }
+    // Started as administrator by the setup guide to install WSL (no window;
+    // see `onboarding::install_wsl_here`).
+    if args.get(1).map(String::as_str) == Some("--install-wsl") {
+        std::process::exit(onboarding::install_wsl_here(args.get(2).map(std::path::PathBuf::from)));
     }
     // The setup file (or --install / --uninstall) shows a small setup window instead.
     let setup = if args.iter().any(|a| a == "--uninstall") {

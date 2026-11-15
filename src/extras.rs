@@ -209,17 +209,10 @@ pub fn apt_install(distro: &str, packages: &[&str], on_line: impl FnMut(&str)) -
 pub fn refresh_path() {
     #[cfg(windows)]
     {
-        let read = |key: &str| -> Option<String> {
-            let out = quiet("reg.exe").args(["query", key, "/v", "Path"]).output().ok()?;
-            let text = String::from_utf8_lossy(&out.stdout).to_string();
-            let line = text.lines().find(|l| l.trim_start().starts_with("Path"))?;
-            let at = line.find("REG_")?;
-            let rest = &line[at..];
-            let value = rest.split_once(char::is_whitespace)?.1.trim().to_string();
-            Some(expand(&value))
-        };
-        let machine = read(r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment").unwrap_or_default();
-        let user = read(r"HKCU\Environment").unwrap_or_default();
+        use crate::native::{Hive, reg_string};
+        let read = |hive: Hive, key: &str| reg_string(hive, key, "Path").map(|value| expand(&value));
+        let machine = read(Hive::LocalMachine, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment").unwrap_or_default();
+        let user = read(Hive::CurrentUser, "Environment").unwrap_or_default();
         let current = std::env::var("PATH").unwrap_or_default();
         let links = std::env::var("LOCALAPPDATA").map(|l| format!(r"{l}\Microsoft\WinGet\Links")).unwrap_or_default();
         let joined = merge_paths(&[&machine, &user, &current, &links]);

@@ -7,7 +7,6 @@
 //! tick them (see `uninstall.rs`).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context as _, Result};
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px, rgb};
@@ -88,30 +87,10 @@ fn start_menu() -> PathBuf {
     PathBuf::from(base).join("Microsoft").join("Windows").join("Start Menu").join("Programs")
 }
 
-/// A .lnk through Windows Script Host (PowerShell is always there).
+/// A .lnk through the Shell's own ShellLink object (no PowerShell: security
+/// software rightly stops apps that start script hosts).
 fn shortcut(link: &Path, target: &Path, args: &str, description: &str) -> Result<()> {
-    let ps = |s: &str| s.replace('\'', "''");
-    let script = format!(
-        "$s = New-Object -ComObject WScript.Shell; $l = $s.CreateShortcut('{link}'); $l.TargetPath = '{target}'; $l.Arguments = '{args}'; \
-         $l.WorkingDirectory = '{dir}'; $l.IconLocation = '{target},0'; $l.Description = '{description}'; $l.Save()",
-        link = ps(&link.display().to_string()),
-        target = ps(&target.display().to_string()),
-        args = ps(args),
-        dir = ps(&target.parent().map(|p| p.display().to_string()).unwrap_or_default()),
-        description = ps(description),
-    );
-    let mut command = Command::new("powershell.exe");
-    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(crate::wsl::CREATE_NO_WINDOW);
-    }
-    let output = command.output().context("couldn't run PowerShell to make a shortcut")?;
-    if !output.status.success() {
-        anyhow::bail!("couldn't make the shortcut: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
+    crate::native::create_shortcut(link, target, args, description)
 }
 
 fn desktop() -> PathBuf {
@@ -119,29 +98,15 @@ fn desktop() -> PathBuf {
     PathBuf::from(base).join("Desktop")
 }
 
-const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Monaged";
-
-fn reg(args: &[&str]) -> Result<()> {
-    let mut command = Command::new("reg.exe");
-    command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(crate::wsl::CREATE_NO_WINDOW);
-    }
-    let status = command.status().context("couldn't run reg.exe")?;
-    if !status.success() {
-        anyhow::bail!("reg.exe {} failed", args.first().copied().unwrap_or_default());
-    }
-    Ok(())
-}
+/// Settings → Apps' entry for Monaged, under HKCU.
+const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Monaged";
 
 /// Lists Monaged under Settings → Apps (for this user), with its version,
 /// icon and uninstaller.
 pub fn register(exe: &Path) -> Result<()> {
     let exe_text = exe.display().to_string();
     let dir = exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
-    let size_kb = std::fs::metadata(exe).map(|m| m.len() / 1024).unwrap_or(0).to_string();
+    let size_kb = u32::try_from(std::fs::metadata(exe).map(|m| m.len() / 1024).unwrap_or(0)).unwrap_or(u32::MAX);
     let uninstall = format!("\"{exe_text}\" --uninstall");
     let icon = format!("{exe_text},0");
     let strings = [
@@ -155,11 +120,12 @@ pub fn register(exe: &Path) -> Result<()> {
         ("HelpLink", "https://github.com/Marten-Mrfc/monaged/blob/main/docs/troubleshooting.md"),
         ("Comments", "Run Claude Code agents on your projects, inside WSL, from one window"),
     ];
+    use crate::native::{Hive, reg_set_dword, reg_set_string};
     for (name, value) in strings {
-        reg(&["add", UNINSTALL_KEY, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])?;
+        reg_set_string(Hive::CurrentUser, UNINSTALL_KEY, name, value)?;
     }
-    for (name, value) in [("NoModify", "1"), ("NoRepair", "1"), ("EstimatedSize", size_kb.as_str())] {
-        reg(&["add", UNINSTALL_KEY, "/v", name, "/t", "REG_DWORD", "/d", value, "/f"])?;
+    for (name, value) in [("NoModify", 1), ("NoRepair", 1), ("EstimatedSize", size_kb)] {
+        reg_set_dword(Hive::CurrentUser, UNINSTALL_KEY, name, value)?;
     }
     Ok(())
 }
@@ -200,7 +166,7 @@ pub fn shortcut_paths() -> [PathBuf; 3] {
 
 /// Settings → Apps lists Monaged (for this user).
 pub fn listed() -> bool {
-    reg(&["query", UNINSTALL_KEY]).is_ok()
+    crate::native::reg_key_exists(crate::native::Hive::CurrentUser, UNINSTALL_KEY)
 }
 
 /// What updates and the setup guide leave behind: the update download in
@@ -215,15 +181,14 @@ fn leftovers() -> Vec<PathBuf> {
 }
 
 /// Removes the shortcuts, the Settings → Apps entry, the start-after-restart
-/// entry and setup leftovers now, and the program folder once this process
-/// ends. Says what it removed.
+/// entry, setup leftovers and the program folder. Says what it removed.
 pub fn remove_program() -> Result<String> {
     let mut removed: Vec<String> = Vec::new();
     let links = shortcut_paths().into_iter().filter(|link| link.exists() && std::fs::remove_file(link).is_ok()).count();
     if links > 0 {
         removed.push(format!("{links} shortcut{}", if links == 1 { "" } else { "s" }));
     }
-    if listed() && reg(&["delete", UNINSTALL_KEY, "/f"]).is_ok() {
+    if listed() && crate::native::reg_delete_tree(crate::native::Hive::CurrentUser, UNINSTALL_KEY).is_ok() {
         removed.push("the entry in Settings → Apps".into());
     }
     crate::onboarding::reopen_after_restart(false);
@@ -243,32 +208,29 @@ pub fn remove_program() -> Result<String> {
     let mut text = if removed.is_empty() { String::new() } else { format!("Removed {}.", crate::uninstall::and_list(&removed)) };
     if dir.exists() {
         anyhow::ensure!(crate::uninstall::program_folder_ok(&dir), "{} doesn't look like Monaged's program folder, so it was left alone", dir.display());
-        schedule_removal(&dir)?;
-        text = format!("{text} The program folder goes as soon as the uninstaller closes.").trim().to_string();
+        remove_program_folder(&dir)?;
+        text = format!("{text} Removed the program folder.").trim().to_string();
     }
     Ok(if text.is_empty() { "Nothing was left to remove.".into() } else { text })
 }
 
-/// The program folder can only go once this window (running from it)
-/// closes: a hidden cmd.exe tries every second or so for half an hour. ping
-/// waits where `timeout` can't (it needs a console's input).
-fn schedule_removal(dir: &Path) -> Result<()> {
-    let dir = dir.display().to_string();
-    let line = format!("/C for /l %i in (1,1,1800) do (ping -n 2 127.0.0.1 >nul & rmdir /s /q \"{dir}\" 2>nul & if not exist \"{dir}\" exit)");
-    let mut command = Command::new("cmd.exe");
-    // Not from inside the folder it deletes.
-    command.current_dir(std::env::temp_dir());
-    command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(crate::wsl::CREATE_NO_WINDOW);
-        command.raw_arg(&line);
+/// Removes the program folder now. This uninstaller may be running from it:
+/// Windows lets a running program be moved but not deleted, so it moves
+/// itself to %TEMP% first (no helper process waiting for it to exit; a
+/// hidden cmd.exe doing that is what security software flags). A Monaged
+/// window that just closed may hold on for a moment, so it tries for a while.
+fn remove_program_folder(dir: &Path) -> Result<()> {
+    crate::native::move_running_exe_out(dir)?;
+    let mut last = None;
+    for _ in 0..20 {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(_) if !dir.exists() => return Ok(()),
+            Err(err) => last = Some(err),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    #[cfg(not(windows))]
-    command.arg(&line);
-    command.spawn().context("couldn't schedule removing the program folder")?;
-    Ok(())
+    Err(last.map(anyhow::Error::from).unwrap_or_else(|| anyhow::anyhow!("it's still in use"))).with_context(|| format!("couldn't remove {}; close Monaged and delete it by hand", dir.display()))
 }
 
 // ---- The setup window ---------------------------------------------------------------------
@@ -351,7 +313,7 @@ impl Render for SetupView {
                     .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child("Installed. Monaged's setup guide takes it from here."))
                     .child(ui::button("setup-close", Kind::Ghost, None, "Close").on_click(cx.listener(|_, _, _, cx| cx.quit())))
                     .child(ui::button("setup-open", Kind::Primary, Some(Icon::Play), "Open Monaged").on_click(cx.listener(move |_, _, _, cx| {
-                        let _ = Command::new(&path).spawn();
+                        let _ = std::process::Command::new(&path).spawn();
                         cx.quit();
                     })))
             }

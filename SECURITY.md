@@ -22,4 +22,5 @@ Only the newest release gets fixes. Monaged updates itself (Settings → Updates
 ## Known limitations
 
 - The installer and app aren't code-signed yet, so Windows SmartScreen warns about them. Compare the file with the release's `SHA256SUMS.txt` if you want to be sure.
+- Monaged doesn't start script hosts or shells (PowerShell, cmd.exe, wscript…): the programs it starts are `wsl.exe`, `git`, and the tools you ask for. Running as administrator happens once, to install WSL, through Windows' own prompt.
 - Anything you send to an agent goes to Anthropic through Claude Code; see [PRIVACY.md](PRIVACY.md).

@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "monaged"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -3405,6 +3405,7 @@ dependencies = [
  "sha2 0.10.9",
  "unicode-segmentation",
  "ureq",
+ "windows 0.61.3",
 ]
 
 [[package]]

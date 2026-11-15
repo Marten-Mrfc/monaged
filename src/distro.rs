@@ -372,28 +372,9 @@ pub fn stage_progress(stage: &str, status: &str) -> (String, Option<f32>) {
     }
 }
 
-/// The registry key WSL keeps for a distro (HKCU\...\Lxss\{guid}).
+/// The registry key WSL keeps for a distro (`Lxss\{guid}` under HKCU).
 fn registry_key(name: &str) -> Option<String> {
-    let out = quiet("reg.exe")
-        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss", "/s"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let mut key: Option<String> = None;
-    for line in text.lines() {
-        if line.starts_with("HKEY_") {
-            key = Some(line.trim().to_string());
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let ["DistributionName", "REG_SZ", rest @ ..] = parts.as_slice()
-            && rest.join(" ").eq_ignore_ascii_case(name)
-        {
-            return key;
-        }
-    }
-    None
+    crate::native::wsl_distros().into_iter().find(|d| d.name.eq_ignore_ascii_case(name)).map(|d| d.key)
 }
 
 /// Runs the first start and makes the user, reporting as steps `first`
@@ -446,12 +427,10 @@ pub fn provision(name: &str, user: &str, password: &str, first: usize, send: &(d
     // setup isn't needed any more.
     let _ = wsl_run(&["--terminate", name], Duration::from_secs(60));
     if let Some(key) = registry_key(name) {
-        let set = |value: &str, data: &str| {
-            let _ = quiet("reg.exe").args(["add", &key, "/v", value, "/t", "REG_DWORD", "/d", data, "/f"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
-        };
-        set("RunOOBE", "0");
+        use crate::native::{Hive, reg_set_dword};
+        let _ = reg_set_dword(Hive::CurrentUser, &key, "RunOOBE", 0);
         if let Some(uid) = uid {
-            set("DefaultUid", &uid.to_string());
+            let _ = reg_set_dword(Hive::CurrentUser, &key, "DefaultUid", uid);
         }
     }
     send(Event::Done(first + 1, format!("{user}, the default user in {name}")));

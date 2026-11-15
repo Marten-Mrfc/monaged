@@ -757,35 +757,6 @@ pub fn parse_probe(out: &str, roots: &[String]) -> Option<Probe> {
     finished.then_some(probe)
 }
 
-/// `reg query …\Lxss /s`: each distro's name and BasePath.
-pub fn parse_lxss(text: &str) -> Vec<(String, Option<String>)> {
-    let mut found = Vec::new();
-    let (mut name, mut base): (Option<String>, Option<String>) = (None, None);
-    for line in text.lines() {
-        if line.starts_with("HKEY_") {
-            if let Some(n) = name.take() {
-                found.push((n, base.take()));
-            }
-            base = None;
-            continue;
-        }
-        let mut parts = line.trim().splitn(3, "    ");
-        let (Some(key), Some(kind), Some(value)) = (parts.next(), parts.next(), parts.next()) else { continue };
-        if !kind.starts_with("REG_") {
-            continue;
-        }
-        match key {
-            "DistributionName" => name = Some(value.trim().to_string()),
-            "BasePath" => base = Some(value.trim().to_string()),
-            _ => {}
-        }
-    }
-    if let Some(n) = name {
-        found.push((n, base));
-    }
-    found
-}
-
 /// A Credential Manager target that is one of Monaged's entries, as the
 /// entry's name (keyring stores `<name>.<service>`).
 pub fn monaged_entry(target: &str) -> Option<String> {
@@ -873,20 +844,12 @@ fn folder(path: Option<PathBuf>, skip: &dyn Fn(&Path) -> bool) -> Option<Folder>
 
 /// Distros WSL has for this user, from the registry (no wsl.exe).
 pub fn registered_distros() -> Vec<Registered> {
-    let mut command = std::process::Command::new("reg.exe");
-    command.args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss", "/s"]).stdin(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(wsl::CREATE_NO_WINDOW);
-    }
-    let Ok(out) = command.output() else { return Vec::new() };
-    parse_lxss(&String::from_utf8_lossy(&out.stdout))
+    crate::native::wsl_distros()
         .into_iter()
-        .map(|(name, base)| {
-            let base = base.map(|b| clean_base(&b));
+        .map(|d| {
+            let base = d.base.map(|b| clean_base(&b));
             let disk_bytes = base.as_ref().and_then(|b| std::fs::metadata(b.join("ext4.vhdx")).ok()).map(|m| m.len());
-            Registered { name, base, disk_bytes }
+            Registered { name: d.name, base, disk_bytes }
         })
         .collect()
 }
@@ -2008,22 +1971,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_wsls_registry_entries() {
-        let text = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\r\n    DefaultDistribution    REG_SZ    {aaa}\r\n\r\n\
-                    HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{aaa}\r\n    State    REG_DWORD    0x1\r\n    DistributionName    REG_SZ    Ubuntu\r\n    BasePath    REG_EXPAND_SZ    \\\\?\\C:\\Users\\sam\\AppData\\Local\\wsl\\{aaa}\r\n\r\n\
-                    HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{bbb}\r\n    BasePath    REG_SZ    C:\\Users\\sam\\My  Distros\\Debian\r\n    DistributionName    REG_SZ    Debian\r\n";
-        let found = parse_lxss(text);
-        assert_eq!(
-            found,
-            vec![
-                ("Ubuntu".to_string(), Some(r"\\?\C:\Users\sam\AppData\Local\wsl\{aaa}".to_string())),
-                ("Debian".to_string(), Some(r"C:\Users\sam\My  Distros\Debian".to_string())),
-            ]
-        );
-        assert_eq!(clean_base(r"\\?\C:\Users\sam\AppData\Local\wsl\{aaa}"), PathBuf::from(r"C:\Users\sam\AppData\Local\wsl\{aaa}"));
-    }
-
-    #[test]
     fn only_monaged_credentials_are_picked_up() {
         assert_eq!(monaged_entry("anthropic-api-key.monaged").as_deref(), Some(API_KEY));
         assert_eq!(monaged_entry("env-vault-key.monaged").as_deref(), Some(VAULT_KEY));
@@ -2083,5 +2030,14 @@ mod tests {
         assert_eq!(size_text(1_430_000_000), "1.4 GB");
         assert_eq!(sign_ins_text(&["git-token:a/b".into(), "git-token:a/c".into()]), "2 git sign-ins");
         assert_eq!(parse_accounts(r#"[{"host":"github.com","login":"sam"},{"host":"x"}]"#), vec![("github.com".to_string(), "sam".to_string())]);
+    }
+
+    #[test]
+    fn wsls_disk_paths_read_as_plain_paths() {
+        assert_eq!(clean_base(r"\\?\C:\Users\sam\AppData\Local\wsl\{aaa}"), PathBuf::from(r"C:\Users\sam\AppData\Local\wsl\{aaa}"));
+        assert_eq!(clean_base(r"  C:\Users\sam\My  Distros\Debian  "), PathBuf::from(r"C:\Users\sam\My  Distros\Debian"));
+        // SAFETY: tests in this module don't read this variable concurrently.
+        unsafe { std::env::set_var("MONAGED_TEST_BASE", r"D:\wsl") };
+        assert_eq!(clean_base(r"%MONAGED_TEST_BASE%\Ubuntu"), PathBuf::from(r"D:\wsl\Ubuntu"));
     }
 }

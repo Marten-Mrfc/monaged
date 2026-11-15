@@ -2,6 +2,12 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-11-15
+
+### Fixed
+
+- **Endpoint security (Sophos "Lockdown") stopped Monaged as malicious.** Monaged started PowerShell to make its Start menu shortcuts and, hidden and with an encoded script, to install WSL as administrator; a hidden cmd.exe to remove its program folder after uninstalling; and reg.exe for the registry. Security software rightly treats an app that starts script hosts and shells as hijacked. Monaged now starts none of them: shortcuts come from Windows' own Shell API, the registry is read and written directly, installing WSL asks Windows to run Monaged itself as administrator (the same one prompt), and the uninstaller moves itself out of the program folder so the folder can go at once. The programs Monaged still starts are wsl.exe, git, and the tools you ask for (winget, gh, Zed).
+
 ## [0.4.0] - 2026-11-15
 
 Setting up happens entirely inside Monaged now, git signs in to GitHub and GitLab by itself, and uninstalling can take everything with it.
@@ -90,6 +96,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.4.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Marten-Mrfc/monaged/commit/503e441
