@@ -43,11 +43,12 @@ Monaged gives each **project** its **subprojects**, each subproject its **agents
 - **Review with reasons.** Diffs, Haiku summaries and a 1–5 confidence score from your project's tests plus a skeptical review. Failing tests cap the score; every score lists why. Comment on diff lines and send them back.
 - **Agents that coordinate.** A shared board for contracts and decisions, file claims that warn about overlaps, and a librarian that answers questions before anyone gets interrupted.
 - **Merges on your rules.** A branch chain (develop → acceptance → main) with a rule per target, a merge queue with CI status, and GitHub pull or GitLab merge requests.
+- **Git accounts built in.** Sign in to GitHub, GitLab or any host from Settings; tokens stay in Windows Credential Manager and Monaged answers git's credential questions in WSL. No Git Credential Manager, `gh` or `glab` needed. SSH keys, per-project accounts, and a Git tab that commits selected files, amends and undoes.
 - **Budget-aware.** Your weekly usage, Monaged's share of it and a cap you choose. Cost estimates on plans; automatic work pauses before your limit.
 - **Undo anything.** Every turn is checkpointed: roll back to before any message, undo the rollback, or replay an agent's work turn by turn.
 - **Secrets stay secret.** Environment variables encrypted with DPAPI; agents see names, never values; values are masked everywhere and block pushes.
 - **Native and keyboard-first.** Built on GPUI (Zed's UI framework). Ctrl K for everything, shortcuts you can change, four themes, and Zed one click away.
-- **Set up in minutes.** A setup guide installs WSL, Ubuntu and the Claude agent and signs you in, asking before each step.
+- **Set up in minutes.** A setup guide installs WSL, Ubuntu and the Claude agent and signs you in, asking before each step, all inside Monaged with real progress: no console windows, no commands to copy.
 
 <table>
   <tr>
@@ -59,11 +60,11 @@ Monaged gives each **project** its **subprojects**, each subproject its **agents
     <td>Plans show their size, risks and cost, and wait for you when it matters.</td>
   </tr>
   <tr>
-    <td width="50%"><img src="site/img/setup.png" alt="The setup guide on a PC without WSL."></td>
+    <td width="50%"><img src="site/img/setup.png" alt="The setup guide installing Ubuntu, with the download's size and speed."></td>
     <td width="50%"><img src="site/img/light.png" alt="Monaged in the light Paper theme."></td>
   </tr>
   <tr>
-    <td>The setup guide checks first, then installs what's missing.</td>
+    <td>The setup guide installs what's missing right in the window, with real progress.</td>
     <td>Four themes, one rule: red only means "needs you".</td>
   </tr>
 </table>
@@ -72,7 +73,7 @@ Monaged gives each **project** its **subprojects**, each subproject its **agents
 
 1. Download **Monaged-Setup-&lt;version&gt;.exe** from the [latest release](https://github.com/Marten-Mrfc/monaged/releases/latest) and run it. If SmartScreen warns you, click **More info → Run anyway** (the installer isn't code-signed yet; checksums are in `SHA256SUMS.txt`).
 2. It installs just for you, without administrator rights.
-3. Monaged opens its **setup guide**, which installs WSL and Ubuntu if you need them, then the Claude agent, and signs you in. It asks before each step.
+3. Monaged opens its **setup guide**, which installs WSL and Ubuntu if you need them (you pick your Linux username and password right in the guide), then the Claude agent, and signs you in: Claude's page opens in your browser and you paste the code it shows. It asks before each step.
 4. Click **Try the playground** for a hands-on tour, or **Add your first project**.
 
 Already installed? Monaged updates itself (Settings → Updates).
@@ -82,7 +83,7 @@ Already installed? Monaged updates itself (Settings → Updates).
 - Windows 10 (version 2004 or later) or Windows 11, x64, with virtualization on.
 - WSL 2 with a Linux distribution (the setup guide installs Ubuntu).
 - A Claude Pro or Max subscription, or an Anthropic Console account. Agents use your own account.
-- Optional: [Zed](https://zed.dev), the [GitHub CLI](https://cli.github.com) and the [GitLab CLI](https://gitlab.com/gitlab-org/cli), an Anthropic API key for the Haiku summaries.
+- Optional: [Zed](https://zed.dev), the [GitHub CLI](https://cli.github.com) (for updates while this repository is private), an Anthropic API key for the Haiku summaries. The setup guide installs them with a click.
 
 ## How it works
 

@@ -1792,11 +1792,12 @@ impl Monaged {
             StepId::Extras => {
                 let wsl_ready = self.step_done(StepId::Distro);
                 let running = self.setup.job.clone();
-                // One extra: a row, with what it's doing (progress, a sign-in) as a
-                // sibling under it. Keep this shape: a row nested in a column, or a
-                // flex row with vertical padding, made the layout overestimate the
-                // list's height when text wrapped, which pushed the guide's own
-                // buttons out of reach.
+                // One extra: a flat flex row, with what it's doing (progress, a
+                // sign-in) as a sibling under it. Keep this shape. A row nested in a
+                // column, a row with vertical padding, or a text column with
+                // `min_w(0)` made the layout misjudge the list's height (pushing the
+                // guide's own buttons out of reach), and a block `div()` around the
+                // row collapsed its text to one letter per line.
                 let row = |ok: bool, title: &'static str, detail: &'static str, fix: Option<AnyElement>, below: Option<AnyElement>| -> Vec<AnyElement> {
                     let line = div()
                         .flex()
@@ -1812,14 +1813,13 @@ impl Monaged {
                         .child(
                             div()
                                 .flex_1()
-                                .min_w(px(0.))
                                 .flex()
                                 .flex_col()
                                 .child(div().text_size(px(13.)).text_color(rgb(theme::text())).child(title))
                                 .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(detail)),
                         )
-                        .children(fix);
-                    let line = div().child(line).into_any_element();
+                        .children(fix)
+                        .into_any_element();
                     std::iter::once(line).chain(below.map(|b| div().pl(px(28.)).pb(px(6.)).flex().flex_col().child(b).into_any_element())).collect()
                 };
                 // The Install button, or this extra's progress while it installs.

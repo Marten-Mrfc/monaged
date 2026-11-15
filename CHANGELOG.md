@@ -2,6 +2,31 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-11-15
+
+Setting up happens entirely inside Monaged now, git signs in to GitHub and GitLab by itself, and uninstalling can take everything with it.
+
+### Added
+
+- **Git accounts** (Settings → Git accounts): sign in to GitHub, GitLab (Enterprise and self-hosted too) or any other host, with nothing to register and no server in between. In the browser (the host's token page opens with the right permissions ticked; Monaged picks the token up from the clipboard, checks it and empties the clipboard), by pasting a token, or by importing what the GitHub CLI, the GitLab CLI or Git Credential Manager already has. Tokens live in Windows Credential Manager, expiring ones are flagged, and Monaged is git's credential helper in WSL (`monaged.exe --git-credential`), so Git Credential Manager is optional. Several accounts per host, per-project accounts, SSH keys (create, add to your account, test, trust), and "commit as this account".
+- **Pull and merge requests and CI without `gh` or `glab`**: through the hosts' REST APIs with your account.
+- **A fuller Git tab**: commit only the files you tick, amend, take back a commit that isn't pushed, pull with a merge when a branch moved on both sides, and an Origin row (account, connection test, HTTPS ⇄ SSH).
+- **Install buttons** in the setup guide's extras: Zed and the GitHub CLI with winget (hidden; Windows still asks for permission when an installer needs it, and the new PATH is picked up without restarting Monaged), Claude Code's sandbox tools, pytest and curl with apt as root in WSL (no Linux password), each with its progress. The GitHub CLI signs in with GitHub's one-time code shown in the guide. When winget is missing, a **Website** button offers the download instead.
+UNINSTALLER_PLACEHOLDER
+
+### Changed
+
+- **No console windows in the setup guide.** WSL installs in the background after one administrator prompt, with what its installer says shown live (and kept in `%LOCALAPPDATA%\Monaged\wsl-install.log`).
+- **Ubuntu installs inside the guide with real progress** instead of in a console that says "This might take a while…": the download (megabytes, speed, checked against WSL's checksum), unpacking, the first start (cloud-init's stages) and your user. You type your Linux username (suggested from your Windows name) and password in the guide; Monaged creates the user in the usual groups and makes it the default. A distro that only has root gets the same form.
+- **Signing in to Claude** happens in the guide: Claude's sign-in page opens in your browser, and you paste the code it shows into a box (Enter works). Subscription or Anthropic Console account. The "not signed in" bar and the health check open this instead of a terminal.
+- The guide's extras link to Git accounts instead of turning on Git Credential Manager, and no longer list commands to copy.
+
+### Fixed
+
+- Progress bars never filled: downloads, clones and installs showed an empty track. They fill now, and a segment slides along while progress isn't known.
+- The name and email fields in the setup guide's git step and in the Git tab collapsed to nothing.
+- With the extras open, the setup guide's own buttons (Close, Try the playground, Add your first project) could end up out of reach below the list.
+
 ## [0.3.0] - 2026-11-14
 
 The first release meant for other people's PCs: Monaged now sets up everything it needs, asking first.
@@ -65,6 +90,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.4.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Marten-Mrfc/monaged/commit/503e441
 [0.1.0]: https://github.com/Marten-Mrfc/monaged/commit/6fee8a1

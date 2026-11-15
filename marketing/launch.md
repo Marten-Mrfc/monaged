@@ -48,7 +48,7 @@ Monaged is a native Windows app for running Claude Code agents on your projects.
 
 **X / Bluesky / Mastodon**
 
-> Monaged 0.3.0 is out: one window for every Claude Code agent.
+> Monaged 0.4.0 is out: one window for every Claude Code agent.
 > Each agent gets its own git worktree, a pipeline takes a feature from a sentence to a merged branch, and every change comes with a score and its reasons.
 > Windows + WSL, free, uses your own Claude account. [link]
 
@@ -58,7 +58,7 @@ Monaged is a native Windows app for running Claude Code agents on your projects.
 >
 > Monaged gives every agent its own git worktree, runs a research → verify → plan → build → integrate pipeline that waits for approval when a plan is risky, and scores every change from 1 to 5 based on your tests and a skeptical review, with the reasons spelled out.
 >
-> It's a native Windows app, free, and it uses your own Claude account. Version 0.3.0 adds a setup guide that installs WSL, Ubuntu and the Claude agent for you. [link]
+> It's a native Windows app, free, and it uses your own Claude account. Version 0.4.0 sets up WSL, Ubuntu and the Claude agent right inside the app with real progress, signs git in to GitHub and GitLab, and can remove everything again when you uninstall. [link]
 
 **Reddit (r/ClaudeAI, r/ClaudeCode)**
 

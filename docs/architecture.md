@@ -22,7 +22,10 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | File | What it does |
 |---|---|
 | `src/main.rs` | The `Monaged` state, ACP routing by session id, forms' logic, actions and key bindings, startup |
-| `src/onboarding.rs` | The setup guide: WSL, Ubuntu, the Claude agent, sign-in, git identity, extras; Monaged's logo mark |
+| `src/onboarding.rs` | The setup guide: WSL (hidden elevated install, its log shown live), Ubuntu, the Claude agent, sign-in, git identity, extras; Monaged's logo mark |
+| `src/distro.rs` | Installing Ubuntu in the guide: WSL's catalog, the checked download, `wsl --install --from-file` (or `--import`), the first start with cloud-init's stages, and creating your user as root |
+| `src/signin.rs` | Sign-ins without a terminal: `claude auth login` hidden in WSL (its link shown, the pasted code typed in for you) and `gh auth login`'s one-time code |
+| `src/extras.rs` | The guide's Install buttons: winget for Windows programs (and picking up the new PATH), apt as root in WSL, and reading their progress |
 | `src/shell.rs` | The window: title bar, sidebar tree and inbox, agent panes, inspector, status bar, overview, forms |
 | `src/palette.rs` | The Ctrl K command palette (with file and conversation search) |
 | `src/session_ui.rs` | The agent session UI: message box, settings chips, slash commands, question forms, tool details |
@@ -33,7 +36,9 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/timeline.rs` | The Timeline tab |
 | `src/pipeline_edit.rs` | Editing the plan, running a stage or builder again |
 | `src/queue_ui.rs` | The merge queue with CI status |
-| `src/git_ops.rs`, `src/git_ui.rs` | Git: status, commit, stash, sync, conflicts, history; the Git tab and its settings |
+| `src/git_ops.rs`, `src/git_ui.rs` | Git: status, commit (selected files, amend, undo), stash, sync (fast-forward or merge), conflicts, history; the Git tab and its settings |
+| `src/git_auth.rs` | Signing git in: accounts, tokens in Credential Manager, the browser sign-in (the host's token page, picked up from the clipboard), token expiry, importing gh/glab/GCM logins, `monaged.exe --git-credential` as git's helper in WSL, Git Credential Manager setup, SSH keys, per-project accounts |
+| `src/accounts_ui.rs` | Settings → Git accounts, and the Git tab's "signs in with" row |
 | `src/syntax.rs` | Syntax colors for code blocks and diffs (a small tokenizer per language family) |
 | `src/checkpoints.rs` | Checkpoints per turn (git objects under `refs/monaged/`), rollback with undo, the turn-by-turn replay |
 | `src/project_ui.rs` | Project settings: MCP servers, knowledge files, run and test commands |
@@ -61,7 +66,7 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/usage_ui.rs` | Recording turn costs, the meter, pausing and resuming, model switching, plan estimates, the usage and model settings |
 | `src/coord_ui.rs` | The board, claims, the librarian, routing `ask` between agents, board digests, the Board tab |
 | `src/merge_ui.rs` | Branch chain and rules, merging, promotions, push, merge/pull requests, cleanup, auto-merge |
-| `src/hosting.rs` | GitHub/GitLab remote parsing and the `gh`/`glab` calls |
+| `src/hosting.rs` | GitHub/GitLab remote parsing; pull/merge requests and CI through the REST API with your account, or the `gh`/`glab` CLIs |
 | `src/pipeline.rs` | Roles, stages, briefs, `monaged-*` block parsing, and the gate rules |
 | `src/pipeline_ui.rs` | Running the pipeline after each turn; gate, plan and question cards; the pipeline strip |
 | `src/review_ui.rs` | The Changes tab, the summary and confidence flows, Markdown rendering, Settings |

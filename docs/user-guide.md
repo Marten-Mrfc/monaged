@@ -66,9 +66,20 @@ Every agent has Monaged's tools: `board_read`, `board_post` (contracts, decision
 ## Merging
 
 - **The project view** shows your branch chain (develop → acceptance → main) with a rule per target you can click to change: develop merges automatically unless the score is 1, acceptance asks you, the top branch asks twice. **Set up develop and acceptance** creates them.
-- **The Merge tab**: merge, push, open a GitHub pull request or GitLab merge request (through `gh`/`glab`), resolve conflicts with an agent, and clean up worktrees.
+- **The Merge tab**: merge, push, open a GitHub pull request or GitLab merge request (through the REST API with your Git account, or `gh`/`glab` when you have them), resolve conflicts with an agent, and clean up worktrees.
 - **The merge queue** (project overview): ready first, with confidence, conflicts, the request and its CI status; **Merge N ready** merges them one at a time.
-- **The Git tab**: a worktree's changes, commit with a suggested message, stash, fetch, pull and push, finish a conflicted merge, and the history graph.
+- **The Git tab**: a worktree's changes; commit everything or only the files you tick, with a suggested message, or amend the last commit; take back a commit that isn't pushed yet; stash, fetch, pull (a merge when both sides moved, never a rebase) and push; finish a conflicted merge; and the history graph. Its **Origin** row says which account the project signs in as, switches account, tests the connection, and flips origin between HTTPS and SSH.
+
+## Git accounts
+
+Settings → **Git accounts** signs git in to GitHub, GitLab (Enterprise and self-hosted too) or any other host, with nothing to register and no server in between:
+
+- **In the browser**: Monaged opens the host's own token page with the right permissions ticked. Click Generate and Copy; Monaged picks the token up from the clipboard (only something with the host's token shape, copied after you started), checks it with the host and empties the clipboard.
+- **By pasting a token**, with a username and app password for other hosts, or by **importing** a login the GitHub CLI, the GitLab CLI or Git Credential Manager already has.
+
+Tokens are checked with the host (who you are, your email, the token's scopes and expiry; tokens that expire within two weeks are flagged here and in the health check), kept in Windows Credential Manager, and never written to the database, a file in WSL or a command line. Monaged becomes git's credential helper in WSL for each host with an account (`monaged.exe --git-credential`), so Git Credential Manager isn't needed; if you do use it, one switch makes it the helper for other hosts. Several accounts per host work: one is the default, and a project can sign in as another from its Git tab. **Commit as this account** makes its name and email git's identity in WSL. Tokens are masked like secrets and block merges and pushes that would contain one.
+
+**SSH keys** in WSL are listed here too: create one, add it to your GitHub or GitLab account in one click, test it per host, and trust a host's key.
 
 ## Running and testing
 

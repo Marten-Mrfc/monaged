@@ -369,6 +369,22 @@ Decided with the user: build everything ready for a public release but don't dep
 - [x] Clone checks, push errors and the health check point to Settings → Git accounts.
 - [ ] Not exercised live yet (written and type-checked off Windows): the clipboard pick-up against the real token pages, the helper through WSL interop, imports from gh/glab/GCM.
 
+### Release 0.4.0: setup inside Monaged, git accounts, a full uninstaller (done 2026-11-15)
+Asked for after testing 0.3.0 on a real PC: Ubuntu's install ran in a console that only said "This might take a while…", and sign-in, extras and fixes all meant terminals and copied commands.
+
+- [x] **Everything in the guide:** WSL installs hidden after one administrator prompt with its installer's output shown live; Ubuntu downloads from WSL's catalog with megabytes, speed and a checksum, installs with `wsl --install --from-file` (falling back to `--import`), starts with cloud-init's stages shown, and gets the user from a username and password typed in the guide. The distro Monaged installed is remembered for the uninstaller.
+- [x] **Claude sign-in without a terminal:** `claude auth login` runs hidden; the guide shows its link (and opens it) and a box for the code Claude's page shows. It reads that code from plain input, so no terminal is needed.
+- [x] **Install buttons** for the extras (winget hidden, apt as root in WSL, both with progress), GitHub CLI sign-in with its one-time code, and a website fallback when winget is missing.
+- [x] **Git accounts** merged in (see the section above), and the guide links to them.
+- [x] **Uninstaller** that can remove everything Monaged added (see the changelog), but never WSL itself.
+- [x] **Fixed on the way:** progress bars never filled (percentage widths that resolved to nothing in GPUI's layout), fields that collapsed, and the guide's buttons ending up out of reach.
+
+**Tested:** unit tests under Wine; the whole guide in the real UI against stand-ins for WSL, the Claude CLI, gh and an elevated PowerShell, with a real (throttled, local) Ubuntu image download and checksum.
+
+**Not tested on a real PC yet:** the hidden elevated WSL install and its log, `wsl --install --from-file`, the first start with cloud-init and the user creation in a real Ubuntu, the Claude sign-in against the real page, winget installs, and the uninstaller.
+
+**Known limits:** the setup page (like 0.3.0's) can scroll a little past its end into empty space in some states; GPUI's scroll extent comes out larger than the content there. Nothing is cut off.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.

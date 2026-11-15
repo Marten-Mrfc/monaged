@@ -13,18 +13,18 @@ Prefer not to install? The release also has a zip with the same `monaged.exe`; i
 
 ## 2. Let the setup guide get your PC ready
 
-On first start Monaged opens its setup guide. It checks each thing first and only installs something after you click.
+On first start Monaged opens its setup guide. It checks each thing first and only installs something after you click. Everything happens in the guide itself, with its progress: no console windows and no commands to copy.
 
-![The setup guide on a PC without WSL](../site/img/setup.png)
+![The setup guide installing Ubuntu, with the download's size and speed](../site/img/setup.png)
 
 | Step | What happens |
 |---|---|
-| **Windows Subsystem for Linux** | **Install WSL** asks Windows for administrator rights once and installs WSL in its own window. Windows usually wants a restart afterwards: **Restart Windows now** does it, and Monaged opens again after you sign in to carry on. |
-| **Ubuntu and your Linux user** | **Install Ubuntu** opens a window that downloads Ubuntu and then asks you for a Linux username and password. That's your account inside WSL, separate from Windows; remember the password, because installing Linux packages asks for it. Close the window when you're done; the guide notices by itself. Already have a distro? Pick it instead. |
-| **The Claude agent** | **Install the Claude agent** downloads [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp), which includes the Claude CLI, into `~/.local/share/claude-agent-acp` (about 220 MB). No sudo needed. **Update** fetches the newest one later. |
-| **Sign in to Claude** | **Sign in** opens a terminal running `claude auth login`. Choose your Claude Pro or Max subscription or an Anthropic Console account, and finish in your browser. |
+| **Windows Subsystem for Linux** | **Install WSL** asks Windows for administrator rights once, then installs WSL in the background while the guide shows what it's doing. Windows usually wants a restart afterwards: **Restart Windows now** does it, and Monaged opens again after you sign in to carry on. |
+| **Ubuntu and your Linux user** | Type a Linux username (suggested from your Windows name) and a password, and click **Install Ubuntu**. Monaged downloads Ubuntu from WSL's own catalog (about 420 MB, with megabytes and speed, checked against its checksum), installs it, starts it for the first time and creates your user. That's your account inside WSL, separate from Windows; remember the password, because `sudo` asks for it. Already have a distro? Pick it instead; if it only has root, the same form creates your user. |
+| **The Claude agent** | **Install the Claude agent** downloads [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp), which includes the Claude CLI, into `~/.local/share/claude-agent-acp` (about 220 MB). No sudo needed. **Update** fetches the newest one later. If your distro lacks curl, **Install curl and tar** adds them first. |
+| **Sign in to Claude** | **Sign in with Claude** (a Pro, Max, Team or Enterprise subscription) or **Use an Anthropic Console account**. Claude's sign-in page opens in your browser; when it shows a code, copy it, paste it into the box in the guide and press Enter. Monaged never sees your password. |
 | **Your name for git commits** | Agents commit their work, so git in WSL needs a name and email. The guide fills in the ones git uses on Windows, if any. |
-| **Extras** | Optional things that switch features on, each with the command to install it: Zed, the GitHub and GitLab CLIs, Git Credential Manager logins, Claude Code's sandbox tools, pytest, and an Anthropic API key for cheaper summaries. |
+| **Extras** | Optional things that switch features on, each with an **Install** or **Sign in** button: Zed and the GitHub CLI (installed with winget), Git accounts for pushing and pull requests, Claude Code's sandbox tools and pytest (installed in WSL as root, so no password), and an Anthropic API key for cheaper summaries. |
 
 When the required steps have a check mark, the guide says **Monaged is ready**.
 
