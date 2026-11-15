@@ -78,6 +78,8 @@ pub(crate) enum ConfirmAction {
     RestartWindows,
     /// Sign out of a git account ("host/login").
     SignOutGit(String),
+    /// Close Monaged although agents are working.
+    Quit,
 }
 
 pub(crate) struct Confirm {
@@ -330,6 +332,15 @@ impl Monaged {
                     true,
                 )
             }
+            ConfirmAction::Quit => (
+                "Close Monaged?".into(),
+                format!(
+                    "{}. Closing stops them; their conversations and worktrees stay, and you can carry on when Monaged opens again.",
+                    self.running_work().unwrap_or_else(|| "Nothing is running".into())
+                ),
+                "Close anyway".into(),
+                true,
+            ),
             ConfirmAction::SignOutGit(key) => (
                 format!("Sign out of {key}?"),
                 "Its token is deleted from Windows Credential Manager, and git in WSL stops signing in with it (Git Credential Manager takes over for that host if it's on). Projects that sign in as this account fall back to the host's default account.".into(),
@@ -418,6 +429,7 @@ impl Monaged {
                 self.toast(Tone::Info, "Pipeline stopped. The agents are still there.", cx);
             }
             ConfirmAction::RemoveApiKey => self.remove_api_key(cx),
+            ConfirmAction::Quit => return self.quit_confirmed(window),
             ConfirmAction::SignOutGit(key) => self.sign_out_git(key, cx),
             ConfirmAction::CleanupWorktrees(sub_id) => self.cleanup_worktrees(sub_id, cx),
             ConfirmAction::Promote(project_id, from, to) => self.promote_confirmed(project_id, from, to, cx),

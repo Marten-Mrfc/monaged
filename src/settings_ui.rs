@@ -298,6 +298,21 @@ impl Monaged {
                 let _ = this.store.set_setting("ui:resume", if resume { "0" } else { "1" });
                 cx.notify();
             })))
+            .children([
+                ("power:awake", "Keep the PC awake while agents work (the screen can still turn off); sleep would pause WSL mid-task"),
+                ("ui:ask_close", "Ask before closing Monaged while agents work (closing stops them)"),
+                ("ui:away_summary", "After you've been away for 10 minutes or more, show what happened"),
+            ]
+            .map(|(key, text)| {
+                let on = self.store.setting(key).is_none_or(|v| v != "0");
+                ui::switch(key, text, on).on_click(cx.listener(move |this, _, _, cx| {
+                    let _ = this.store.set_setting(key, if on { "0" } else { "1" });
+                    if key == "power:awake" {
+                        this.sync_awake();
+                    }
+                    cx.notify();
+                }))
+            }))
             .child(
                 div()
                     .flex()

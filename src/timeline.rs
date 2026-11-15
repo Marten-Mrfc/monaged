@@ -90,8 +90,15 @@ pub(crate) fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -
     match event.kind.as_str() {
         "turn" => {
             let cost: f64 = part(1).parse().unwrap_or(0.);
-            let model = crate::usage::pretty_model(part(0));
-            (Icon::Agent, format!("{} worked a turn · {model} · ${cost:.2}", agent_name(event.agent_id)), false)
+            // The model isn't always known (an adapter that doesn't say); leave it out then.
+            let mut text = format!("{} worked a turn", agent_name(event.agent_id));
+            if !part(0).trim().is_empty() {
+                text.push_str(&format!(" · {}", crate::usage::pretty_model(part(0))));
+            }
+            if cost >= 0.005 {
+                text.push_str(&format!(" · ${cost:.2}"));
+            }
+            (Icon::Agent, text, false)
         }
         "review" => {
             let score: u8 = part(0).parse().unwrap_or(0);
@@ -103,10 +110,6 @@ pub(crate) fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -
             (Icon::Plus, format!("{} joined{role}", part(0)), false)
         }
         "run" => (Icon::Flow, format!("Pipeline finished: {} plan, {} workstream(s), ${}", part(0), part(1), part(2)), false),
-        // The quality gate: below the bar is worth seeing in red.
-        "gate" => (Icon::Shield, event.data.clone(), event.data.contains("waits for you")),
-        "lead" => (Icon::Flow, event.data.clone(), false),
-        "debug" => (Icon::Ask, event.data.clone(), false),
         kind if kind.starts_with("board:") => {
             let what = kind.trim_start_matches("board:");
             (Icon::Board, format!("{} posted a {what}: {}", part(0), part(1)), false)
@@ -120,9 +123,13 @@ pub(crate) fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -
                 "conflict" | "failed" => Icon::Alert,
                 "archive" | "restore" => Icon::Archive,
                 "commit" => Icon::Commit,
+                "gate" => Icon::Shield,
+                "lead" => Icon::Flow,
+                "debug" => Icon::Ask,
                 _ => Icon::Dot,
             };
-            (glyph, event.data.clone(), matches!(what, "conflict" | "failed"))
+            // Work held below the bar waits for you: worth seeing in red.
+            (glyph, event.data.clone(), matches!(what, "conflict" | "failed") || (what == "gate" && event.data.contains("waits for you")))
         }
         _ => (Icon::Dot, event.data.clone(), false),
     }

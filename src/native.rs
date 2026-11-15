@@ -362,6 +362,15 @@ mod imp {
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("couldn't open Explorer: {e}"))
     }
+
+    /// Keeps Windows from going to sleep (the screen may still turn off) until called with false.
+    pub fn keep_awake(on: bool) {
+        use windows::Win32::System::Power::{ES_CONTINUOUS, ES_SYSTEM_REQUIRED, SetThreadExecutionState};
+        // SAFETY: a plain flag call; it applies to the calling (UI) thread until changed.
+        unsafe {
+            SetThreadExecutionState(if on { ES_CONTINUOUS | ES_SYSTEM_REQUIRED } else { ES_CONTINUOUS });
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -414,6 +423,8 @@ mod imp {
     pub fn reveal_in_explorer(_: &Path) -> Result<()> {
         Ok(())
     }
+
+    pub fn keep_awake(_: bool) {}
 }
 
 pub use imp::*;

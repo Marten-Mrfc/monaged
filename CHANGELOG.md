@@ -6,6 +6,16 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **F8: the next thing that needs you.** Goes to the next subproject's dashboard with something waiting (Ctrl K → "Go to what needs you" too).
+- **While you were away**: after 10 minutes or more away from Monaged, a card says what happened meanwhile (agents that worked and the cost, reviews, merges, finished pipelines, failures, what waits for you). Settings → General turns it off.
+- **The PC stays awake while agents work** or reviews run, so Windows doesn't sleep and pause WSL mid-task (the screen can still turn off).
+- **Closing asks first while agents work**: closing Monaged stops them, so it says so and lets you keep it open.
+- **Agents you start are named after your first message** (`fix-failing-coupon` instead of `agent-3`).
+- **Quick replies** when an agent ends on a question: "Yes, go ahead" or "No, that's all for now" in one click.
+- **Open a terminal** in an agent's worktree or a project's repo, from their menus or Ctrl K.
+- **Copy the conversation** of one agent as Markdown (secrets masked), to paste into a chat.
+- **The sidebar folds pipeline agents whose part is done** (research, verification, the plan) into one row.
+
 - **Export for analysis** (Ctrl K, a project's menu, Settings → Connect Claude): a Markdown report to read or paste into a chat with Claude, and a zip with every conversation in full, the pipeline data as JSON, git's view of each project, Monaged's log and a screenshot. Secret values and token-shaped text are masked.
 - **Connect Claude**: an MCP server (`monaged.exe --mcp-debug`) for Claude Desktop or Claude Code, so Claude can look at the running app: its status, projects, subprojects, agents and their conversations, diffs, what waits for you, the log, screenshots, and exports; with your permission it can also message, stop and review agents. One click adds it to Claude Desktop or to Claude Code in WSL.
 - **The dashboard's Recent list**, and agents ordered by what matters now (needing you, working, then the agents doing the work, then the ones whose part is done).
@@ -15,6 +25,7 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 - **Agents get no git tokens by default.** Git in agents' commands has no credential helpers and Monaged's helper refuses agents, so an agent can't ask git for your GitHub or GitLab token. Settings → Git accounts can allow it; Monaged's own pushes and your terminal are unaffected.
 - **Sandboxed projects' tests run fenced**: when a project uses Claude Code's sandbox, the review runs the tests in bubblewrap without Windows drives or WSL interop.
 - The merge rule chip says what it does: "auto from 4/5".
+- The message box's hint follows a renamed agent; the timeline leaves out an unknown model and $0.00 instead of showing "· ·".
 
 ### Fixed
 

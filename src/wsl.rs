@@ -248,3 +248,19 @@ pub fn decode(bytes: &[u8]) -> String {
         String::from_utf8_lossy(bytes).into_owned()
     }
 }
+
+/// Opens a terminal (your default one: Windows Terminal or the console)
+/// with a shell in `path` inside the distro.
+pub fn open_terminal(distro: &str, path: &str) -> Result<()> {
+    let script = format!("cd {} 2>/dev/null || cd ~; exec \"${{SHELL:-bash}}\" -l", shell_path(path));
+    let mut command = Command::new("wsl.exe");
+    command.args(["-d", distro, "--cd", "~", "--", "bash", "-c", &script]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // A console of its own (the app has none to share).
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        command.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    command.spawn().map(|_| ()).context("couldn't start wsl.exe")
+}

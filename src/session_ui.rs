@@ -60,6 +60,14 @@ impl Monaged {
     // ---- Message box wiring ----------------------------------------------------------------
 
     /// Creates an agent's message box (multi-line, with its earlier messages on Up).
+    /// The message box says who it goes to; a rename has to say so too.
+    pub(crate) fn refresh_composer_hint(&mut self, agent_id: i64, cx: &mut Context<Self>) {
+        let Some(name) = self.agent(agent_id).map(|a| a.record.name.clone()) else { return };
+        if let Some(input) = self.inputs.get(&agent_id) {
+            input.update(cx, |input, cx| input.set_placeholder(format!("Message {name}   ·   / for commands"), cx));
+        }
+    }
+
     pub(crate) fn make_composer(&mut self, agent_id: i64, cx: &mut Context<Self>) -> Entity<TextInput> {
         let (name, history) = self.agent(agent_id).map(|a| (a.record.name.clone(), a.typed_messages())).unwrap_or_default();
         let ctrl_send = self.store.setting("composer:send").as_deref() == Some("ctrl-enter");
@@ -379,6 +387,33 @@ impl Monaged {
             .tooltip(tip("Attach files or images (or paste, or drop them here)"))
             .on_click(cx.listener(move |this, _, _, cx| this.pick_files(id, cx)));
 
+        // The agent ended on a question ("Want me to…?"): one click answers it.
+        let quick = (!busy && !has_text && agent.queued_prompt.is_none() && crate::qol::ends_on_question(agent)).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .children(crate::qol::QUICK_REPLIES.iter().enumerate().map(|(i, reply)| {
+                    div()
+                        .id(("quick-reply", (id as usize) * 8 + i))
+                        .px(px(9.))
+                        .py(px(3.))
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(rgb(theme::line_strong()))
+                        .text_size(px(12.))
+                        .text_color(rgb(theme::text_2()))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text())))
+                        .child(*reply)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.bypass_budget = true;
+                            this.send_prompt(id, reply.to_string());
+                            this.bypass_budget = false;
+                            cx.notify();
+                        }))
+                }))
+        });
         // Waiting to go out: queued while busy, or held by the budget.
         let queued = agent.queued_prompt.clone().map(|text| {
             let line = text.lines().next().unwrap_or_default().chars().take(90).collect::<String>();
@@ -519,6 +554,7 @@ impl Monaged {
             .drag_over::<ExternalPaths>(|s, _, _, _| s.border_color(rgb(theme::text_2())).bg(rgb(theme::hover())))
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| this.attach_paths(id, paths.paths(), cx)))
             .children(popup)
+            .children(quick)
             .children(queued)
             .children(attachments)
             .child(input)
@@ -1042,6 +1078,7 @@ impl Monaged {
                     p.rename(&old, &name);
                     self.save_pipeline(sub_id);
                 }
+                self.refresh_composer_hint(agent_id, cx);
                 self.toast(Tone::Info, format!("Renamed to {name}"), cx);
             }
             Err(err) => self.toast_error(format!("Couldn't rename: {err:#}"), cx),

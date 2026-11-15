@@ -66,6 +66,9 @@ pub(crate) enum Command {
     OnePane(bool),
     ChangesBeside(bool),
     Dashboard(i64),
+    Terminal(String),
+    CopyConversation(i64),
+    NextNeedsYou,
     Export(crate::export::Scope),
     StartLead(i64),
     Density(bool),
@@ -180,10 +183,26 @@ impl Monaged {
         if let Some(agent) = self.sel_agent.and_then(|id| self.agent(id)) {
             out.push(Entry { group: "Actions", glyph: Icon::Eye, title: "Review".into(), detail: agent.record.name.clone(), state: None, hint: None, command: Command::Review(agent.record.id) });
             out.push(Entry { group: "Actions", glyph: Icon::External, title: "Open worktree in Zed".into(), detail: agent.record.name.clone(), state: None, hint: None, command: Command::OpenInZed(agent.record.worktree.clone()) });
+            out.push(Entry { group: "Actions", glyph: Icon::Terminal, title: "Open a terminal in the worktree".into(), detail: agent.record.name.clone(), state: None, hint: None, command: Command::Terminal(agent.record.worktree.clone()) });
+            if !agent.items.is_empty() {
+                out.push(Entry { group: "Actions", glyph: Icon::Copy, title: "Copy the conversation".into(), detail: "As Markdown, secrets masked: to paste into a chat".into(), state: None, hint: None, command: Command::CopyConversation(agent.record.id) });
+            }
         }
         if let Some(project) = self.sel_project.and_then(|id| self.projects.iter().find(|p| p.id == id)) {
             out.push(Entry { group: "Actions", glyph: Icon::Layers, title: "New subproject".into(), detail: project.name.clone(), state: None, hint: None, command: Command::NewSub(project.id) });
             out.push(Entry { group: "Actions", glyph: Icon::Sliders, title: "Project settings".into(), detail: "MCP servers, knowledge, run commands".into(), state: None, hint: None, command: Command::ProjectSettings(project.id) });
+        }
+        let waiting = self.inbox().len();
+        if waiting > 0 {
+            out.push(Entry {
+                group: "Actions",
+                glyph: Icon::Alert,
+                title: "Go to what needs you".into(),
+                detail: format!("{waiting} thing{} waiting", if waiting == 1 { "" } else { "s" }),
+                state: None,
+                hint: crate::keys::hint("next-needs-you"),
+                command: Command::NextNeedsYou,
+            });
         }
         out.push(Entry { group: "Actions", glyph: Icon::Folder, title: "Add a project".into(), detail: String::new(), state: None, hint: None, command: Command::NewProject });
         if matches!(self.conn, crate::Conn::Failed(_)) || self.logged_in == Some(false) {
@@ -412,6 +431,9 @@ impl Monaged {
             Command::NewAgent(id) => self.add_agent(id, cx),
             Command::RunPipeline(id) => self.open_pipeline_form(id, window, cx),
             Command::OpenInZed(path) => self.open_in_zed(path, cx),
+            Command::Terminal(path) => self.open_terminal(&path, cx),
+            Command::CopyConversation(id) => self.copy_conversation(id, cx),
+            Command::NextNeedsYou => self.next_needs_you(cx),
             Command::Push(id) => self.push_sub(id, false, cx),
             Command::Review(id) => self.review_agent(id, cx),
             Command::Inspector(tab) => {

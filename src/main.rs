@@ -52,6 +52,7 @@ mod pipeline;
 mod playground;
 mod pipeline_edit;
 mod pipeline_ui;
+mod qol;
 mod project_ui;
 mod queue_ui;
 mod review;
@@ -99,7 +100,7 @@ use text_input::TextInput;
 
 actions!(
     monaged,
-    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext, FocusTree, ToggleSideChat, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen]
+    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext, FocusTree, ToggleSideChat, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen, NextNeedsYou]
 );
 
 pub(crate) enum Conn {
@@ -267,6 +268,16 @@ struct Monaged {
     dismissed: HashSet<i64>,
     /// An export is being written.
     exporting: bool,
+    /// Windows is being kept awake (an agent works).
+    awake: bool,
+    /// You chose to close despite running work.
+    closing: bool,
+    /// When Monaged stopped being the active window (for the away summary).
+    away_since: Option<(Instant, i64)>,
+    /// "While you were away", until you close it.
+    away: Option<qol::Away>,
+    /// Subprojects whose finished pipeline agents you unfolded in the sidebar.
+    show_helpers: HashSet<i64>,
     /// The dashboard has room for the lead's chat (set as it's laid out).
     dashboard_chat: bool,
     /// Updates for a lead that's busy: sent with its next message.
@@ -489,8 +500,12 @@ impl Monaged {
             if this.window_active {
                 notify::flash(false);
             }
+            this.on_activation(this.window_active);
             cx.notify();
         });
+        // The close button asks first when agents are working.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| weak.upgrade().is_none_or(|view| view.update(cx, |this, cx| this.should_close(window, cx))));
 
         let mut this = Self {
             store,
@@ -545,6 +560,11 @@ impl Monaged {
             starting_lead: HashSet::new(),
             starting_build: HashSet::new(),
             dashboard_chat: true,
+            awake: false,
+            closing: false,
+            away_since: None,
+            away: None,
+            show_helpers: HashSet::new(),
             lead_updates: HashMap::new(),
             lead_reviews: HashSet::new(),
             one_pane: false,
@@ -1464,6 +1484,9 @@ impl Monaged {
         if let Some(agent) = self.agent_mut(agent_id) {
             agent.answers.clear();
         }
+        // "agent-3" gets a name from what you asked it.
+        self.name_from_first_message(agent_id, &text);
+        self.refresh_composer_hint(agent_id, cx);
         self.bypass_budget = true;
         self.send_prompt(agent_id, text);
         self.bypass_budget = false;
@@ -1562,6 +1585,10 @@ impl Monaged {
 
     fn on_next_agent(&mut self, _: &NextAgent, _window: &mut Window, cx: &mut Context<Self>) {
         self.step_agent(1, cx);
+    }
+
+    fn on_next_needs_you(&mut self, _: &NextNeedsYou, _window: &mut Window, cx: &mut Context<Self>) {
+        self.next_needs_you(cx);
     }
 
     /// Alt Up / Alt Down: the previous or next agent in this subproject.

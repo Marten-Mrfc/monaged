@@ -80,6 +80,12 @@ pub struct TextInput {
 const MASK: char = '•';
 
 impl TextInput {
+    /// The grey hint shown while it's empty (an agent was renamed).
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
             // Fields are tab stops: Tab and Shift+Tab move between them.

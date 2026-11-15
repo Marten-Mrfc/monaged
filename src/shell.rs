@@ -401,6 +401,7 @@ impl Monaged {
 
     pub(crate) fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.left_setup(cx);
+        self.sync_awake();
         let width = f32::from(window.viewport_size().width);
         // Keys only reach Monaged's actions through something focused: when a
         // closed palette, menu or form leaves nothing focused, take it back.
@@ -492,6 +493,7 @@ impl Monaged {
             .on_action(cx.listener(Self::on_new_agent_here))
             .on_action(cx.listener(Self::on_prev_agent))
             .on_action(cx.listener(Self::on_next_agent))
+            .on_action(cx.listener(Self::on_next_needs_you))
             .on_action(cx.listener(Self::on_toggle_zen))
             .on_action(cx.listener(Self::on_find))
             .on_action(cx.listener(Self::on_search_agents))
@@ -513,6 +515,7 @@ impl Monaged {
             .child(body)
             .when(!zen && !setup, |d| d.child(self.render_statusbar(cx)))
             // Floating layers, lowest first.
+            .children(self.render_away(cx))
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
             .children(self.render_menu(window, cx))
@@ -767,7 +770,14 @@ impl Monaged {
                 if !selected_sub {
                     continue;
                 }
-                for agent in self.agents.iter().filter(|a| a.record.subproject_id == sid && !a.record.archived) {
+                // Pipeline agents whose part is done fold into one row.
+                let (visible, folded) = self.sidebar_agents(sid);
+                let helpers_open = self.show_helpers.contains(&sid);
+                let mut rows: Vec<&AgentView> = visible;
+                if helpers_open {
+                    rows.extend(folded.iter().copied());
+                }
+                for agent in rows {
                     let aid = agent.record.id;
                     let role = agent.role();
                     let shown = self.sel_agent == Some(aid);
@@ -795,6 +805,27 @@ impl Monaged {
                                 } else {
                                     this.select_agent(aid, cx);
                                 }
+                            })),
+                    );
+                }
+                if !folded.is_empty() {
+                    ix += 1;
+                    let names: Vec<String> = folded.iter().map(|a| a.record.name.clone()).collect();
+                    list = list.child(
+                        ui::row(("show-helpers", sid as usize), false)
+                            .pl(px(46.))
+                            .text_color(rgb(theme::text_3()))
+                            .child(ui::disclosure(helpers_open))
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(if helpers_open {
+                                "Hide the agents whose part is done".to_string()
+                            } else {
+                                format!("{} done: {}", folded.len(), names.join(", "))
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.show_helpers.remove(&sid) {
+                                    this.show_helpers.insert(sid);
+                                }
+                                cx.notify();
                             })),
                     );
                 }

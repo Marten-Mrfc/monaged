@@ -37,6 +37,8 @@ pub(crate) struct MenuState {
 #[derive(Clone)]
 pub(crate) enum MenuAction {
     OpenProject(i64),
+    Terminal(String),
+    CopyConversation(i64),
     Export(i64),
     NewSub(i64),
     ToggleCollapse(i64),
@@ -134,6 +136,7 @@ impl Monaged {
                     item("Export for analysis", Icon::ArrowDown, MenuAction::Export(pid)),
                     Entry::Separator,
                     item("Open in Zed", Icon::External, MenuAction::OpenZed(project.path.clone())),
+                    item("Open a terminal here", Icon::Terminal, MenuAction::Terminal(project.path.clone())),
                     item("Copy path", Icon::Copy, MenuAction::Copy(project.path.clone(), "path")),
                     Entry::Separator,
                     item(if collapsed { "Expand" } else { "Collapse" }, if collapsed { Icon::ChevronDown } else { Icon::ChevronRight }, MenuAction::ToggleCollapse(pid)),
@@ -154,7 +157,8 @@ impl Monaged {
                     item("Board", Icon::Board, MenuAction::Inspector(sid, InspectorTab::Board)),
                     item("Merge", Icon::Merge, MenuAction::Inspector(sid, InspectorTab::Merge)),
                     Entry::Separator,
-                    item("Open the repo in Zed", Icon::External, MenuAction::OpenZed(path)),
+                    item("Open the repo in Zed", Icon::External, MenuAction::OpenZed(path.clone())),
+                    item("Open a terminal in the repo", Icon::Terminal, MenuAction::Terminal(path)),
                     item("Copy branch name", Icon::Copy, MenuAction::Copy(sub.branch.clone(), "branch name")),
                     item(
                         match self.sub_cap(sid) {
@@ -183,6 +187,8 @@ impl Monaged {
                     item("Review", Icon::Eye, MenuAction::Review(aid)).enabled(!agent.reviewing),
                     Entry::Separator,
                     item("Open the worktree in Zed", Icon::External, MenuAction::OpenZed(agent.record.worktree.clone())),
+                    item("Open a terminal in the worktree", Icon::Terminal, MenuAction::Terminal(agent.record.worktree.clone())),
+                    item("Copy the conversation", Icon::Copy, MenuAction::CopyConversation(aid)).enabled(!agent.items.is_empty()),
                     item("Copy worktree path", Icon::Copy, MenuAction::Copy(agent.record.worktree.clone(), "worktree path")),
                     item("Copy branch name", Icon::Branch, MenuAction::Copy(agent.record.branch.clone(), "branch name")),
                     Entry::Separator,
@@ -225,6 +231,8 @@ impl Monaged {
                 }
             }
             MenuAction::OpenZed(path) => self.open_in_zed(path, cx),
+            MenuAction::Terminal(path) => self.open_terminal(&path, cx),
+            MenuAction::CopyConversation(aid) => self.copy_conversation(aid, cx),
             MenuAction::Copy(text, what) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.toast(Tone::Info, format!("Copied the {what}"), cx);

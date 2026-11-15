@@ -30,6 +30,16 @@ A subproject's dashboard is the one place for what you need to do there:
 
 The inbox opens the dashboard too, and the dashboard button in an agent's header goes back to it.
 
+## Small things that save time
+
+- **F8** goes to the next subproject that waits for you (its dashboard, where you answer it); Ctrl K → "Go to what needs you" too.
+- **While you were away**: come back to Monaged after 10 minutes or more and a card says what happened: how many agents worked and what it cost, reviews, merges, pipelines that finished, what failed and what waits for you.
+- **Names**: an agent you start gets its name from your first message ("Please fix the failing coupon test" → `fix-failing-coupon`); rename it any time.
+- **Quick replies**: when an agent ends on a question ("Want me to look at it next?"), "Yes, go ahead" and "No, that's all for now" sit above the message box.
+- **The PC stays awake** while agents work or reviews run (the screen can still turn off), and **closing Monaged asks first** when agents are working, since that stops them. Settings → General turns either off.
+- **The sidebar folds** a pipeline's research, verification and planning agents into one row once their part is done.
+- An agent's menu: **Open a terminal in the worktree** (projects and subprojects have one for the repo) and **Copy the conversation** (Markdown, secrets masked, to paste into a chat).
+
 ## Talking to an agent
 
 - **Enter** sends, **Shift Enter** adds a line (swap them in Settings → Message box). **↑** on the first line brings back what you sent.

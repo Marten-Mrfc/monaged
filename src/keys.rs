@@ -25,6 +25,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     Shortcut { id: "palette", label: "Search and run a command", group: "Move around", default: "ctrl-k" },
     Shortcut { id: "prev-agent", label: "Previous agent", group: "Move around", default: "alt-up" },
     Shortcut { id: "next-agent", label: "Next agent", group: "Move around", default: "alt-down" },
+    Shortcut { id: "next-needs-you", label: "The next thing that needs you", group: "Move around", default: "f8" },
     Shortcut { id: "tree", label: "Move through the sidebar", group: "Move around", default: "ctrl-0" },
     Shortcut { id: "find", label: "Find in this conversation", group: "Move around", default: "ctrl-f" },
     Shortcut { id: "search", label: "Search all agents", group: "Move around", default: "ctrl-shift-f" },
@@ -121,6 +122,7 @@ fn binding(id: &str, keys: &str) -> Option<KeyBinding> {
         "prev-agent" => KeyBinding::new(keys, PrevAgent, None),
         "next-agent" => KeyBinding::new(keys, NextAgent, None),
         "tree" => KeyBinding::new(keys, FocusTree, None),
+        "next-needs-you" => KeyBinding::new(keys, NextNeedsYou, None),
         "find" => KeyBinding::new(keys, FindInConversation, None),
         "search" => KeyBinding::new(keys, SearchAgents, None),
         "sidebar" => KeyBinding::new(keys, ToggleSidebar, None),
@@ -178,12 +180,14 @@ impl Monaged {
                 if self.sel_sub != Some(sub.id) || self.form.is_some() {
                     continue;
                 }
-                let archived_open = self.show_archived.contains(&sub.id);
-                for archived in [false, true] {
-                    if archived && !archived_open {
-                        continue;
-                    }
-                    for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub.id && a.record.archived == archived) {
+                // The same rows as the sidebar: folded agents only when unfolded.
+                let (visible, folded) = self.sidebar_agents(sub.id);
+                rows.extend(visible.iter().map(|a| TreeNode::Agent(a.record.id)));
+                if self.show_helpers.contains(&sub.id) {
+                    rows.extend(folded.iter().map(|a| TreeNode::Agent(a.record.id)));
+                }
+                if self.show_archived.contains(&sub.id) {
+                    for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub.id && a.record.archived) {
                         rows.push(TreeNode::Agent(agent.record.id));
                     }
                 }
