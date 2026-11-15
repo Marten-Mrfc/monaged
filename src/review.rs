@@ -185,7 +185,19 @@ pub fn summarize(backend: &Backend, turn: &TurnInfo) -> Result<(Summary, Usage)>
 /// Project settings when set, else the one in monaged.json (as the Run tab
 /// does), else a detected one. Python runs pytest only when it's importable,
 /// else unittest, so a missing pytest isn't counted as failing tests.
-pub fn run_checks(distro: &str, worktree: &str, command: Option<&str>, base: Option<&str>) -> Checks {
+/// How a test command runs: as is, or (when the project uses Claude Code's
+/// sandbox) in bubblewrap without Windows drives or WSL interop, so tests the
+/// agent wrote can't reach outside the sandbox through the review.
+fn runner(fence: bool) -> &'static str {
+    if fence {
+        "command -v bwrap >/dev/null 2>&1 || { echo MONAGED_NO_FENCE; exit 0; }\n\
+         set -- bwrap --dev-bind / / --tmpfs /mnt; [ -d /run/WSL ] && set -- \"$@\" --tmpfs /run/WSL; set -- \"$@\" --die-with-parent bash -lc\n"
+    } else {
+        "set -- bash -lc\n"
+    }
+}
+
+pub fn run_checks(distro: &str, worktree: &str, command: Option<&str>, base: Option<&str>, fence: bool) -> Checks {
     let script = format!(
         r#"cd {wt} || exit 1
 cmd={given}
@@ -205,17 +217,21 @@ elif [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -d tests ]; then
 elif [ -f Makefile ] && grep -qE '^test:' Makefile; then cmd='make test'
 else echo MONAGED_NO_CHECKS; exit 0; fi
 echo "MONAGED_CMD $cmd"
-out=$(timeout 600 bash -lc "$cmd" 2>&1); code=$?
+{runner}out=$(timeout 600 "$@" "$cmd" 2>&1); code=$?
 printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)' | head -n 200 | sed 's/^/MONAGED_FAILLINE /'
 echo "MONAGED_EXIT $code"
 printf '%s\n' "$out" | tail -n 30"#,
         wt = quote(worktree),
         given = quote(command.unwrap_or_default()),
+        runner = runner(fence),
     );
     let out = match run(distro, &script) {
         Ok(out) => out,
         Err(err) => return Checks::Unavailable(format!("{err:#}")),
     };
+    if out.contains("MONAGED_NO_FENCE") {
+        return Checks::Unavailable("this project uses the sandbox, and running the tests fenced needs bubblewrap in WSL (the setup guide's extras install it)".into());
+    }
     if out.contains("MONAGED_NO_CHECKS") {
         return Checks::NotFound;
     }
@@ -234,7 +250,7 @@ printf '%s\n' "$out" | tail -n 30"#,
         _ => {
             // Were these tests failing before the agent started? Then they aren't its doing.
             let now: String = out.lines().filter_map(|l| l.strip_prefix("MONAGED_FAILLINE ")).collect::<Vec<_>>().join("\n");
-            match base.and_then(|base| base_failures(distro, worktree, base, &command)) {
+            match base.and_then(|base| base_failures(distro, worktree, base, &command, fence)) {
                 Some(before) if only_failed_before(&now, &before) => Checks::FailedBefore { command, tail },
                 _ => Checks::Failed { command, tail },
             }
@@ -242,31 +258,51 @@ printf '%s\n' "$out" | tail -n 30"#,
     }
 }
 
+/// Base-branch results, by (worktree's repo, base commit, command): a
+/// failing review would otherwise run the base's tests again every time.
+static BASE_RESULTS: std::sync::Mutex<Vec<(String, Option<String>)>> = std::sync::Mutex::new(Vec::new());
+
 /// The failing-test lines of the same command on the base branch (in a
-/// throwaway worktree), or None when that couldn't run or passed.
-fn base_failures(distro: &str, worktree: &str, base: &str, command: &str) -> Option<String> {
+/// throwaway checkout that borrows the worktree's installed dependencies),
+/// or None when that couldn't run or passed.
+fn base_failures(distro: &str, worktree: &str, base: &str, command: &str, fence: bool) -> Option<String> {
+    let sha = run(distro, &format!("cd {} && git rev-parse --verify --quiet {}^{{commit}}", quote(worktree), quote(base))).ok()?;
+    let sha = sha.trim().lines().last()?.to_string();
+    let key = format!("{distro}\n{sha}\n{command}\n{fence}");
+    if let Some((_, cached)) = BASE_RESULTS.lock().ok()?.iter().find(|(k, _)| *k == key) {
+        return cached.clone();
+    }
     let script = format!(
         r#"cd {wt} || exit 1
-tmp=$(mktemp -d) || exit 1
-if ! git worktree add --detach -q "$tmp/base" {base} >/dev/null 2>&1; then rm -rf "$tmp"; echo MONAGED_NO_BASE; exit 0; fi
+wt=$(pwd -P)
+{runner}tmp=$(mktemp -d) || exit 1
+if ! git worktree add --detach -q "$tmp/base" {sha} >/dev/null 2>&1; then rm -rf "$tmp"; echo MONAGED_NO_BASE; exit 0; fi
 cd "$tmp/base"
-out=$(timeout 600 bash -lc {cmd} 2>&1); code=$?
-cd {wt}
+# Installed dependencies aren't in git: borrow the worktree's.
+for d in node_modules .venv venv vendor; do [ -e "$wt/$d" ] && [ ! -e "$d" ] && ln -s "$wt/$d" "$d"; done
+[ -d "$wt/target" ] && export CARGO_TARGET_DIR="$wt/target"
+out=$(timeout 600 "$@" {cmd} 2>&1); code=$?
+cd "$wt"
 git worktree remove --force "$tmp/base" >/dev/null 2>&1
 rm -rf "$tmp"
 git worktree prune >/dev/null 2>&1
 echo "MONAGED_EXIT $code"
 printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)' | head -n 200"#,
         wt = quote(worktree),
-        base = quote(base),
+        sha = quote(&sha),
         cmd = quote(command),
+        runner = runner(fence),
     );
     let out = run(distro, &script).ok()?;
     let code: i32 = out.lines().find_map(|l| l.strip_prefix("MONAGED_EXIT ")).and_then(|c| c.trim().parse().ok())?;
-    if code == 0 {
-        return None;
+    let result = (code != 0).then(|| out.lines().skip_while(|l| !l.starts_with("MONAGED_EXIT")).skip(1).collect::<Vec<_>>().join("\n"));
+    if let Ok(mut cache) = BASE_RESULTS.lock() {
+        if cache.len() > 32 {
+            cache.remove(0);
+        }
+        cache.push((key, result.clone()));
     }
-    Some(out.lines().skip_while(|l| !l.starts_with("MONAGED_EXIT")).skip(1).collect::<Vec<_>>().join("\n"))
+    result
 }
 
 // ---- Adversarial review ----------------------------------------------------

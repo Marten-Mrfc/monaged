@@ -675,6 +675,7 @@ impl Monaged {
             cx.notify();
             return;
         }
+        self.config.agents_use_git_accounts = self.store.setting("git:agents_use_accounts").as_deref() == Some("1");
         let mut events = acp::launch(self.config.clone());
         self._events = cx.spawn(async move |view, cx| {
             while let Some(event) = events.next().await {

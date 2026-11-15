@@ -720,6 +720,11 @@ pub fn parse_helper_args(args: &[String]) -> Option<String> {
 pub fn run_helper(operation: &str) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
+    // Git run by an agent (Monaged marks their processes) gets no tokens,
+    // unless you let agents use your git accounts.
+    if std::env::var("MONAGED_AGENT").as_deref() == Ok("1") {
+        return Ok(());
+    }
     let fields: HashMap<&str, &str> = input.lines().filter_map(|l| l.split_once('=')).collect();
     let protocol = fields.get("protocol").copied().unwrap_or_default();
     let host = normalize_host(fields.get("host").copied().unwrap_or_default());

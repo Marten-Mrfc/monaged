@@ -681,6 +681,27 @@ impl Monaged {
                 }),
         );
 
+        // Agents and your tokens.
+        let agents_may = self.store.setting("git:agents_use_accounts").as_deref() == Some("1");
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .pt(px(6.))
+                .child(
+                    ui::switch("agents-git", "Agents can use these accounts too (push, or pull from private repositories)", agents_may).on_click(cx.listener(move |this, _, _, cx| {
+                        let _ = this.store.set_setting("git:agents_use_accounts", if agents_may { "0" } else { "1" });
+                        this.toast(Tone::Info, "Applies when the agent connection restarts (Ctrl K → Reconnect, or the next start).", cx);
+                        cx.notify();
+                    })),
+                )
+                .child(ui::meta(
+                    "Off by default: Monaged pushes and opens pull requests itself, so agents don't need your tokens, and git in an agent's commands gets none. \
+                     Agents run as you, so without Claude Code's sandbox a determined one could still find a way around this; the sandbox (Project settings) is the real fence.",
+                )),
+        );
+
         // SSH keys.
         col = col.child(self.render_ssh_keys(cx));
         col.into_any_element()

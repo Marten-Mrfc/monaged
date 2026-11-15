@@ -246,6 +246,7 @@ impl Monaged {
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| v["test"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned));
         let project_id = self.project_of_agent(agent_id);
+        let fence = project_id.is_some_and(|p| self.store.setting(&format!("env:sandbox:{p}")).as_deref() == Some("1"));
         let shared_notes = project_id.and_then(|p| self.shared_notes_path(p));
         let settled = project_id.map(|p| self.settled_findings(p)).unwrap_or_default();
         let Some(agent) = self.agent_mut(agent_id) else { return };
@@ -270,7 +271,7 @@ impl Monaged {
                     if changes.files.is_empty() {
                         return anyhow::Ok((changes, None));
                     }
-                    let checks = review::run_checks(&distro, &worktree, test_command.as_deref(), Some(&base));
+                    let checks = review::run_checks(&distro, &worktree, test_command.as_deref(), Some(&base), fence);
                     // The notes and the changed files in full, so the reviewer sees what the diff leans on.
                     let changed: Vec<String> = changes.files.iter().filter(|f| f.status != "deleted").map(|f| f.path.clone()).collect();
                     let (knowledge, files, left_out) = review::read_context(&distro, &worktree, shared_notes.as_deref(), &changed);

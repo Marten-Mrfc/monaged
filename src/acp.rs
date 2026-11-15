@@ -26,13 +26,22 @@ pub struct AgentConfig {
     pub distro: String,
     /// Path of the ACP agent executable inside Linux (`~` allowed).
     pub agent_cmd: String,
+    /// Agents may use your git accounts (Settings → Git accounts). Off: git
+    /// in agents' commands has no credential helpers, and Monaged's helper
+    /// refuses them, so they can't read your tokens by asking git for them.
+    pub agents_use_git_accounts: bool,
 }
+
+/// What agent processes start with when they may not use your git accounts.
+pub const AGENT_GIT_GUARD: &str = "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= MONAGED_AGENT=1; \
+export WSLENV=\"MONAGED_AGENT${WSLENV:+:$WSLENV}\"; ";
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             distro: "Ubuntu".into(),
             agent_cmd: "~/.local/share/claude-agent-acp/current/claude-agent-acp".into(),
+            agents_use_git_accounts: false,
         }
     }
 }
@@ -88,7 +97,8 @@ pub fn launch(config: AgentConfig) -> UnboundedReceiver<AgentEvent> {
 }
 
 fn run(config: &AgentConfig, tx: &UnboundedSender<AgentEvent>) -> Result<()> {
-    let mut child = wsl::bash(&config.distro, &format!("cd ~ && exec {}", config.agent_cmd))
+    let guard = if config.agents_use_git_accounts { "" } else { AGENT_GIT_GUARD };
+    let mut child = wsl::bash(&config.distro, &format!("cd ~ && {guard}exec {}", config.agent_cmd))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
