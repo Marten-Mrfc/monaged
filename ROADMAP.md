@@ -395,6 +395,18 @@ On a real PC, Sophos reported "'Lockdown' malicious behavior prevented in Monage
 
 **Not tested on a real PC yet:** that Sophos stays quiet through installing, setting up and uninstalling.
 
+### Release 0.5.0: sounds (done 2026-11-15)
+Asked for: sounds and feedback, but only at logical moments, based on research.
+
+What the research said (Material Design's sound guidelines, Google's earcon guidance, earcon studies, Microsoft's notification-state docs): silence is the default and part of the design; a few distinct, consistent sounds; alerts brighter and louder than everyday feedback; rising for confirmation, low or falling for errors; don't imitate system sounds; respect presentation and full-screen states.
+
+- [x] **Five cues** for moments you might miss: needs you, an agent is done, a feature is complete, finished (long actions you started), something went wrong. Nothing for messages, tool calls, typing or clicks, or for the agent you're looking at.
+- [x] **Synthesized, not files:** soft bell-like notes rendered once and played from memory (PlaySound); measured: the intended notes, no energy above 5 kHz (no clicks), silence at both ends, a loudness order from -6 dBFS (needs you) to -12.5 dBFS (finished) at Normal.
+- [x] **Rules:** bursts as one sound, the important one wins, the same sound not again within 5 s; quiet while presenting, in full-screen apps, during quiet time or while away; Windows' own notification ding off while Monaged's sounds are on.
+- [x] Settings → Sounds with previews, volume and per-cue switches; Ctrl K → Mute sounds.
+
+**Not tested on a real PC yet:** hearing them through PlaySound on Windows (the WAVs were checked as files), and whether the levels sit well next to other apps.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.
