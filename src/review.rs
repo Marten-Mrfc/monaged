@@ -29,6 +29,24 @@ pub enum Checks {
 }
 
 impl Checks {
+    /// Reads `describe`'s text back (saved reviews keep only that), to score again.
+    pub fn from_description(text: &str) -> Checks {
+        if let Some(why) = text.strip_prefix("Checks couldn't run: ") {
+            return Checks::Unavailable(why.to_string());
+        }
+        if text.starts_with("No automated checks found") {
+            return Checks::NotFound;
+        }
+        let command = || text.strip_prefix('`').and_then(|t| t.split_once('`')).map(|(c, _)| c.to_string()).unwrap_or_else(|| "tests".into());
+        if let Some((_, tail)) = text.split_once(" FAILED. Last output:\n") {
+            return Checks::Failed { command: command(), tail: tail.to_string() };
+        }
+        if text.ends_with(" passed.") {
+            return Checks::Passed(command());
+        }
+        Checks::Unavailable("unknown".into())
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Checks::NotFound => "No automated checks found (no test setup detected).".into(),
@@ -163,15 +181,179 @@ printf '%s\n' "$out" | tail -n 30"#,
 // ---- Adversarial review ----------------------------------------------------
 
 const REVIEW_SYSTEM: &str = "You are a skeptical senior code reviewer. Your job is to find concrete reasons why this \
-change would NOT do what the task asked, or would break something. Assume nothing works until the diff shows it. \
-Report only problems you can point to in the diff (which file, what is wrong). Do not invent issues and do not pad \
-with style nits. Severity: high = it will fail or break existing behaviour; medium = a likely bug or a missing piece \
-the task needs; low = a minor risk. verdict: works, partly, broken, or unclear (unclear only when the diff is too \
-partial to judge). summary: one sentence.";
+change would NOT do what the task asked, or would break something. Assume nothing works until the code shows it.
+
+You get: the task and the user's later messages (later ones can change or add to the task); the project's notes \
+(its conventions and decisions: follow them, and don't report something they explain or allow); the agent's own \
+account of its work (a claim to check against the code, never evidence by itself); findings the user already ruled \
+out, with their reasons (don't report them again unless the change made them real); the automated checks; the diff; \
+and the full current text of the changed files.
+
+Report only problems you can point to in the code shown (which file, what is wrong). Use the full files to check that \
+what the diff calls, imports or changes really exists and fits. When something only looks wrong because it depends on \
+code you can't see, leave it out, or report it as low and say what you couldn't check. Do not invent issues and do not \
+pad with style nits. Severity: high = it will fail or break existing behaviour; medium = a likely bug or a missing \
+piece the task needs; low = a minor risk. verdict: works, partly, broken, or unclear (unclear only when what's shown \
+is too partial to judge). summary: one sentence.";
+
+/// A finding you said isn't a problem, and why (the next reviews are told).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settled {
+    pub file: String,
+    pub problem: String,
+    pub reason: String,
+}
+
+pub fn settled_to_json(list: &[Settled]) -> Value {
+    Value::Array(list.iter().map(|s| json!({ "file": s.file, "problem": s.problem, "reason": s.reason })).collect())
+}
+
+pub fn settled_from_json(text: &str) -> Vec<Settled> {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|v| Settled {
+            file: v["file"].as_str().unwrap_or_default().to_string(),
+            problem: v["problem"].as_str().unwrap_or_default().to_string(),
+            reason: v["reason"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect()
+}
+
+/// What the reviewer gets besides the diff and the checks, so it judges the
+/// change the way someone who knows the project would.
+#[derive(Clone, Debug, Default)]
+pub struct ReviewContext {
+    /// The agent's first message: the task.
+    pub task: String,
+    /// What you said after that, oldest first.
+    pub follow_ups: Vec<String>,
+    /// The agent's own account of its last turn.
+    pub report: String,
+    /// The project's CLAUDE.md and the shared notes for its agents.
+    pub knowledge: String,
+    /// Changed files' current text: (path, text).
+    pub files: Vec<(String, String)>,
+    /// Changed files left out for size.
+    pub files_left_out: usize,
+    pub settled: Vec<Settled>,
+}
+
+/// Room for the changed files' full text in one review (characters).
+const MAX_FILES_CHARS: usize = 80_000;
+/// The longest single file read in full.
+const MAX_FILE_CHARS: usize = 40_000;
+
+/// The script that reads the project notes and the changed files from the
+/// worktree: each text file between markers, binary files skipped.
+pub fn context_script(worktree: &str, shared_notes: Option<&str>, paths: &[String], marker: &str) -> String {
+    let mut s = format!(
+        "cd {} || exit 1\nemit() {{ [ -f \"$1\" ] || return 0; if [ -s \"$1\" ] && ! grep -Iq . \"$1\" 2>/dev/null; then return 0; fi; echo \"{marker}_BEGIN $2\"; head -c \"$3\" \"$1\"; echo; [ \"$(wc -c < \"$1\")\" -gt \"$3\" ] && echo '[… the rest of this file is left out …]'; echo \"{marker}_END\"; }}\n",
+        quote(worktree)
+    );
+    s.push_str("emit CLAUDE.md knowledge:CLAUDE.md 8000\n");
+    if let Some(notes) = shared_notes {
+        s.push_str(&format!("emit {} knowledge:shared 6000\n", crate::wsl::shell_path(notes)));
+    }
+    for path in paths {
+        s.push_str(&format!("emit {} {} {}\n", quote(path), quote(&format!("file:{path}")), MAX_FILE_CHARS));
+    }
+    s.push_str("true\n");
+    s
+}
+
+/// Reads `context_script`'s output: (label, text) in order.
+pub fn parse_context(out: &str, marker: &str) -> Vec<(String, String)> {
+    let (begin, end) = (format!("{marker}_BEGIN "), format!("{marker}_END"));
+    let mut found = Vec::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
+    for line in out.lines() {
+        if let Some(label) = line.strip_prefix(&begin) {
+            current = Some((label.to_string(), Vec::new()));
+        } else if line == end {
+            if let Some((label, lines)) = current.take() {
+                found.push((label, lines.join("\n").trim_end().to_string()));
+            }
+        } else if let Some((_, lines)) = current.as_mut() {
+            lines.push(line);
+        }
+    }
+    found
+}
+
+/// Reads the notes and changed files for a review (within the size budget).
+pub fn read_context(distro: &str, worktree: &str, shared_notes: Option<&str>, changed: &[String]) -> (String, Vec<(String, String)>, usize) {
+    let marker = format!("MONAGED_CTX_{}", std::process::id());
+    let Ok(out) = run(distro, &context_script(worktree, shared_notes, changed, &marker)) else { return (String::new(), Vec::new(), changed.len()) };
+    let mut knowledge = Vec::new();
+    let mut files = Vec::new();
+    let mut used = 0;
+    for (label, text) in parse_context(&out, &marker) {
+        if let Some(which) = label.strip_prefix("knowledge:") {
+            if !text.trim().is_empty() {
+                let title = if which == "shared" { "Shared notes for this project's agents" } else { "CLAUDE.md" };
+                knowledge.push(format!("## {title}\n{text}"));
+            }
+        } else if let Some(path) = label.strip_prefix("file:")
+            && used + text.len() <= MAX_FILES_CHARS
+        {
+            used += text.len();
+            files.push((path.to_string(), text));
+        }
+    }
+    let left_out = changed.len().saturating_sub(files.len());
+    (knowledge.join("\n\n"), files, left_out)
+}
+
+/// The review's prompt: everything the reviewer gets, in the order it reads best.
+pub fn review_prompt(context: &ReviewContext, diff: &str, checks: &Checks) -> (String, String) {
+    let (diff_text, diff_note) = if diff.len() > MAX_DIFF_CHARS {
+        let mut cut = MAX_DIFF_CHARS;
+        while !diff.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        (&diff[..cut], format!("\n[The diff is longer: only the first {MAX_DIFF_CHARS} of {} characters are shown.]", diff.len()))
+    } else {
+        (diff, String::new())
+    };
+    let mut prompt = format!("Task given to the agent:\n{}\n", clip(&context.task, 3000));
+    if !context.follow_ups.is_empty() {
+        prompt.push_str("\nThe user's later messages to the agent, oldest first:\n");
+        for message in context.follow_ups.iter().rev().take(8).rev() {
+            prompt.push_str(&format!("- {}\n", clip(message, 800).replace('\n', "\n  ")));
+        }
+    }
+    if !context.knowledge.trim().is_empty() {
+        prompt.push_str(&format!("\nThe project's notes (its conventions and decisions):\n{}\n", clip(&context.knowledge, 10_000)));
+    }
+    if !context.report.trim().is_empty() {
+        prompt.push_str(&format!("\nThe agent's own account of its last turn (a claim to check, not evidence):\n{}\n", clip(&context.report, 2500)));
+    }
+    if !context.settled.is_empty() {
+        prompt.push_str("\nFindings the user ruled out before (don't report them again unless this change made them real):\n");
+        for s in context.settled.iter().rev().take(25) {
+            let why = if s.reason.trim().is_empty() { "no reason given".to_string() } else { s.reason.clone() };
+            prompt.push_str(&format!("- {}: {} (user: {})\n", s.file, clip(&s.problem, 300), clip(&why, 300)));
+        }
+    }
+    prompt.push_str(&format!("\nAutomated checks:\n{}\n\nDiff (the agent's worktree vs. where its branch started):\n```diff\n{diff_text}\n```{diff_note}\n", checks.describe()));
+    if !context.files.is_empty() {
+        prompt.push_str("\nThe changed files as they are now:\n");
+        for (path, text) in &context.files {
+            prompt.push_str(&format!("\n--- {path} ---\n{text}\n"));
+        }
+        if context.files_left_out > 0 {
+            prompt.push_str(&format!("\n[{} more changed file(s) left out for size.]\n", context.files_left_out));
+        }
+    }
+    (prompt, diff_note)
+}
 
 const MAX_DIFF_CHARS: usize = 120_000;
 
-pub fn review(backend: &Backend, task: &str, diff: &str, checks: &Checks) -> Result<(Confidence, Usage)> {
+pub fn review(backend: &Backend, context: &ReviewContext, diff: &str, checks: &Checks) -> Result<(Confidence, Usage)> {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -194,22 +376,7 @@ pub fn review(backend: &Backend, task: &str, diff: &str, checks: &Checks) -> Res
         "required": ["verdict", "issues", "summary"],
         "additionalProperties": false
     });
-    let (diff_text, diff_note) = if diff.len() > MAX_DIFF_CHARS {
-        let mut cut = MAX_DIFF_CHARS;
-        while !diff.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        (&diff[..cut], format!("\n[The diff is longer: only the first {MAX_DIFF_CHARS} of {} characters are shown.]", diff.len()))
-    } else {
-        (diff, String::new())
-    };
-    let prompt = format!(
-        "Task given to the agent:\n{}\n\nAutomated checks:\n{}\n\nDiff (the agent's worktree vs. where its branch started):\n```diff\n{}\n```{}",
-        clip(task, 3000),
-        checks.describe(),
-        diff_text,
-        diff_note,
-    );
+    let (prompt, diff_note) = review_prompt(context, diff, checks);
     let (value, usage) = llm::complete_json(backend, REVIEW_SYSTEM, &prompt, &schema)?;
     let issues: Vec<Issue> = value["issues"]
         .as_array()
@@ -277,6 +444,63 @@ pub fn score(checks: &Checks, verdict: &str, issues: &[Issue]) -> (u8, Vec<Strin
     }
     let raw = 5.0 - 1.5 * high as f32 - 0.5 * medium.min(4) as f32;
     (raw.min(cap).round().clamp(1.0, 5.0) as u8, reasons)
+}
+
+/// Reasons `score` writes start with one of these marks; the rest (the
+/// reviewer's summary, notes) are kept when scoring again.
+const SCORE_MARKS: [&str; 5] = ["✓ ", "✕ ", "~ ", "? ", "– "];
+
+/// You said a finding isn't a problem: drop it and score again. Once no high
+/// or medium finding is left, the reviewer's "broken"/"partly" verdict no
+/// longer stands on anything shown, so it counts as unclear until the next review.
+pub fn rule_out(c: &mut Confidence, index: usize) -> Option<Issue> {
+    if index >= c.issues.len() {
+        return None;
+    }
+    let issue = c.issues.remove(index);
+    let ruled_before = c
+        .reasons
+        .iter()
+        .find_map(|r| r.strip_prefix("– You ruled out ").and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse::<usize>().ok()))
+        .unwrap_or(0);
+    let serious_left = c.issues.iter().any(|i| matches!(i.severity.as_str(), "high" | "medium"));
+    if !serious_left && matches!(c.verdict.as_str(), "broken" | "partly") {
+        c.verdict = "unclear".into();
+    }
+    let (score, mut reasons) = score(&Checks::from_description(&c.checks), &c.verdict, &c.issues);
+    let ruled = ruled_before + 1;
+    reasons.push(format!("– You ruled out {ruled} finding{}; review again to confirm", if ruled == 1 { "" } else { "s" }));
+    reasons.extend(c.reasons.iter().filter(|r| !SCORE_MARKS.iter().any(|m| r.starts_with(m))).cloned());
+    c.score = score;
+    c.reasons = reasons;
+    Some(issue)
+}
+
+/// The message that asks the agent to fix what the review found, or None
+/// when there's nothing to fix.
+pub fn fix_prompt(c: &Confidence) -> Option<String> {
+    let failed = match Checks::from_description(&c.checks) {
+        Checks::Failed { command, tail } => Some((command, tail)),
+        _ => None,
+    };
+    if c.issues.is_empty() && failed.is_none() {
+        return None;
+    }
+    let mut text = String::from(
+        "Monaged's review of your changes found the problems below. Check each one against the code first: \
+         if one isn't a real problem, say so and why instead of changing code. Fix the rest, then run the tests.\n",
+    );
+    if let Some((command, tail)) = failed {
+        text.push_str(&format!("\nThe tests failed (`{command}`). The end of their output:\n```\n{}\n```\n", clip(tail.trim(), 2500)));
+    }
+    if !c.issues.is_empty() {
+        text.push_str("\nFindings:\n");
+        for (n, issue) in c.issues.iter().enumerate() {
+            let place = if issue.file.trim().is_empty() { String::new() } else { format!(" {}:", issue.file.trim()) };
+            text.push_str(&format!("{}. [{}]{} {}\n", n + 1, issue.severity, place, issue.problem.trim()));
+        }
+    }
+    Some(text.trim_end().to_string())
 }
 
 /// Keeps the start and end of long text, marking the cut.

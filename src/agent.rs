@@ -462,6 +462,18 @@ impl AgentView {
         self.items.iter().find_map(|i| if let Item::User(t) = i { Some(t.clone()) } else { None }).unwrap_or_default()
     }
 
+    /// What you said after the task, oldest first (the reviewer reads these).
+    pub fn follow_ups(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter_map(|i| if let Item::User(t) = i { Some(t) } else { None })
+            .skip(1)
+            .filter(|t| !t.starts_with("[monaged-") && !t.contains(crate::coord::DIGEST_HEADER))
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+
     fn last_user_index(&self) -> Option<usize> {
         self.items.iter().rposition(|i| matches!(i, Item::User(_)))
     }

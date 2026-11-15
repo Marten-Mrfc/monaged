@@ -201,6 +201,20 @@ impl Monaged {
         if let Some(id) = focused {
             cols.push(Column::Agent(id));
         }
+        // One agent at a time: the focused one (or, with none, the first that
+        // needs you or is working).
+        if self.one_pane {
+            if cols.is_empty()
+                && let Some(agent) = self
+                    .agents
+                    .iter()
+                    .filter(|a| in_sub(a.record.id) && matches!(agent_state(a), State::Working | State::NeedsYou))
+                    .min_by_key(|a| (agent_state(a) != State::NeedsYou, std::cmp::Reverse(a.record.id)))
+            {
+                cols.push(Column::Agent(agent.record.id));
+            }
+            return cols;
+        }
         for &id in &self.pinned {
             if in_sub(id) && !cols.contains(&Column::Agent(id)) {
                 cols.push(Column::Agent(id));
@@ -210,7 +224,7 @@ impl Monaged {
         let mut others: Vec<&AgentView> = self
             .agents
             .iter()
-            .filter(|a| in_sub(a.record.id) && !cols.contains(&Column::Agent(a.record.id)))
+            .filter(|a| in_sub(a.record.id) && !cols.contains(&Column::Agent(a.record.id)) && !self.dismissed.contains(&a.record.id))
             .filter(|a| matches!(agent_state(a), State::Working | State::NeedsYou))
             .collect();
         others.sort_by_key(|a| (agent_state(a) != State::NeedsYou, std::cmp::Reverse(a.record.id)));
@@ -220,6 +234,7 @@ impl Monaged {
         cols.truncate(max);
         // Spare room: show the focused agent's changes beside its conversation.
         if let Some(id) = focused
+            && self.changes_beside
             && cols.len() < max
         {
             cols.insert(1, Column::Changes(id));
@@ -272,18 +287,40 @@ impl Monaged {
     }
 
     pub(crate) fn pin_beside(&mut self, agent_id: i64, cx: &mut Context<Self>) {
+        self.dismissed.remove(&agent_id);
         if !self.pinned.contains(&agent_id) && self.sel_agent != Some(agent_id) {
             self.pinned.push(agent_id);
+        }
+        // Asking for a second pane means side by side.
+        if self.one_pane {
+            self.set_one_pane(false, cx);
         }
         self.ensure_session(agent_id);
         cx.notify();
     }
 
+    /// Closes an agent's pane, and keeps it closed: an agent that's working
+    /// or needs you would otherwise get its pane right back.
     pub(crate) fn close_column(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         self.pinned.retain(|&id| id != agent_id);
+        self.dismissed.insert(agent_id);
         if self.sel_agent == Some(agent_id) {
             self.sel_agent = self.pinned.first().copied();
         }
+        cx.notify();
+    }
+
+    /// One agent at a time, or several side by side (remembered).
+    pub(crate) fn set_one_pane(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.one_pane = on;
+        let _ = self.store.set_setting("ui:panes", if on { "one" } else { "side" });
+        cx.notify();
+    }
+
+    /// The focused agent's changes in a pane beside it, or only in its tab (remembered).
+    pub(crate) fn set_changes_beside(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.changes_beside = on;
+        let _ = self.store.set_setting("ui:changes_beside", if on { "1" } else { "0" });
         cx.notify();
     }
 
@@ -1376,7 +1413,21 @@ impl Monaged {
                         .on_click(cx.listener(move |this, _, _, cx| this.stop_agent(id, cx))),
                 )
             })
-            .when(has_room && focused, |d| {
+            .when(focused && (multi || changes_beside) && !self.one_pane, |d| {
+                d.child(
+                    ui::icon_button(("one-pane", id as usize), Icon::Maximize)
+                        .tooltip(tip("Show only this agent (Ctrl K → Show agents side by side to go back)"))
+                        .on_click(cx.listener(|this, _, _, cx| this.set_one_pane(true, cx))),
+                )
+            })
+            .when(focused && self.one_pane, |d| {
+                d.child(
+                    ui::icon_button(("side-panes", id as usize), Icon::Restore)
+                        .tooltip(tip("Show agents side by side"))
+                        .on_click(cx.listener(|this, _, _, cx| this.set_one_pane(false, cx))),
+                )
+            })
+            .when(has_room && focused && !self.one_pane, |d| {
                 d.child(
                     ui::icon_button(("beside", id as usize), Icon::PanelRight)
                         .tooltip(tip("Ctrl-click an agent in the tree to open it beside this one"))
@@ -1445,7 +1496,15 @@ impl Monaged {
                         ui::icon_button(("refresh-changes", id as usize), Icon::Refresh)
                             .tooltip(tip("Read the diff again"))
                             .on_click(cx.listener(move |this, _, _, cx| this.refresh_changes(id, false, cx)))
-                    }),
+                    })
+                    .child(
+                        ui::icon_button(("close-changes", id as usize), Icon::X)
+                            .tooltip(tip("Close this pane (the agent's Changes tab still has them; Ctrl K → Show changes beside the agent brings it back)"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.set_changes_beside(false, cx);
+                            })),
+                    ),
             )
             .child(self.render_changes(agent, cx))
             .into_any_element()

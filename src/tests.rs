@@ -199,6 +199,109 @@ fn score_is_capped_by_checks_and_verdict() {
 }
 
 #[test]
+fn saved_checks_read_back_for_scoring() {
+    let all = [
+        Checks::NotFound,
+        Checks::Unavailable("no tests configured".into()),
+        Checks::Passed("cargo test".into()),
+        Checks::Failed { command: "npm test".into(), tail: "1 failing\n  at foo.js:3".into() },
+    ];
+    for checks in all {
+        let back = Checks::from_description(&checks.describe());
+        assert_eq!(back.describe(), checks.describe());
+    }
+}
+
+fn confidence(checks: &Checks, verdict: &str, issues: Vec<Issue>) -> review::Confidence {
+    let (score, mut reasons) = review::score(checks, verdict, &issues);
+    reasons.push("Reviewer: the summary".into());
+    review::Confidence { score, verdict: verdict.into(), reasons, issues, checks: checks.describe() }
+}
+
+#[test]
+fn ruling_out_findings_scores_again() {
+    let passed = Checks::Passed("cargo test".into());
+    let mut c = confidence(&passed, "broken", vec![
+        Issue { severity: "high".into(), file: "a.rs".into(), problem: "calls a missing fn".into() },
+        Issue { severity: "low".into(), file: "b.rs".into(), problem: "nit".into() },
+    ]);
+    assert_eq!(c.score, 2);
+    let gone = review::rule_out(&mut c, 0).unwrap();
+    assert_eq!(gone.problem, "calls a missing fn");
+    // No serious finding left: "broken" no longer stands, but it isn't "works" either.
+    assert_eq!(c.verdict, "unclear");
+    assert_eq!(c.score, 4);
+    assert!(c.reasons.iter().any(|r| r == "– You ruled out 1 finding; review again to confirm"));
+    assert!(c.reasons.iter().any(|r| r == "Reviewer: the summary"));
+    review::rule_out(&mut c, 0).unwrap();
+    assert!(c.issues.is_empty());
+    assert!(c.reasons.iter().any(|r| r.starts_with("– You ruled out 2 findings")));
+    assert_eq!(c.reasons.iter().filter(|r| r.starts_with("– You ruled out")).count(), 1);
+    assert_eq!(c.reasons.iter().filter(|r| r.starts_with("Reviewer:")).count(), 1);
+    assert!(review::rule_out(&mut c, 0).is_none());
+    // Failing tests still cap the score, whatever you rule out.
+    let failed = Checks::Failed { command: "t".into(), tail: "boom".into() };
+    let mut c = confidence(&failed, "works", vec![issue("high")]);
+    review::rule_out(&mut c, 0);
+    assert_eq!(c.score, 2);
+}
+
+#[test]
+fn the_fix_message_lists_findings_and_failing_tests() {
+    let passed = Checks::Passed("cargo test".into());
+    assert!(review::fix_prompt(&confidence(&passed, "works", vec![])).is_none());
+    let failed = Checks::Failed { command: "cargo test".into(), tail: "test x ... FAILED".into() };
+    let text = review::fix_prompt(&confidence(&failed, "partly", vec![
+        Issue { severity: "medium".into(), file: "src/a.rs".into(), problem: "off by one".into() },
+        Issue { severity: "low".into(), file: String::new(), problem: "no docs".into() },
+    ]))
+    .unwrap();
+    assert!(text.contains("isn't a real problem, say so"));
+    assert!(text.contains("The tests failed (`cargo test`)"));
+    assert!(text.contains("test x ... FAILED"));
+    assert!(text.contains("1. [medium] src/a.rs: off by one"));
+    assert!(text.contains("2. [low] no docs"));
+}
+
+#[test]
+fn the_reviewer_gets_the_projects_context() {
+    let context = review::ReviewContext {
+        task: "Add a login page".into(),
+        follow_ups: vec!["Use the existing session helper".into()],
+        report: "I added login.rs and wired it up.".into(),
+        knowledge: "## CLAUDE.md\nWe never use unwrap in handlers.".into(),
+        files: vec![("src/login.rs".into(), "fn login() {}".into())],
+        files_left_out: 2,
+        settled: vec![review::Settled { file: "src/db.rs".into(), problem: "no index".into(), reason: "table has 10 rows".into() }],
+    };
+    let (prompt, note) = review::review_prompt(&context, "+fn login() {}", &Checks::NotFound);
+    assert!(note.is_empty());
+    let order = ["Add a login page", "Use the existing session helper", "We never use unwrap", "I added login.rs", "table has 10 rows", "No automated checks", "+fn login() {}", "--- src/login.rs ---", "2 more changed file(s)"];
+    let mut at = 0;
+    for part in order {
+        let found = prompt[at..].find(part).unwrap_or_else(|| panic!("{part:?} missing or out of order"));
+        at += found;
+    }
+    // Nothing extra when there's no extra context.
+    let bare = review::ReviewContext { task: "t".into(), ..Default::default() };
+    let (prompt, _) = review::review_prompt(&bare, "+x", &Checks::NotFound);
+    assert!(!prompt.contains("later messages") && !prompt.contains("project's notes") && !prompt.contains("ruled out") && !prompt.contains("as they are now"));
+}
+
+#[test]
+fn review_context_is_read_between_markers() {
+    let script = review::context_script("/home/me/wt", Some("~/.monaged/app/CLAUDE.md"), &["src/a b.rs".into()], "M");
+    assert!(script.contains("emit CLAUDE.md knowledge:CLAUDE.md"));
+    assert!(script.contains("\"$HOME\"/"));
+    assert!(script.contains("'src/a b.rs'"));
+    let out = "noise\nM_BEGIN knowledge:CLAUDE.md\nRules\nmore\n\nM_END\nM_BEGIN file:src/a b.rs\nfn a() {}\nM_END\n";
+    let parsed = review::parse_context(out, "M");
+    assert_eq!(parsed, vec![("knowledge:CLAUDE.md".to_string(), "Rules\nmore".to_string()), ("file:src/a b.rs".to_string(), "fn a() {}".to_string())]);
+    let settled = vec![review::Settled { file: "f".into(), problem: "p".into(), reason: String::new() }];
+    assert_eq!(review::settled_from_json(&review::settled_to_json(&settled).to_string()), settled);
+}
+
+#[test]
 fn coordination_paths_overlap() {
     use crate::coord::{glob_match, normalize_path, overlaps};
     assert_eq!(normalize_path(r"./src\api/"), "src/api");

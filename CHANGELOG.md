@@ -2,6 +2,22 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Fix findings**: a button next to Review on the confidence card sends the review's findings and any failing tests to the agent as one message (it's asked to check each one first and say when one isn't real); the change is reviewed again when it's done.
+- **Rule out a finding**: ✓ next to a finding says it isn't a problem, with an optional reason. The score is worked out again without it, and the project's next reviews are told, so a wrong finding doesn't keep coming back.
+- **Show only this agent**: a pane's header can switch the middle to one agent at a time (and back to side by side); Ctrl K has both, and can turn the Changes column beside the agent off.
+
+### Changed
+
+- **Reviews know more about the project.** Besides the diff and the tests, the reviewer now gets what you said to the agent after the task, the project's `CLAUDE.md` and shared notes, the agent's own account of its work (as a claim to check), the changed files in full, and the findings you ruled out, and it's told to leave out what depends on code it can't see. Fewer findings that are only wrong for lack of context.
+
+### Fixed
+
+- **Closing a pane** didn't stick: the agent you closed came straight back because it was still the focused agent. A closed pane now stays closed until you open that agent again.
+
 ## [0.5.0] - 2026-11-15
 
 ### Added

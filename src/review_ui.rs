@@ -233,11 +233,20 @@ impl Monaged {
             .and_then(|s| self.store.setting(&format!("run:{}", s.project_id)))
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| v["test"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned));
+        let project_id = self.project_of_agent(agent_id);
+        let shared_notes = project_id.and_then(|p| self.shared_notes_path(p));
+        let settled = project_id.map(|p| self.settled_findings(p)).unwrap_or_default();
         let Some(agent) = self.agent_mut(agent_id) else { return };
         if agent.reviewing {
             return;
         }
-        let task = agent.task();
+        let mut context = review::ReviewContext {
+            task: agent.task(),
+            follow_ups: agent.follow_ups(),
+            report: agent.last_reply(),
+            settled,
+            ..Default::default()
+        };
         agent.reviewing = true;
         agent.review_error = None;
         cx.notify();
@@ -250,7 +259,13 @@ impl Monaged {
                         return anyhow::Ok((changes, None));
                     }
                     let checks = review::run_checks(&distro, &worktree, test_command.as_deref());
-                    let reviewed = review::review(&backend, &task, &changes.raw, &checks)?;
+                    // The notes and the changed files in full, so the reviewer sees what the diff leans on.
+                    let changed: Vec<String> = changes.files.iter().filter(|f| f.status != "deleted").map(|f| f.path.clone()).collect();
+                    let (knowledge, files, left_out) = review::read_context(&distro, &worktree, shared_notes.as_deref(), &changed);
+                    context.knowledge = knowledge;
+                    context.files = files;
+                    context.files_left_out = left_out;
+                    let reviewed = review::review(&backend, &context, &changes.raw, &checks)?;
                     Ok((changes, Some(reviewed)))
                 })
                 .await;
@@ -291,6 +306,62 @@ impl Monaged {
             .ok();
         })
         .detach();
+    }
+
+    /// Findings you ruled out in this project (the reviewer is told about them).
+    pub(crate) fn settled_findings(&self, project_id: i64) -> Vec<review::Settled> {
+        self.store.setting(&format!("review:settled:{project_id}")).map(|t| review::settled_from_json(&t)).unwrap_or_default()
+    }
+
+    /// Sends the review's findings (and failing tests) to the agent to fix.
+    pub(crate) fn fix_findings(&mut self, agent_id: i64, cx: &mut Context<Self>) {
+        let Some(prompt) = self.agent(agent_id).and_then(|a| a.confidence.as_ref()).and_then(review::fix_prompt) else {
+            self.toast(Tone::Info, "The review found nothing to fix.", cx);
+            return;
+        };
+        self.send_prompt(agent_id, prompt);
+        self.set_tab(agent_id, AgentTab::Conversation, cx);
+        self.toast(Tone::Info, "Sent the findings to the agent. It's reviewed again when it's done.", cx);
+        cx.notify();
+    }
+
+    /// Asks why a finding isn't a problem (optional), then rules it out.
+    pub(crate) fn ask_rule_out(&mut self, agent_id: i64, index: usize, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some(issue) = self.agent(agent_id).and_then(|a| a.confidence.as_ref()).and_then(|c| c.issues.get(index)).cloned() else { return };
+        self.ask_text(
+            "Not a problem?".into(),
+            "Why not (optional): the next reviews are told".into(),
+            "Rule it out".into(),
+            String::new(),
+            crate::feedback::TextAction::RuleOut { agent_id, file: issue.file, problem: issue.problem },
+            window,
+            cx,
+        );
+    }
+
+    /// Drops a finding from the score and remembers it for the project's next reviews.
+    pub(crate) fn rule_out_finding(&mut self, agent_id: i64, file: &str, problem: &str, reason: &str, cx: &mut Context<Self>) {
+        let project_id = self.project_of_agent(agent_id);
+        let Some(agent) = self.agent_mut(agent_id) else { return };
+        let Some(confidence) = agent.confidence.as_mut() else { return };
+        let Some(index) = confidence.issues.iter().position(|i| i.file == file && i.problem == problem) else { return };
+        review::rule_out(confidence, index);
+        let confidence = confidence.clone();
+        let _ = self.store.save_confidence(agent_id, &confidence);
+        if let Some(project_id) = project_id {
+            let mut settled = self.settled_findings(project_id);
+            settled.retain(|s| !(s.file == file && s.problem == problem));
+            settled.push(review::Settled { file: file.to_string(), problem: problem.to_string(), reason: reason.trim().to_string() });
+            // The latest ones matter most; keep the list short.
+            let excess = settled.len().saturating_sub(40);
+            settled.drain(..excess);
+            let _ = self.store.set_setting(&format!("review:settled:{project_id}"), &review::settled_to_json(&settled).to_string());
+        }
+        // A better score may be what an auto-merge was waiting for.
+        if let Some(sub_id) = self.agent(agent_id).map(|a| a.record.subproject_id) {
+            self.maybe_auto_merge(sub_id, cx);
+        }
+        cx.notify();
     }
 
     pub(crate) fn set_tab(&mut self, agent_id: i64, tab: AgentTab, cx: &mut Context<Self>) {
@@ -614,6 +685,7 @@ impl Monaged {
             (None, _) => muted("No summary yet. One is written after each turn."),
         };
 
+        let can_fix = !agent.reviewing && agent.confidence.as_ref().is_some_and(|c| review::fix_prompt(c).is_some());
         let confidence_body: AnyElement = match &agent.confidence {
             None if agent.reviewing => loading(("review-spin-card", agent_id as usize), "Running the tests and a skeptical review…"),
             None => muted("Not reviewed yet. Review runs the project's tests and asks Haiku to find what's broken."),
@@ -639,10 +711,11 @@ impl Monaged {
                         .gap(px(6.))
                         .text_size(px(13.))
                         .children(c.reasons.iter().map(|r| div().text_color(rgb(theme::text_2())).child(r.clone())))
-                        .children(c.issues.iter().map(|issue| {
+                        .children(c.issues.iter().enumerate().map(|(index, issue)| {
                             let attention = matches!(issue.severity.as_str(), "high" | "medium");
                             div()
                                 .flex()
+                                .items_start()
                                 .gap(px(8.))
                                 .child(
                                     div()
@@ -662,6 +735,13 @@ impl Monaged {
                                         .gap(px(2.))
                                         .child(div().font_family(theme::MONO).text_size(px(11.5)).text_color(rgb(theme::text_3())).child(issue.file.clone()))
                                         .child(div().text_color(rgb(theme::text_body())).child(issue.problem.clone())),
+                                )
+                                .child(
+                                    div().flex_none().child(
+                                        ui::icon_button(("rule-out", index), Icon::Check)
+                                            .tooltip(crate::shell::tip("Not a problem: rule it out (the next reviews are told)"))
+                                            .on_click(cx.listener(move |this, _, window, cx| this.ask_rule_out(agent_id, index, window, cx))),
+                                    ),
                                 )
                         })),
                 )
@@ -799,9 +879,22 @@ impl Monaged {
                                             .justify_between()
                                             .child(ui::label("Confidence"))
                                             .child(
-                                                ui::icon_button("review-again", Icon::Eye)
-                                                    .tooltip(crate::shell::tip("Review: tests and a skeptical read"))
-                                                    .on_click(cx.listener(move |this, _, _, cx| this.review_agent(agent_id, cx))),
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(6.))
+                                                    .when(can_fix, |d| {
+                                                        d.child(
+                                                            ui::button("review-fix", ui::Kind::Secondary, Some(Icon::Edit), "Fix findings")
+                                                                .tooltip(crate::shell::tip("Send the findings and failing tests to the agent to fix"))
+                                                                .on_click(cx.listener(move |this, _, _, cx| this.fix_findings(agent_id, cx))),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        ui::icon_button("review-again", Icon::Eye)
+                                                            .tooltip(crate::shell::tip("Review: tests and a skeptical read"))
+                                                            .on_click(cx.listener(move |this, _, _, cx| this.review_agent(agent_id, cx))),
+                                                    ),
                                             ),
                                     )
                                     .child(confidence_body),

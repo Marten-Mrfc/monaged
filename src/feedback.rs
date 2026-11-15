@@ -104,6 +104,8 @@ pub(crate) enum TextAction {
     SaveLayout(i64),
     /// A subproject's weekly cap in dollars ("" or 0 removes it).
     SubCap(i64),
+    /// A review finding you say isn't a problem; the text is why (optional).
+    RuleOut { agent_id: i64, file: String, problem: String },
 }
 
 /// Automatic reconnects after the Claude process dies.
@@ -508,7 +510,7 @@ impl Monaged {
         let text = prompt.input.read(cx).text().trim().to_string();
         window.focus(&self.focus);
         self.focus_request = self.sel_agent;
-        if text.is_empty() && !matches!(prompt.action, TextAction::SubCap(_)) {
+        if text.is_empty() && !matches!(prompt.action, TextAction::SubCap(_) | TextAction::RuleOut { .. }) {
             cx.notify();
             return;
         }
@@ -523,6 +525,7 @@ impl Monaged {
                     _ => self.toast(Tone::Warn, "Type an amount in dollars, like 20.", cx),
                 }
             }
+            TextAction::RuleOut { agent_id, file, problem } => self.rule_out_finding(agent_id, &file, &problem, &text, cx),
         }
         cx.notify();
     }

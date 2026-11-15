@@ -5,7 +5,7 @@ New here? Start with [Getting started](getting-started.md). The playground proje
 ## The window
 
 - **Sidebar** (left): your projects › subprojects › agents, with a status dot per agent (working, done, needs you) and a score meter once an agent has been reviewed. A **Needs you** inbox sits on top: questions, plans waiting for approval, permission requests, failed sessions.
-- **Agents** (middle): the focused agent's conversation. Wide screens show several agents side by side (Ctrl-click an agent to open it beside the current one), and spare room shows the focused agent's **Changes** next to its conversation.
+- **Agents** (middle): the focused agent's conversation. Wide screens show several agents side by side (Ctrl-click an agent to open it beside the current one), and spare room shows the focused agent's **Changes** next to its conversation. A pane's **×** closes it (it stays closed until you open that agent again), and **Show only this agent** (the maximize button in its header, or Ctrl K → "Show one agent at a time") keeps it to one agent until you switch back; Ctrl K → "Don't show changes beside the agent" turns the extra Changes column off.
 - **Inspector** (right): Pipeline, Board, Merge, Git, Run and Timeline for the subproject you're in.
 - **Status bar**: the connection, the distro, how many agents are working, the branch, your weekly usage and Monaged's share of it.
 
@@ -37,6 +37,11 @@ The **Changes** tab shows the agent's diff against where its branch started, a s
 
 - the project's tests run first (from Project settings → Run, `monaged.json`, or detected); failing tests cap the score at 2, no tests at 4;
 - then a short Haiku review asked to find what's broken; "partly" caps the score at 3, "broken" at 2.
+
+The reviewer doesn't only see the diff: it gets the task and what you said to the agent after it, the project's `CLAUDE.md` and the shared notes for its agents (so it follows the project's conventions instead of flagging them), the agent's own account of its work (as a claim to check), the changed files in full (so it can see what the diff calls), and the findings you ruled out before.
+
+- **Fix findings** (next to Review) sends the findings and any failing tests to the agent as one message. It's asked to check each one first and say so when one isn't a real problem; when it's done, the change is reviewed again.
+- **✓** next to a finding rules it out: say why if you like (optional). The score is worked out again without it, and the next reviews in this project are told, so the same wrong finding doesn't come back.
 
 Summaries and reviews run after every turn (Settings → Reviews turns that off), or on demand with **Review** and **Summarize**. Click a diff line to comment; comments go to the agent as one message. A subproject's **All changes** shows the feature branch plus every agent's worktree, with overlaps marked.
 

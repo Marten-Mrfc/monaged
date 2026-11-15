@@ -63,6 +63,8 @@ pub(crate) enum Command {
     DeleteLayout(i64, String),
     Zen,
     ToggleSounds,
+    OnePane(bool),
+    ChangesBeside(bool),
     Density(bool),
     Health,
     SubChanges(i64),
@@ -216,6 +218,28 @@ impl Monaged {
         out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: crate::keys::hint("settings"), command: Command::Settings });
         out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: crate::keys::hint("shortcuts"), command: Command::Shortcuts });
         out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: crate::keys::hint("zen"), command: Command::Zen });
+        out.push(Entry {
+            group: "App",
+            glyph: if self.one_pane { Icon::Restore } else { Icon::Maximize },
+            title: if self.one_pane { "Show agents side by side".into() } else { "Show one agent at a time".into() },
+            detail: if self.one_pane {
+                "Agents that work or need you get a pane next to the one you picked".into()
+            } else {
+                "Only the agent you picked, without others beside it".into()
+            },
+            state: None,
+            hint: None,
+            command: Command::OnePane(!self.one_pane),
+        });
+        out.push(Entry {
+            group: "App",
+            glyph: Icon::Diff,
+            title: if self.changes_beside { "Don't show changes beside the agent".into() } else { "Show changes beside the agent".into() },
+            detail: "A pane with the agent's diff next to its conversation, when there's room (its Changes tab has them either way)".into(),
+            state: None,
+            hint: None,
+            command: Command::ChangesBeside(!self.changes_beside),
+        });
         let sounds_on = self.sound.settings.on;
         out.push(Entry {
             group: "App",
@@ -367,6 +391,8 @@ impl Monaged {
             }
             Command::DeleteLayout(project_id, name) => self.delete_layout(project_id, &name, cx),
             Command::Zen => self.toggle_zen(cx),
+            Command::OnePane(on) => self.set_one_pane(on, cx),
+            Command::ChangesBeside(on) => self.set_changes_beside(on, cx),
             Command::ToggleSounds => {
                 self.change_sounds(|s| s.on = !s.on, cx);
                 let on = self.sound.settings.on;

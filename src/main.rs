@@ -258,6 +258,13 @@ struct Monaged {
     collapsed: HashSet<i64>,
     /// Agents opened beside the focused one (wide windows).
     pinned: Vec<i64>,
+    /// Panes you closed: an agent that's working or needs you doesn't get one
+    /// back by itself until you open it again.
+    dismissed: HashSet<i64>,
+    /// One agent at a time instead of several side by side (Ctrl K, or the pane's button).
+    one_pane: bool,
+    /// The focused agent's changes in a pane beside it when there's room.
+    changes_beside: bool,
     /// One message box and scroll position per agent pane.
     inputs: HashMap<i64, Entity<TextInput>>,
     scrolls: HashMap<i64, ScrollHandle>,
@@ -517,6 +524,9 @@ impl Monaged {
             inspector_tab: shell::InspectorTab::Pipeline,
             collapsed: HashSet::new(),
             pinned: Vec::new(),
+            dismissed: HashSet::new(),
+            one_pane: false,
+            changes_beside: true,
             inputs: HashMap::new(),
             scrolls: HashMap::new(),
             focus_request: None,
@@ -618,6 +628,8 @@ impl Monaged {
         // repaired if Monaged moved) once WSL is there, in `after_setup`.
         this.git_auth.accounts = git_auth::load_accounts(&this.store);
         this.sound = sound::Player::new(sound::Settings::load(&this.store));
+        this.one_pane = this.store.setting("ui:panes").as_deref() == Some("one");
+        this.changes_beside = this.store.setting("ui:changes_beside").as_deref() != Some("0");
         // A fresh PC gets the setup guide first; it connects when it's done.
         if this.setup_needed(std::env::args().any(|a| a == "--setup")) {
             this.setup.pending = true;
@@ -1079,6 +1091,7 @@ impl Monaged {
 
     fn select_agent(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         self.sel_agent = Some(agent_id);
+        self.dismissed.remove(&agent_id);
         self.focus_request = Some(agent_id);
         self.ensure_session(agent_id);
         if let Some(handle) = self.scrolls.get(&agent_id) {
