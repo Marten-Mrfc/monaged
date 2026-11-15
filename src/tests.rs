@@ -302,6 +302,44 @@ fn review_context_is_read_between_markers() {
 }
 
 #[test]
+fn the_quality_gate_sends_work_back_then_asks() {
+    use crate::pipeline::{GateStep, MAX_FIX_ROUNDS, QualityGate};
+    let mut gate = QualityGate::default();
+    gate.submit("build-api");
+    assert_eq!(gate.pending, vec!["build-api".to_string()]);
+    // At the bar: accepted.
+    assert_eq!(gate.step("build-api", Some(4), "", 4), GateStep::Accept);
+    assert_eq!(gate.step("build-api", Some(5), "", 4), GateStep::Accept);
+    // Below it: fixed automatically, round by round.
+    assert_eq!(gate.step("build-api", Some(2), "", 4), GateStep::Fix(1));
+    assert_eq!(gate.fix("build-api", true), 1);
+    assert!(gate.pending.is_empty() && gate.fixing == vec!["build-api".to_string()]);
+    gate.submit("build-api");
+    assert!(gate.fixing.is_empty());
+    assert_eq!(gate.step("build-api", Some(3), "", 4), GateStep::Fix(2));
+    gate.fix("build-api", true);
+    gate.submit("build-api");
+    // Out of rounds: it waits for you.
+    assert_eq!(MAX_FIX_ROUNDS, 2);
+    let GateStep::Hold(why) = gate.step("build-api", Some(1), "", 4) else { panic!("should hold") };
+    assert!(why.contains("1/5 after 2 fix rounds") && why.contains("4/5"));
+    gate.hold("build-api", why);
+    assert!(gate.pending.is_empty() && gate.held_reason("build-api").is_some());
+    // Fixing again by hand doesn't use up a round.
+    gate.fix("build-api", false);
+    assert_eq!(gate.rounds_for("build-api"), 2);
+    assert!(gate.held.is_empty());
+    // Work that couldn't be scored waits for you, whatever the rounds.
+    assert_eq!(gate.step("build-ui", None, "couldn't be reviewed", 4), GateStep::Hold("couldn't be reviewed".into()));
+    // A lower bar lets a 3 through.
+    assert_eq!(gate.step("build-ui", Some(3), "", 3), GateStep::Accept);
+    // It survives a restart.
+    gate.hold("build-ui", "why".into());
+    assert_eq!(QualityGate::from_json(&gate.to_json().to_string()), gate);
+    assert_eq!(QualityGate::from_json("not json"), QualityGate::default());
+}
+
+#[test]
 fn coordination_paths_overlap() {
     use crate::coord::{glob_match, normalize_path, overlaps};
     assert_eq!(normalize_path(r"./src\api/"), "src/api");

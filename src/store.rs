@@ -224,6 +224,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE agents ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE board ADD COLUMN delivered_to INTEGER",
+    "ALTER TABLE pipelines ADD COLUMN gate TEXT",
 ];
 
 /// How many startup backups to keep.
@@ -404,10 +405,10 @@ impl Store {
     pub fn save_pipeline(&self, p: &Pipeline) -> Result<()> {
         let json = |v: &Option<serde_json::Value>| v.as_ref().map(|v| v.to_string());
         self.conn.execute(
-            "INSERT INTO pipelines (subproject_id, stage, request, auto_mode, research, verifications, plan, done, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO pipelines (subproject_id, stage, request, auto_mode, research, verifications, plan, done, note, gate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(subproject_id) DO UPDATE SET stage = ?2, request = ?3, auto_mode = ?4, research = ?5,
-             verifications = ?6, plan = ?7, done = ?8, note = ?9, updated_at = strftime('%s','now')",
+             verifications = ?6, plan = ?7, done = ?8, note = ?9, gate = ?10, updated_at = strftime('%s','now')",
             params![
                 p.subproject_id,
                 p.stage.as_str(),
@@ -418,6 +419,7 @@ impl Store {
                 json(&p.plan),
                 serde_json::to_string(&p.done)?,
                 p.note,
+                p.gate.to_json().to_string(),
             ],
         )?;
         Ok(())
@@ -426,7 +428,7 @@ impl Store {
     pub fn pipelines(&self) -> Result<HashMap<i64, Pipeline>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT subproject_id, stage, request, auto_mode, research, verifications, plan, done, note FROM pipelines")?;
+            .prepare("SELECT subproject_id, stage, request, auto_mode, research, verifications, plan, done, note, gate FROM pipelines")?;
         let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
         let rows = stmt.query_map([], |r| {
             let subproject_id: i64 = r.get(0)?;
@@ -444,6 +446,7 @@ impl Store {
                     plan: parse(r.get(6)?),
                     done: r.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
                     note: r.get(8)?,
+                    gate: r.get::<_, Option<String>>(9)?.map(|t| pipeline::QualityGate::from_json(&t)).unwrap_or_default(),
                 },
             ))
         })?;

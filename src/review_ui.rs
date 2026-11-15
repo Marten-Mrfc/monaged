@@ -270,6 +270,20 @@ impl Monaged {
                 })
                 .await;
             view.update(cx, |this, cx| {
+                // The quality gate asked for a review of newer work: run that one instead.
+                if let Some(agent) = this.agent_mut(agent_id)
+                    && agent.review_again
+                {
+                    agent.review_again = false;
+                    agent.reviewing = false;
+                    this.review_agent(agent_id, cx);
+                    return;
+                }
+                let outcome: (Option<u8>, String) = match &result {
+                    Ok((_, Some((c, _)))) => (Some(c.score), String::new()),
+                    Ok((_, None)) => (None, "says it's done but changed nothing in its worktree. Look at what it did, or accept it as it is.".into()),
+                    Err(err) => (None, format!("couldn't be reviewed ({err:#}). Review it again, or accept it as it is.")),
+                };
                 match result {
                     Ok((changes, reviewed)) => {
                         if let Some((confidence, usage)) = &reviewed {
@@ -301,6 +315,8 @@ impl Monaged {
                         }
                     }
                 }
+                let name = this.agent(agent_id).map(|a| a.record.name.clone()).unwrap_or_default();
+                this.gate_on_review(agent_id, outcome.0, format!("{name} {}", outcome.1), cx);
                 cx.notify();
             })
             .ok();
@@ -626,6 +642,22 @@ impl Monaged {
                         .child(column(
                             section("Summaries and reviews", Some(active))
                                 .child(ui::switch("toggle-auto", "Summarize and review after every agent turn", self.auto_review).on_click(cx.listener(|this, _, _, cx| this.toggle_setting("auto_review", cx))))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(6.))
+                                        .child(div().text_size(px(13.)).text_color(rgb(theme::text_body())).child("Pipeline work goes on by itself from"))
+                                        .child(div().flex().gap(px(6.)).children([3u8, 4, 5].map(|n| {
+                                            ui::choice(("min-score", n as usize), format!("{n}/5"), self.min_score() == n).on_click(cx.listener(move |this, _, _, cx| {
+                                                let _ = this.store.set_setting("review:min_score", &n.to_string());
+                                                cx.notify();
+                                            }))
+                                        })))
+                                        .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(
+                                            "Builders below it get their findings back to fix (twice), then wait for you; the integrator too. Merging into develop by itself needs it as well.",
+                                        )),
+                                )
                                 .child(
                                     ui::switch("toggle-cli", "When there's no API key, use the Max plan (Claude CLI) instead", self.cli_fallback)
                                         .on_click(cx.listener(|this, _, _, cx| this.toggle_setting("cli_fallback", cx))),

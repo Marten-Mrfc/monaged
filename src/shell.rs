@@ -345,6 +345,9 @@ impl Monaged {
                     }),
                     _ => {}
                 }
+                for (name, _) in &p.gate.held {
+                    out.push(Inbox { title: "Below the bar".into(), detail: format!("{} · {name}", sub.name), sub_id: sub.id, agent_id: None });
+                }
             }
             for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub.id && !a.record.archived) {
                 let title = if self.vault.requests.iter().any(|r| r.agent_id == agent.record.id) {

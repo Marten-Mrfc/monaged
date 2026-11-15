@@ -8,6 +8,8 @@ use crate::agent::{Item, Tone};
 use crate::pipeline::{self, Directive, Gate, Pipeline, Question, Role, Segment, Stage};
 use crate::icons::{Icon, icon};
 use crate::review_ui::render_markdown;
+use crate::review;
+use crate::ui::Kind;
 use crate::{AgentSpec, Monaged, button, dots, git, theme, tone_color, ui};
 
 impl Monaged {
@@ -160,13 +162,22 @@ impl Monaged {
         }
     }
 
+    /// The builder doing each workstream now: the newest one (a rerun replaces the old).
+    pub(crate) fn current_builders(&self, sub_id: i64) -> Vec<&crate::agent::AgentView> {
+        let mut latest: Vec<&crate::agent::AgentView> = Vec::new();
+        for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived) {
+            let Role::Builder(stream) = agent.role() else { continue };
+            match latest.iter_mut().find(|b| b.role() == Role::Builder(stream.clone())) {
+                Some(slot) if slot.record.id < agent.record.id => *slot = agent,
+                Some(_) => {}
+                None => latest.push(agent),
+            }
+        }
+        latest
+    }
+
     pub(crate) fn start_integration(&mut self, sub_id: i64, cx: &mut Context<Self>) {
-        let branches: Vec<String> = self
-            .agents
-            .iter()
-            .filter(|a| a.record.subproject_id == sub_id && matches!(a.role(), Role::Builder(_)))
-            .map(|a| a.record.branch.clone())
-            .collect();
+        let branches: Vec<String> = self.current_builders(sub_id).iter().map(|a| a.record.branch.clone()).collect();
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
         let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
         let brief = pipeline::integrator_brief(&p.request, &p.plan.clone().unwrap_or_default(), &branches, &sub.branch);
@@ -321,45 +332,181 @@ impl Monaged {
                     }
                 }
             }
-            (Role::Builder(_), Some(Directive::Done(_))) => {
-                let builders: Vec<String> = self
-                    .agents
-                    .iter()
-                    .filter(|a| a.record.subproject_id == sub_id && matches!(a.role(), Role::Builder(_)))
-                    .map(|a| a.record.name.clone())
-                    .collect();
-                let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
-                if !p.done.contains(&name) {
-                    p.done.push(name.clone());
-                }
-                let finished = builders.iter().filter(|b| p.done.contains(b)).count();
-                if finished >= builders.len() {
-                    p.note = Some("All builders are done. Integrating.".into());
-                    self.save_pipeline(sub_id);
-                    self.start_integration(sub_id, cx);
-                } else {
-                    p.note = Some(format!("{finished} of {} builders done.", builders.len()));
-                    self.save_pipeline(sub_id);
-                }
-            }
-            (Role::Integrator, Some(Directive::Done(value))) => {
-                let branch = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.branch.clone()).unwrap_or_default();
-                if let Some(p) = self.pipelines.get_mut(&sub_id) {
-                    p.stage = Stage::Done;
-                    let summary = value["summary"].as_str().unwrap_or("Integrated.");
-                    p.note = Some(format!("Done: {summary} Everything is on {branch}."));
-                }
-                self.save_pipeline(sub_id);
-                self.record_pipeline_run(sub_id);
-                self.chime(crate::sound::Cue::Complete);
-                if let Some(project_id) = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.project_id) {
-                    self.refresh_branches(project_id, cx);
-                }
-                self.maybe_auto_merge(sub_id, cx);
-            }
+            // "Done" isn't done until a review says so (the quality gate).
+            (Role::Builder(_) | Role::Integrator, Some(Directive::Done(_))) => self.gate_submit(sub_id, agent_id, cx),
             (role, _) => self.nudge(agent_id, &role, sub_id),
         }
         cx.notify();
+    }
+
+    // ---- The quality gate --------------------------------------------------------------
+
+    /// The lowest score that goes on without asking you (Settings → Reviews).
+    pub(crate) fn min_score(&self) -> u8 {
+        self.store.setting("review:min_score").and_then(|v| v.parse::<u8>().ok()).map_or(pipeline::DEFAULT_MIN_SCORE, |v| v.clamp(1, 5))
+    }
+
+    /// A builder or the integrator says it's done: review what's there now.
+    fn gate_submit(&mut self, sub_id: i64, agent_id: i64, cx: &mut Context<Self>) {
+        let Some(name) = self.agent(agent_id).map(|a| a.record.name.clone()) else { return };
+        let min = self.min_score();
+        let reviews_off = self.backend().is_none();
+        let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
+        if reviews_off {
+            p.gate.hold(
+                &name,
+                format!("Reviews are off (no API key, and the Max plan fallback is off), so Monaged can't check {name}'s work. Turn reviews on in Settings, or accept it as it is."),
+            );
+            p.note = Some(format!("{name} says it's done, but can't be reviewed. It waits for you."));
+            self.save_pipeline(sub_id);
+            self.chime(crate::sound::Cue::NeedsYou);
+            cx.notify();
+            return;
+        }
+        p.gate.submit(&name);
+        p.note = Some(format!("{name} says it's done. Reviewing it: it needs {min}/5 to go on."));
+        self.save_pipeline(sub_id);
+        self.review_fresh(agent_id, cx);
+    }
+
+    /// Reviews now, or right after the review that's running (which may be of older work).
+    pub(crate) fn review_fresh(&mut self, agent_id: i64, cx: &mut Context<Self>) {
+        match self.agent_mut(agent_id) {
+            Some(agent) if agent.reviewing => agent.review_again = true,
+            Some(_) => self.review_agent(agent_id, cx),
+            None => {}
+        }
+    }
+
+    /// A review finished (`score` None: it couldn't be scored, `why` says why).
+    pub(crate) fn gate_on_review(&mut self, agent_id: i64, score: Option<u8>, why: String, cx: &mut Context<Self>) {
+        let Some(agent) = self.agent(agent_id) else { return };
+        if !matches!(agent.role(), Role::Builder(_) | Role::Integrator) {
+            return;
+        }
+        let (sub_id, name) = (agent.record.subproject_id, agent.record.name.clone());
+        let min = self.min_score();
+        let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
+        if !p.gate.pending.contains(&name) || matches!(p.stage, Stage::Stopped | Stage::Done) {
+            return;
+        }
+        match p.gate.step(&name, score, &why, min) {
+            pipeline::GateStep::Accept => {
+                p.gate.clear(&name);
+                self.gate_accept(sub_id, agent_id, false, cx);
+            }
+            pipeline::GateStep::Fix(round) => {
+                p.gate.fix(&name, true);
+                let score = score.unwrap_or(0);
+                p.note = Some(format!(
+                    "{name} scored {score}/5, below the {min}/5 needed. Monaged sent it the findings to fix (round {round} of {}).",
+                    pipeline::MAX_FIX_ROUNDS
+                ));
+                let _ = self.store.log_event(sub_id, Some(agent_id), "gate", &format!("{name}: {score}/5, sent back to fix (round {round})"));
+                self.save_pipeline(sub_id);
+                self.send_fix(agent_id);
+            }
+            pipeline::GateStep::Hold(why) => {
+                p.gate.hold(&name, why.clone());
+                p.note = Some(why);
+                let _ = self.store.log_event(sub_id, Some(agent_id), "gate", &format!("{name}: waits for you"));
+                self.save_pipeline(sub_id);
+                self.chime(crate::sound::Cue::NeedsYou);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sends the review's findings back, asking for the result block again.
+    fn send_fix(&mut self, agent_id: i64) {
+        let Some(c) = self.agent(agent_id).and_then(|a| a.confidence.clone()) else { return };
+        let findings = review::fix_prompt(&c).unwrap_or_else(|| {
+            format!(
+                "Monaged's review scored your work {}/5, which isn't enough to integrate it. What it said:\n{}\n\nFinish what's missing.",
+                c.score,
+                c.reasons.iter().map(|r| format!("- {r}")).collect::<Vec<_>>().join("\n")
+            )
+        });
+        self.send_prompt(agent_id, format!("{findings}\n\nWhen it's fixed, end with your ```monaged-done``` block again so it's reviewed again."));
+    }
+
+    /// Work passed the gate (or you accepted it): builders count as done, the
+    /// integrator finishes the pipeline.
+    fn gate_accept(&mut self, sub_id: i64, agent_id: i64, anyway: bool, cx: &mut Context<Self>) {
+        let Some(agent) = self.agent(agent_id) else { return };
+        let (name, role) = (agent.record.name.clone(), agent.role());
+        let score = agent.confidence.as_ref().map(|c| c.score);
+        let how = match (anyway, score) {
+            (true, Some(s)) => format!("you accepted it at {s}/5"),
+            (true, None) => "you accepted it without a score".into(),
+            (false, Some(s)) => format!("passed review at {s}/5"),
+            (false, None) => "passed".into(),
+        };
+        let _ = self.store.log_event(sub_id, Some(agent_id), "gate", &format!("{name}: {how}"));
+        if role == Role::Integrator {
+            let summary = self.agent(agent_id).and_then(|a| last_done_summary(a)).unwrap_or_else(|| "Integrated.".into());
+            let branch = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.branch.clone()).unwrap_or_default();
+            if let Some(p) = self.pipelines.get_mut(&sub_id) {
+                p.stage = Stage::Done;
+                p.note = Some(format!("Done ({how}): {summary} Everything is on {branch}."));
+            }
+            self.save_pipeline(sub_id);
+            self.record_pipeline_run(sub_id);
+            self.chime(crate::sound::Cue::Complete);
+            if let Some(project_id) = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.project_id) {
+                self.refresh_branches(project_id, cx);
+            }
+            self.maybe_auto_merge(sub_id, cx);
+            return;
+        }
+        let builders: Vec<String> = self.current_builders(sub_id).iter().map(|a| a.record.name.clone()).collect();
+        let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
+        if !p.done.contains(&name) {
+            p.done.push(name.clone());
+        }
+        let finished = builders.iter().filter(|b| p.done.contains(b)).count();
+        if finished >= builders.len() {
+            p.note = Some(format!("{name} {how}. All builders passed. Integrating."));
+            self.save_pipeline(sub_id);
+            self.start_integration(sub_id, cx);
+        } else {
+            p.note = Some(format!("{name} {how}. {finished} of {} builders done.", builders.len()));
+            self.save_pipeline(sub_id);
+        }
+        cx.notify();
+    }
+
+    fn gate_agent(&self, sub_id: i64, name: &str) -> Option<i64> {
+        self.agents.iter().find(|a| a.record.subproject_id == sub_id && a.record.name == name).map(|a| a.record.id)
+    }
+
+    /// You: send the findings back once more.
+    pub(crate) fn gate_fix_again(&mut self, sub_id: i64, name: &str, cx: &mut Context<Self>) {
+        let Some(agent_id) = self.gate_agent(sub_id, name) else { return };
+        if let Some(p) = self.pipelines.get_mut(&sub_id) {
+            p.gate.fix(name, false);
+            p.note = Some(format!("{name} is fixing the findings."));
+        }
+        self.save_pipeline(sub_id);
+        self.bypass_budget = true;
+        self.send_fix(agent_id);
+        self.bypass_budget = false;
+        cx.notify();
+    }
+
+    /// You: review it again as it is now.
+    pub(crate) fn gate_review_again(&mut self, sub_id: i64, name: &str, cx: &mut Context<Self>) {
+        let Some(agent_id) = self.gate_agent(sub_id, name) else { return };
+        self.gate_submit(sub_id, agent_id, cx);
+    }
+
+    /// You: go on with it as it is, below the bar.
+    pub(crate) fn gate_accept_anyway(&mut self, sub_id: i64, name: &str, cx: &mut Context<Self>) {
+        let Some(agent_id) = self.gate_agent(sub_id, name) else { return };
+        if let Some(p) = self.pipelines.get_mut(&sub_id) {
+            p.gate.clear(name);
+        }
+        self.gate_accept(sub_id, agent_id, true, cx);
     }
 
     fn nudge(&mut self, agent_id: i64, role: &Role, sub_id: i64) {
@@ -408,7 +555,9 @@ impl Monaged {
     /// True when the pipeline waits for the user (a gate, or a question).
     pub(crate) fn pipeline_needs_you(&self, sub_id: i64) -> bool {
         self.pipelines.get(&sub_id).is_some_and(|p| {
-            matches!(p.stage, Stage::Decide | Stage::Approve) || p.note.as_deref().is_some_and(|n| n.contains("question"))
+            matches!(p.stage, Stage::Decide | Stage::Approve)
+                || !p.gate.held.is_empty()
+                || p.note.as_deref().is_some_and(|n| n.contains("question"))
         })
     }
 
@@ -710,9 +859,16 @@ impl Monaged {
             .iter()
             .filter(|a| a.record.subproject_id == sub_id && matches!(a.role(), Role::Builder(_) | Role::Integrator))
             .map(|a| {
-                let done = p.done.contains(&a.record.name) || (a.role() == Role::Integrator && p.stage == Stage::Done);
+                let name = &a.record.name;
+                let done = p.done.contains(name) || (a.role() == Role::Integrator && p.stage == Stage::Done);
                 let (state, word) = if done {
-                    (ui::State::Done, "done")
+                    (ui::State::Done, "passed")
+                } else if p.gate.held_reason(name).is_some() {
+                    (ui::State::NeedsYou, "needs you")
+                } else if p.gate.pending.contains(name) {
+                    (ui::State::Working, "in review")
+                } else if p.gate.fixing.contains(name) {
+                    (ui::State::Working, "fixing")
                 } else if a.is_working() {
                     (ui::State::Working, "working")
                 } else {
@@ -740,7 +896,55 @@ impl Monaged {
                         )
                     })
             });
-        gate_card("Builders").children(rows).into_any_element()
+        gate_card("Builders")
+            .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(format!("Each needs a review of {}/5 or better before it's integrated.", self.min_score())))
+            .children(rows)
+            .children(p.gate.held.iter().enumerate().map(|(i, (name, why))| self.render_held(sub_id, i, name, why, cx)))
+            .into_any_element()
+    }
+
+    /// Work below the bar that waits for you, with what you can do about it.
+    pub(crate) fn render_held(&self, sub_id: i64, i: usize, name: &str, why: &str, cx: &mut Context<Self>) -> AnyElement {
+        let (fix, again, anyway) = (name.to_string(), name.to_string(), name.to_string());
+        let agent_id = self.gate_agent(sub_id, name);
+        let findings = agent_id.and_then(|id| self.agent(id)).and_then(|a| a.confidence.as_ref()).map_or(0, |c| c.issues.len());
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgb(theme::line_strong()))
+            .child(div().text_size(px(13.)).text_color(rgb(theme::text_body())).child(why.to_string()))
+            .when(findings > 0, |d| d.child(ui::mono(format!("{findings} open finding{}", if findings == 1 { "" } else { "s" }))))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .child(
+                        ui::button(("held-fix", i), Kind::Primary, Some(Icon::Edit), "Fix again")
+                            .tooltip(crate::shell::tip("Send the findings back to the agent once more"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.gate_fix_again(sub_id, &fix, cx))),
+                    )
+                    .child(
+                        ui::button(("held-review", i), Kind::Secondary, Some(Icon::Eye), "Review again")
+                            .on_click(cx.listener(move |this, _, _, cx| this.gate_review_again(sub_id, &again, cx))),
+                    )
+                    .children(agent_id.map(|id| {
+                        ui::button(("held-open", i), Kind::Secondary, Some(Icon::Diff), "Changes").on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_agent(id, cx);
+                            this.set_tab(id, crate::agent::AgentTab::Changes, cx);
+                        }))
+                    }))
+                    .child(
+                        ui::button(("held-anyway", i), Kind::Secondary, None, "Accept anyway")
+                            .tooltip(crate::shell::tip("Go on with this work as it is, below the bar"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.gate_accept_anyway(sub_id, &anyway, cx))),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// An agent reply containing `monaged-*` blocks: Markdown plus cards.
@@ -870,4 +1074,15 @@ fn kv(k: &'static str, v: String) -> gpui::Div {
         .text_size(px(12.5))
         .child(div().text_color(rgb(theme::text_3())).child(k))
         .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text())).child(v))
+}
+
+/// The summary in an agent's last `monaged-done` block.
+fn last_done_summary(agent: &crate::agent::AgentView) -> Option<String> {
+    agent.items.iter().rev().find_map(|item| {
+        let Item::Agent(text) = item else { return None };
+        pipeline::directives(text).into_iter().find_map(|d| match d {
+            Directive::Done(value) => Some(value["summary"].as_str().unwrap_or("Integrated.").to_string()),
+            _ => None,
+        })
+    })
 }

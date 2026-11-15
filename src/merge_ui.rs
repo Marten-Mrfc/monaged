@@ -56,7 +56,7 @@ impl Policy {
     }
 }
 
-/// The user's rule: develop merges automatically unless confidence is 1;
+/// The user's rule: develop merges automatically when confidence is at the bar (4/5 by default);
 /// acceptance asks; the top branch (main) needs an explicit confirmation.
 pub fn default_policy(chain: &[String], target: &str) -> Policy {
     match target {
@@ -261,7 +261,7 @@ impl Monaged {
     }
 
     /// After the pipeline is done and a confidence score is in: merge on its
-    /// own when the target's policy is "auto" and confidence isn't 1.
+    /// own when the target's policy is "auto" and confidence is at the bar.
     pub(crate) fn maybe_auto_merge(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         if !self.pipelines.get(&sub_id).is_some_and(|p| p.stage == Stage::Done) {
             return;
@@ -289,7 +289,11 @@ impl Monaged {
                 "Auto-merge needs a confidence score, and reviews are off. Turn them on in Settings, or merge by hand.",
             ),
             None => self.set_merge_message(sub_id, Tone::Info, "Waiting for the confidence score before merging."),
-            Some((1, _)) => self.set_merge_message(sub_id, Tone::Warn, format!("Confidence is 1/5: check the changes before merging into {target}.")),
+            Some((score, _)) if score < self.min_score() => self.set_merge_message(
+                sub_id,
+                Tone::Warn,
+                format!("Confidence is {score}/5, below the {}/5 needed to merge into {target} by itself. Fix the findings, or merge it yourself.", self.min_score()),
+            ),
             Some((score, from)) => {
                 self.set_merge_message(sub_id, Tone::Info, format!("Confidence {score}/5 ({from}): merging into {target} automatically."));
                 self.merge_subproject(sub_id, cx);

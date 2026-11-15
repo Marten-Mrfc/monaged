@@ -350,6 +350,8 @@ pub struct AgentView {
     pub confidence: Option<Confidence>,
     pub summarizing: bool,
     pub reviewing: bool,
+    /// A review is running but the quality gate needs one of what's there now.
+    pub review_again: bool,
     pub review_error: Option<String>,
     // Pipeline (Phase 3).
     /// A message to send as soon as the session is open (e.g. the role brief).
@@ -404,6 +406,7 @@ impl AgentView {
             confidence: None,
             summarizing: false,
             reviewing: false,
+            review_again: false,
             review_error: None,
             queued_prompt: None,
             answers: HashMap::new(),

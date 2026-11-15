@@ -132,10 +132,129 @@ pub struct Pipeline {
     /// Indexed by verifier number - 1.
     pub verifications: Vec<Value>,
     pub plan: Option<Value>,
-    /// Names of builder agents that delivered their result.
+    /// Names of builder agents that delivered their result and passed the quality gate.
     pub done: Vec<String>,
     /// What the pipeline is waiting for, shown to the user.
     pub note: Option<String>,
+    /// Work that says it's done but hasn't passed review yet.
+    pub gate: QualityGate,
+}
+
+/// The lowest confidence score that integrates or merges without asking you.
+pub const DEFAULT_MIN_SCORE: u8 = 4;
+/// How many times Monaged sends the findings back before it asks you.
+pub const MAX_FIX_ROUNDS: u8 = 2;
+
+/// Builders and the integrator only count as done once a review scores their
+/// work at the bar (4/5 by default). Below it, Monaged sends the findings
+/// back to fix; after a couple of rounds it stops and asks you.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QualityGate {
+    /// Reported done; waiting for a fresh review.
+    pub pending: Vec<String>,
+    /// Sent the findings to fix; waiting for it to report done again.
+    pub fixing: Vec<String>,
+    /// Waiting for you: (agent, why).
+    pub held: Vec<(String, String)>,
+    /// Automatic fix rounds used, per agent.
+    pub rounds: Vec<(String, u8)>,
+}
+
+/// What to do with a review of work that says it's done.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GateStep {
+    Accept,
+    /// Send the findings back (this is fix round n).
+    Fix(u8),
+    /// Stop and ask you, with why.
+    Hold(String),
+}
+
+impl QualityGate {
+    pub fn rounds_for(&self, name: &str) -> u8 {
+        self.rounds.iter().find(|(n, _)| n == name).map_or(0, |(_, r)| *r)
+    }
+
+    pub fn held_reason(&self, name: &str) -> Option<&str> {
+        self.held.iter().find(|(n, _)| n == name).map(|(_, why)| why.as_str())
+    }
+
+    /// Takes the agent out of every list (it was accepted, or starts over).
+    pub fn clear(&mut self, name: &str) {
+        self.pending.retain(|n| n != name);
+        self.fixing.retain(|n| n != name);
+        self.held.retain(|(n, _)| n != name);
+    }
+
+    /// The agent says it's done: review it.
+    pub fn submit(&mut self, name: &str) {
+        self.clear(name);
+        self.pending.push(name.to_string());
+    }
+
+    pub fn fix(&mut self, name: &str, automatic: bool) -> u8 {
+        self.clear(name);
+        self.fixing.push(name.to_string());
+        let round = self.rounds_for(name) + u8::from(automatic);
+        self.rounds.retain(|(n, _)| n != name);
+        self.rounds.push((name.to_string(), round));
+        round
+    }
+
+    pub fn hold(&mut self, name: &str, why: String) {
+        self.clear(name);
+        self.held.push((name.to_string(), why));
+    }
+
+    /// The decision for a finished review: `score` is None when the work
+    /// couldn't be scored (`why` says why).
+    pub fn step(&self, name: &str, score: Option<u8>, why: &str, min: u8) -> GateStep {
+        match score {
+            Some(score) if score >= min => GateStep::Accept,
+            Some(score) => {
+                let used = self.rounds_for(name);
+                if used < MAX_FIX_ROUNDS {
+                    GateStep::Fix(used + 1)
+                } else {
+                    GateStep::Hold(format!(
+                        "{name} is at {score}/5 after {used} fix round{}; it needs {min}/5 to go on by itself.",
+                        if used == 1 { "" } else { "s" }
+                    ))
+                }
+            }
+            None => GateStep::Hold(why.to_string()),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "pending": self.pending,
+            "fixing": self.fixing,
+            "held": self.held.iter().map(|(n, why)| json!({ "name": n, "why": why })).collect::<Vec<_>>(),
+            "rounds": self.rounds.iter().map(|(n, r)| json!({ "name": n, "rounds": r })).collect::<Vec<_>>(),
+        })
+    }
+
+    pub fn from_json(text: &str) -> Self {
+        let Ok(v) = serde_json::from_str::<Value>(text) else { return Self::default() };
+        let names = |key: &str| -> Vec<String> { v[key].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect() };
+        Self {
+            pending: names("pending"),
+            fixing: names("fixing"),
+            held: v["held"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|h| Some((h["name"].as_str()?.to_string(), h["why"].as_str().unwrap_or_default().to_string())))
+                .collect(),
+            rounds: v["rounds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| Some((r["name"].as_str()?.to_string(), r["rounds"].as_u64().unwrap_or(0).min(255) as u8)))
+                .collect(),
+        }
+    }
 }
 
 impl Pipeline {
@@ -150,6 +269,7 @@ impl Pipeline {
             plan: None,
             done: Vec::new(),
             note: None,
+            gate: QualityGate::default(),
         }
     }
 
@@ -449,7 +569,8 @@ pub fn builder_brief(request: &str, plan: &Value, workstream: &Workstream, branc
          - Only edit the files your workstream owns (see `owns`). If you need a change elsewhere, don't make it: list it \
          under `needs_from_others` in your result.\n\
          - Follow the plan's contracts exactly; other builders rely on them.\n\
-         - Run the tests you can. Commit your work on your branch with clear messages. Don't push.\n\n\
+         - Run the tests you can. Commit your work on your branch with clear messages. Don't push.\n\
+         - {REVIEWED}\n\n\
          {COORDINATION}\n\n\
          {QUESTION_FORMAT}\n\n\
          ## Feature request\n{request}\n\n## Plan\n```json\n{}\n```\n\n## Your workstream\n```json\n{}\n```\n\n\
@@ -463,6 +584,11 @@ pub fn builder_brief(request: &str, plan: &Value, workstream: &Workstream, branc
     )
 }
 
+/// What builders and the integrator are told about the quality gate.
+const REVIEWED: &str = "When you report done, Monaged runs the project's tests and a skeptical review of your diff. \
+Your work only counts as done with a high score; otherwise you get the findings back to fix. Check each finding \
+against the code: fix the real ones, say why when one isn't.";
+
 pub fn integrator_brief(request: &str, plan: &Value, branches: &[String], feature_branch: &str) -> String {
     let list = branches.iter().map(|b| format!("- `{b}`")).collect::<Vec<_>>().join("\n");
     format!(
@@ -470,7 +596,7 @@ pub fn integrator_brief(request: &str, plan: &Value, branches: &[String], featur
          You are the INTEGRATOR. The builders finished their workstreams on these branches:\n{list}\n\n\
          Your worktree is on the feature branch `{feature_branch}`. Merge each builder branch into it, resolve conflicts \
          keeping both sides' intent, make sure the plan's contracts line up across the pieces, run the project's tests, \
-         and commit. Don't push and don't merge into any other branch.\n\n\
+         and commit. Don't push and don't merge into any other branch. {REVIEWED}\n\n\
          Start with `board_read` (all=true, a Monaged tool): the builders posted their contracts, decisions and answers \
          there, and anything they agreed on overrides the plan.\n\n\
          ## Feature request\n{request}\n\n## Plan\n```json\n{}\n```\n\n\

@@ -223,9 +223,18 @@ impl Monaged {
         let name = self.unique_agent_name(sub_id, &format!("build-{}", stream.name));
         let branch = format!("agent/{}/{name}", crate::git::slug(&sub.name));
         let brief = pipeline::builder_brief(&request, &plan, &stream, &branch);
+        let replaced: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|a| a.record.subproject_id == sub_id && a.role() == Role::Builder(stream.name.clone()))
+            .map(|a| a.record.name.clone())
+            .collect();
         if let Some(p) = self.pipelines.get_mut(&sub_id) {
             p.stage = Stage::Build;
             p.done.retain(|n| !n.starts_with(&format!("build-{}", stream.name)));
+            for old in &replaced {
+                p.gate.clear(old);
+            }
             p.note = Some(format!("A new builder is redoing {}.", stream.name));
         }
         self.save_pipeline(sub_id);

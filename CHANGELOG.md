@@ -16,6 +16,7 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ### Fixed
 
+- **Low-scored work was integrated and merged anyway.** A builder that said it was done counted as done straight away, without waiting for its review, and merging into develop by itself only stopped at 1/5. Now builders and the integrator have to pass a quality gate: their work is reviewed when they say they're done and needs 4/5 (Settings → Reviews: 3, 4 or 5). Below that, Monaged sends the findings back to fix, twice; then it stops and asks you (Fix again, Review again, or Accept anyway, which is logged). Merging into develop by itself needs the same score. When reviews are off, the work waits for you instead of going through unchecked. A rerun builder replaces the old one instead of the pipeline waiting for both.
 - **Closing a pane** didn't stick: the agent you closed came straight back because it was still the focused agent. A closed pane now stays closed until you open that agent again.
 
 ## [0.5.0] - 2026-11-15
