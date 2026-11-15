@@ -385,6 +385,16 @@ Asked for after testing 0.3.0 on a real PC: Ubuntu's install ran in a console th
 
 **Known limits:** the setup page (like 0.3.0's) can scroll a little past its end into empty space in some states; GPUI's scroll extent comes out larger than the content there. Nothing is cut off.
 
+### Release 0.4.1: nothing for endpoint security to stop (done 2026-11-15)
+On a real PC, Sophos reported "'Lockdown' malicious behavior prevented in Monaged": 0.4.0 started PowerShell (shortcuts; a hidden, encoded script to install WSL as administrator), cmd.exe (removing the program folder after uninstalling) and reg.exe.
+
+- [x] **No script hosts or shells:** shortcuts through IShellLink, the registry through advapi32, WSL's install by running monaged.exe itself as administrator (`--install-wsl`), the program folder removed by moving the running exe out first (`src/native.rs`).
+- [x] Programs Monaged still starts: wsl.exe, git, and what you ask for (winget, gh, Zed, notepad, explorer); `shutdown.exe` only after you confirm a restart.
+
+**Tested:** the registry round trip and creating a real shortcut as unit tests (on Windows in CI, and under Wine); running as administrator through ShellExecuteEx and the `--install-wsl` path end to end under Wine, with a stand-in wsl.exe.
+
+**Not tested on a real PC yet:** that Sophos stays quiet through installing, setting up and uninstalling.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.
