@@ -426,6 +426,18 @@ Asked for: one agent at a time and a close button that works; Fix findings next 
 
 **Not tested yet:** a real lead on Claude (does it use its tools well and keep its replies short), and how much its updates cost over a long pipeline.
 
+### Release 0.7.0: Claude can look, audits, quality of life (done 2026-11-15)
+Released with the two rounds below.
+
+### Quality of life (done 2026-11-15)
+Asked for: more quality-of-life features, but only where they're needed, and tweaks everywhere.
+
+- [x] Could lose work: the PC stays awake while agents work or reviews run; closing asks first while agents work.
+- [x] Saves time: F8 to the next thing that needs you; a "while you were away" card (only when something happened); quick replies when an agent ends on a question; "N working" goes to a working agent; a terminal in a worktree or repo; copying one agent's conversation.
+- [x] Less clutter: agents you start are named after your first message; the sidebar folds pipeline agents whose part is done.
+- [x] Considered and left out: a jump-to-latest button and taskbar flashing (both already there), automatic worktree cleanup after a pipeline (one click already, and surprising if automatic).
+- [ ] Not tested on a real PC: the close confirmation (the demo here has no Windows close button), staying awake (a Windows call), the terminal (Windows Terminal or the console, by your default).
+
 ### After 0.6.0: export, Connect Claude, audits (done 2026-11-15)
 Asked for: export a project to hand to Claude, a debug connection Claude can use to see the app, then security fixes, UI/UX and layout work, and every standard check.
 
