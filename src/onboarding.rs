@@ -13,8 +13,9 @@
 //! 4. Signing in to Claude: the sign-in page opens in your browser and you
 //!    paste the code it shows into the guide (see `signin`).
 //! 5. Git's name and email inside WSL, so agents can commit.
-//! 6. Extras that make some features work (Zed, gh, glab, pytest, the
-//!    sandbox tools), each with an Install button, and sign-ins for gh and glab.
+//! 6. Extras that make some features work (Zed, gh, pytest, the sandbox
+//!    tools), each with an Install button, gh's sign-in, and a way to Git
+//!    accounts (Settings) for pushes and pull requests.
 
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
@@ -100,8 +101,6 @@ pub(crate) struct Probe {
     pub zed: bool,
     pub gh: bool,
     pub gh_auth: bool,
-    pub glab: bool,
-    pub glab_auth: bool,
 }
 
 impl Probe {
@@ -173,10 +172,6 @@ pub(crate) struct Setup {
     pub linux_password_again: Option<Entity<TextInput>>,
     /// The code Claude's sign-in page shows.
     pub code: Option<Entity<TextInput>>,
-    /// glab's sign-in: the GitLab server and a token.
-    pub glab_host: Option<Entity<TextInput>>,
-    pub glab_token: Option<Entity<TextInput>>,
-    pub glab_open: bool,
     /// A sign-in running in the background (Claude's or GitHub's).
     live: Option<Live>,
     /// The Ubuntu install's steps as they were when it failed.
@@ -439,8 +434,6 @@ pub fn probe(preferred: &str, agent_cmd: &str) -> Probe {
     p.zed = works("zed");
     p.gh = works("gh");
     p.gh_auth = p.gh && quiet("gh").args(["auth", "status", "--hostname", "github.com"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-    p.glab = works("glab");
-    p.glab_auth = p.glab && quiet("glab").args(["auth", "status"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if !wsl_present() {
         p.wsl_error = Some("WSL isn't installed on this PC.".into());
         return p;
@@ -577,12 +570,6 @@ impl Monaged {
             self.setup.linux_password = Some(cx.new(|cx| TextInput::new("Password", cx).masked()));
             self.setup.linux_password_again = Some(cx.new(|cx| TextInput::new("The same password again", cx).masked()));
             self.setup.code = Some(cx.new(|cx| TextInput::new("Paste the code here", cx)));
-            self.setup.glab_host = Some(cx.new(|cx| {
-                let mut input = TextInput::new("gitlab.com", cx);
-                input.set_text("gitlab.com".to_string(), cx);
-                input
-            }));
-            self.setup.glab_token = Some(cx.new(|cx| TextInput::new("glpat-…", cx).masked()));
         }
         self.run_setup_probe(cx);
         cx.notify();
@@ -1131,8 +1118,6 @@ impl Monaged {
             } else {
                 self.setup_create_user(cx);
             }
-        } else if focused(&[&self.setup.glab_host, &self.setup.glab_token], cx) {
-            self.setup_glab_login(cx);
         } else if focused(&[&self.setup.name, &self.setup.email], cx) {
             self.setup_save_git(cx);
         }
@@ -1310,43 +1295,6 @@ impl Monaged {
         .detach();
     }
 
-    /// `glab auth login` with the token typed in the guide.
-    pub(crate) fn setup_glab_login(&mut self, cx: &mut Context<Self>) {
-        if self.setup_busy(cx) {
-            return;
-        }
-        let (Some(host), Some(token)) = (self.setup.glab_host.clone(), self.setup.glab_token.clone()) else { return };
-        let host_text = host.read(cx).text().trim().trim_start_matches("https://").trim_end_matches('/').to_string();
-        let token_text = token.read(cx).text().trim().to_string();
-        if host_text.is_empty() || token_text.is_empty() {
-            self.setup.error = Some((StepId::Extras, "Enter your GitLab server and a token.".into()));
-            cx.notify();
-            return;
-        }
-        self.set_job(Some(Job::Installing { extra: Extra::Glab, line: "Signing in to GitLab…".into(), fraction: None }), cx);
-        let generation = self.setup.generation;
-        cx.spawn(async move |view, cx| {
-            let result = cx.background_spawn(async move { signin::glab_token(&host_text, &token_text) }).await;
-            view.update(cx, |this, cx| {
-                if this.setup.generation != generation {
-                    return;
-                }
-                match result {
-                    Ok(()) => {
-                        token.update(cx, |i, cx| i.set_text(String::new(), cx));
-                        this.setup.glab_open = false;
-                        this.set_job(None, cx);
-                        this.toast(Tone::Info, "Signed in to GitLab.", cx);
-                        this.run_setup_probe(cx);
-                    }
-                    Err(err) => this.fail_step(StepId::Extras, format!("{err:#}"), cx),
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     pub(crate) fn setup_skip(&mut self, step: StepId, cx: &mut Context<Self>) {
         if step == StepId::Distro && self.setup.probe.as_ref().is_some_and(|p| p.user.as_deref() == Some("root")) {
             self.setup.root_ok = true;
@@ -1410,7 +1358,8 @@ impl Monaged {
             return;
         }
         self.check_sandbox(cx);
-        self.check_credentials(cx);
+        // Accounts, git's helper setup in WSL (repaired if Monaged moved), SSH keys.
+        self.refresh_git_auth(true, cx);
         let distro = self.config.distro.clone();
         cx.spawn(async move |view, cx| {
             let user = cx.background_spawn(async move { crate::git::linux_user(&distro) }).await;
@@ -1678,7 +1627,7 @@ impl Monaged {
                         .child(ui::meta("You can keep using Windows meanwhile; this takes a few minutes."))
                         .into_any_element();
                 }
-                Job::SignIn(sign_in) => return self.render_sign_in(sign_in, cx),
+                Job::SignIn(sign_in) => return self.render_claude_sign_in(sign_in, cx),
                 // An extra's progress shows in its own row.
                 Job::Installing { .. } | Job::GitHub { .. } => {}
             }
@@ -1909,53 +1858,28 @@ impl Monaged {
                 } else {
                     (None, None)
                 };
-                let (glab_fix, glab_below): (Option<AnyElement>, Option<AnyElement>) = if !p.glab {
-                    install(Extra::Glab, "setup-x-glab", cx)
-                } else if !p.glab_auth {
-                    match &running {
-                        Some(Job::Installing { extra: Extra::Glab, line, fraction }) => (None, Some(install_progress("setup-x-glab-login", line, *fraction))),
-                        _ if self.setup.glab_open => (None, Some(self.render_glab_form(cx))),
-                        _ => (
-                            Some(ui::button("setup-x-glab-login", Kind::Secondary, Some(Icon::Key), "Sign in").on_click(cx.listener(|this, _, _, cx| {
-                                this.setup.glab_open = true;
-                                cx.notify();
-                            })).into_any_element()),
-                            None,
-                        ),
-                    }
-                } else {
-                    (None, None)
-                };
                 let gh_ok = p.gh && p.gh_auth;
-                let glab_ok = p.glab && p.glab_auth;
                 col = col
                     .children(row(p.zed, "Zed", "Open any worktree or file in Zed with one click.", zed_fix, zed_below))
                     .children(row(
                         gh_ok,
                         "GitHub CLI (gh)",
-                        if p.gh && !p.gh_auth { "Installed; sign in to use pull requests, CI status, and updates while Monaged's repo is private." } else { "Pull requests, CI status, and updates while Monaged's repo is private." },
+                        if p.gh && !p.gh_auth { "Installed; sign in so Monaged can update itself while its repository is private." } else { "Optional: Monaged's updates while its repository is private. Pull requests work through Git accounts." },
                         gh_fix,
                         gh_below,
                     ))
                     .children(row(
-                        glab_ok,
-                        "GitLab CLI (glab)",
-                        if p.glab && !p.glab_auth { "Installed; sign in to use merge requests and pipelines." } else { "Merge requests and pipelines for GitLab projects." },
-                        glab_fix,
-                        glab_below,
+                        self.creds_ok == Some(true) || !self.git_auth.accounts.is_empty(),
+                        "Git accounts",
+                        "Sign in to GitHub, GitLab or another host so agents' work can be pushed and pull requests opened.",
+                        (self.creds_ok != Some(true) && self.git_auth.accounts.is_empty())
+                            .then(|| ui::button("setup-x-accounts", Kind::Secondary, Some(Icon::User), "Sign in").on_click(cx.listener(|this, _, window, cx| this.open_settings_at("Git accounts", window, cx))).into_any_element()),
+                        None,
                     ))
                     .when(wsl_ready, |d| {
                         let (sandbox_fix, sandbox_below) = if p.has("bwrap") && p.has("socat") { (None, None) } else { install(Extra::Sandbox, "setup-x-sandbox", cx) };
                         let (pytest_fix, pytest_below) = if p.has("pytest") { (None, None) } else { install(Extra::Pytest, "setup-x-pytest", cx) };
                         d.children(row(
-                            self.creds_ok == Some(true),
-                            "Git logins from Windows",
-                            "Push and clone from WSL with the logins Git Credential Manager keeps on Windows.",
-                            (self.creds_ok != Some(true))
-                                .then(|| ui::button("setup-x-gcm", Kind::Secondary, None, "Turn on").on_click(cx.listener(|this, _, _, cx| this.enable_windows_credentials(cx))).into_any_element()),
-                            None,
-                        ))
-                        .children(row(
                             p.has("bwrap") && p.has("socat"),
                             "Sandbox tools (bubblewrap, socat)",
                             "Let Claude Code's sandbox keep agents' commands away from Windows and your other files.",
@@ -1997,7 +1921,7 @@ impl Monaged {
     }
 
     /// Signing in to Claude: the page's link, and the box for its code.
-    fn render_sign_in(&self, sign_in: &SignIn, cx: &mut Context<Self>) -> AnyElement {
+    fn render_claude_sign_in(&self, sign_in: &SignIn, cx: &mut Context<Self>) -> AnyElement {
         let text = |t: String| div().text_size(px(13.)).line_height(px(20.)).text_color(rgb(theme::text_2())).child(t);
         let mut col = div().flex().flex_col().gap(px(12.));
         let Some(url) = sign_in.url.clone() else {
@@ -2095,36 +2019,6 @@ impl Monaged {
                     .child(ui::button("setup-gh-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| this.setup_cancel(cx)))),
             )
             .child(div().flex().items_center().gap(px(8.)).child(ui::spinner("setup-gh-wait", 13., theme::text_3())).child(ui::meta(note.unwrap_or_else(|| "Waiting for GitHub…".into()))))
-            .into_any_element()
-    }
-
-    /// glab's sign-in: the server and a token made on GitLab.
-    fn render_glab_form(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (Some(host), Some(token)) = (self.setup.glab_host.clone(), self.setup.glab_token.clone()) else {
-            return div().into_any_element();
-        };
-        let page_host = host.read(cx).text().trim().trim_start_matches("https://").trim_end_matches('/').to_string();
-        let page = signin::gitlab_token_page(if page_host.is_empty() { "gitlab.com" } else { &page_host });
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child("Make a token on GitLab (the page opens with the right scopes ticked), then paste it here."))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_end()
-                    .gap(px(8.))
-                    .child(div().w(px(170.)).flex().flex_col().child(ui::field("Server", None, host)))
-                    .child(div().flex_1().min_w(px(200.)).flex().flex_col().child(ui::field("Token", None, token)))
-                    .child(ui::button("setup-glab-page", Kind::Ghost, Some(Icon::External), "Make a token").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&page))))
-                    .child(ui::button("setup-glab-save", Kind::Primary, None, "Sign in").on_click(cx.listener(|this, _, _, cx| this.setup_glab_login(cx))))
-                    .child(ui::button("setup-glab-close", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| {
-                        this.setup.glab_open = false;
-                        cx.notify();
-                    }))),
-            )
             .into_any_element()
     }
 }

@@ -6,7 +6,6 @@
 //!   plain input, so no terminal is needed.
 //! - **GitHub**: `gh auth login --web` without a terminal prints a one-time
 //!   code and github.com/login/device; Monaged shows both and waits.
-//! - **GitLab**: `glab auth login --stdin` with a token you paste.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -299,30 +298,6 @@ pub fn start_github(send: impl Fn(Event) + Send + Sync + 'static) -> Result<Live
     let readers = vec![read_lines(stdout, on_line), read_lines(stderr, on_err)];
     finish(&live, readers, ok_seen, last_error, "GitHub's sign-in", send);
     Ok(live)
-}
-
-/// `glab auth login` with a personal access token. Blocking.
-pub fn glab_token(host: &str, token: &str) -> Result<()> {
-    let mut command = Command::new("glab");
-    command.args(["auth", "login", "--hostname", host, "--stdin"]).env("NO_COLOR", "1");
-    let (live, mut stdout, mut stderr) = spawn(command)?;
-    live.send_line(token.trim())?;
-    live.close_input();
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let _ = stdout.read_to_end(&mut out);
-    let _ = stderr.read_to_end(&mut err);
-    let status = live.child.lock().map_err(|_| anyhow::anyhow!("glab stopped"))?.wait()?;
-    if !status.success() {
-        let text = strip_escapes(&format!("{}\n{}", crate::wsl::decode(&err), crate::wsl::decode(&out)));
-        let why: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).take(2).collect();
-        bail!("GitLab didn't accept it: {}", if why.is_empty() { "glab failed".to_string() } else { why.join(" ") });
-    }
-    Ok(())
-}
-
-/// Where to make a GitLab token with the scopes glab needs.
-pub fn gitlab_token_page(host: &str) -> String {
-    format!("https://{host}/-/user_settings/personal_access_tokens?name=Monaged&scopes=api,write_repository")
 }
 
 #[cfg(test)]

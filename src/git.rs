@@ -288,21 +288,6 @@ pub fn remove_worktree(distro: &str, repo: &str, worktree: &str, branch: &str, k
     })
 }
 
-/// Lets git inside WSL use Windows' Git Credential Manager (Microsoft's
-/// recommended setup), so pushes and clones use your existing logins.
-pub fn use_windows_credentials(distro: &str) -> Result<()> {
-    run(
-        distro,
-        r#"test -x "/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe" || { echo "Git Credential Manager not found under C:\Program Files\Git" >&2; exit 1; }
-git config --global credential.helper "/mnt/c/Program\ Files/Git/mingw64/bin/git-credential-manager.exe""#,
-    )?;
-    Ok(())
-}
-
-pub fn uses_windows_credentials(distro: &str) -> bool {
-    run(distro, "git config --global credential.helper").is_ok_and(|h| h.contains("git-credential-manager"))
-}
-
 /// Worktrees live next to the repo (`~/code/.monaged/<repo>/…`), not inside it,
 /// so editors and language servers on the main checkout don't index them.
 pub fn worktree_path(repo: &str, subproject_slug: &str, agent_slug: &str) -> String {

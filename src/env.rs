@@ -318,7 +318,33 @@ fn encoded_forms(value: &str) -> Vec<String> {
     out
 }
 
+/// The plain values the masks are built from: (environment secrets, git tokens).
+type Masks = Vec<(Secret, String)>;
+static MASK_SOURCES: LazyLock<RwLock<(Masks, Masks)>> = LazyLock::new(|| RwLock::new((Vec::new(), Vec::new())));
+
 fn set_masks(list: Vec<(Secret, String)>) {
+    if let Ok(mut sources) = MASK_SOURCES.write() {
+        sources.0 = list;
+    }
+    rebuild_masks();
+}
+
+/// Git tokens from Settings → Git accounts: masked like environment secrets,
+/// and kept out of merges and pushes the same way.
+pub(crate) fn set_git_token_masks(list: Vec<(Secret, String)>) {
+    if let Ok(mut sources) = MASK_SOURCES.write() {
+        sources.1 = list;
+    }
+    rebuild_masks();
+}
+
+/// Empties the clipboard (after Monaged picked a token up from it).
+pub(crate) fn clear_clipboard() -> bool {
+    win::copy_private("")
+}
+
+fn rebuild_masks() {
+    let list: Vec<(Secret, String)> = MASK_SOURCES.read().map(|s| s.0.iter().chain(s.1.iter()).cloned().collect()).unwrap_or_default();
     let mut list: Vec<(Secret, String)> = list.into_iter().filter(|(v, _)| v.expose().len() >= MIN_MASKED).collect();
     let encoded: Vec<(Secret, String)> = list.iter().flat_map(|(v, n)| encoded_forms(v.expose()).into_iter().map(move |f| (Secret(f), n.clone()))).collect();
     list.extend(encoded);

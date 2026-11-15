@@ -1,5 +1,9 @@
-//! GitHub and GitLab: merge/pull requests through the `gh` and `glab` CLIs
-//! on Windows, which already hold the user's logins.
+//! GitHub and GitLab: merge/pull requests and CI status.
+//!
+//! With an account from Settings → Git accounts, Monaged talks to the host's
+//! REST API itself, so neither `gh` nor `glab` is needed. Without one it uses
+//! those CLIs on Windows and the logins they hold (and hands them the account's
+//! token when there is one, so they work even when they're not logged in).
 
 use std::process::{Command, Stdio};
 
@@ -27,6 +31,9 @@ pub struct Remote {
     pub host: String,
     /// "owner/repo" or "group/subgroup/repo".
     pub slug: String,
+    /// The account this project signs in as, when it isn't the host's default
+    /// (Settings → Git accounts; the Git tab switches it).
+    pub login: Option<String>,
 }
 
 /// Understands `git@host:owner/repo.git`, `https://host/owner/repo(.git)` and
@@ -54,7 +61,7 @@ pub fn parse_remote(url: &str) -> Option<Remote> {
     } else {
         None
     };
-    Some(Remote { provider, host, slug })
+    Some(Remote { provider, host, slug, login: None })
 }
 
 fn cli(provider: Provider, remote: &Remote, args: &[&str]) -> Result<String> {
@@ -66,6 +73,13 @@ fn cli(provider: Provider, remote: &Remote, args: &[&str]) -> Result<String> {
     command.args(args).stdin(Stdio::null());
     if provider == Provider::GitLab && remote.host != "gitlab.com" {
         command.env("GITLAB_HOST", format!("https://{}", remote.host));
+    }
+    if let Some(stored) = crate::git_auth::token_for(&remote.host, remote.login.as_deref()) {
+        match provider {
+            Provider::GitHub if remote.host == "github.com" => drop(command.env("GH_TOKEN", &stored.token)),
+            Provider::GitHub => drop(command.env("GH_ENTERPRISE_TOKEN", &stored.token).env("GH_HOST", &remote.host)),
+            Provider::GitLab => drop(command.env("GITLAB_TOKEN", &stored.token)),
+        }
     }
     #[cfg(windows)]
     {
@@ -96,9 +110,129 @@ pub struct Request {
     pub url: String,
 }
 
+/// The signed-in account's token for the remote's host, if there is one.
+fn api_token(remote: &Remote) -> Option<String> {
+    remote.provider?;
+    crate::git_auth::token_for(&remote.host, remote.login.as_deref()).map(|s| s.token)
+}
+
+fn encoded(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn create_request_api(provider: Provider, remote: &Remote, token: &str, source: &str, target: &str, title: &str, body: &str) -> Result<String> {
+    use crate::git_auth::{api, api_error};
+    match provider {
+        Provider::GitHub => {
+            let payload = serde_json::json!({ "title": title, "head": source, "base": target, "body": body });
+            let (status, reply, _) = api("POST", provider, &remote.host, token, &format!("/repos/{}/pulls", remote.slug), Some(&payload))?;
+            if status == 422
+                && reply.to_string().contains("already exists")
+                && let Some(existing) = request_status(remote, source)?.filter(|r| r.state == "open")
+            {
+                return Ok(existing.url);
+            }
+            if status != 201 {
+                bail!("GitHub: {}", api_error(status, &reply));
+            }
+            Ok(reply["html_url"].as_str().unwrap_or_default().to_string())
+        }
+        Provider::GitLab => {
+            let payload = serde_json::json!({ "title": title, "source_branch": source, "target_branch": target, "description": body, "remove_source_branch": false });
+            let (status, reply, _) = api("POST", provider, &remote.host, token, &format!("/projects/{}/merge_requests", encoded(&remote.slug)), Some(&payload))?;
+            if status == 409
+                && let Some(existing) = request_status(remote, source)?.filter(|r| r.state == "opened" || r.state == "open")
+            {
+                return Ok(existing.url);
+            }
+            if status != 201 {
+                bail!("GitLab: {}", api_error(status, &reply));
+            }
+            Ok(reply["web_url"].as_str().unwrap_or_default().to_string())
+        }
+    }
+}
+
+fn request_status_api(provider: Provider, remote: &Remote, token: &str, source: &str) -> Result<Option<Request>> {
+    use crate::git_auth::{api, api_error};
+    let (status, list, _) = match provider {
+        Provider::GitHub => {
+            let owner = remote.slug.split('/').next().unwrap_or_default();
+            api("GET", provider, &remote.host, token, &format!("/repos/{}/pulls?state=all&per_page=1&head={}", remote.slug, encoded(&format!("{owner}:{source}"))), None)?
+        }
+        Provider::GitLab => api(
+            "GET",
+            provider,
+            &remote.host,
+            token,
+            &format!("/projects/{}/merge_requests?state=all&per_page=1&source_branch={}", encoded(&remote.slug), encoded(source)),
+            None,
+        )?,
+    };
+    if status != 200 {
+        bail!("{}: {}", remote.host, api_error(status, &list));
+    }
+    let Some(first) = list.as_array().and_then(|a| a.first()) else { return Ok(None) };
+    let state = if first["merged_at"].is_string() { "merged".to_string() } else { first["state"].as_str().unwrap_or("unknown").to_lowercase() };
+    Ok(Some(Request {
+        number: first["number"].as_u64().or_else(|| first["iid"].as_u64()).unwrap_or(0),
+        state,
+        url: first["html_url"].as_str().or_else(|| first["web_url"].as_str()).unwrap_or_default().to_string(),
+    }))
+}
+
+fn ci_status_api(provider: Provider, remote: &Remote, token: &str, branch: &str) -> Result<Option<Ci>> {
+    use crate::git_auth::{api, api_error};
+    match provider {
+        Provider::GitHub => {
+            let (status, reply, _) = api("GET", provider, &remote.host, token, &format!("/repos/{}/actions/runs?per_page=1&branch={}", remote.slug, encoded(branch)), None)?;
+            if status != 200 {
+                bail!("GitHub: {}", api_error(status, &reply));
+            }
+            let Some(run) = reply["workflow_runs"].as_array().and_then(|a| a.first()) else { return Ok(None) };
+            let state = match (run["status"].as_str().unwrap_or_default(), run["conclusion"].as_str().unwrap_or_default()) {
+                ("completed", "success" | "skipped" | "neutral") => "success",
+                ("completed", _) => "failure",
+                _ => "running",
+            };
+            Ok(Some(Ci {
+                state: state.into(),
+                name: run["display_title"].as_str().or_else(|| run["name"].as_str()).unwrap_or("workflow").to_string(),
+                url: run["html_url"].as_str().unwrap_or_default().to_string(),
+            }))
+        }
+        Provider::GitLab => {
+            let (status, reply, _) = api("GET", provider, &remote.host, token, &format!("/projects/{}/pipelines?per_page=1&ref={}", encoded(&remote.slug), encoded(branch)), None)?;
+            if status != 200 {
+                bail!("GitLab: {}", api_error(status, &reply));
+            }
+            let Some(run) = reply.as_array().and_then(|a| a.first()) else { return Ok(None) };
+            Ok(Some(Ci { state: gitlab_state(run["status"].as_str().unwrap_or_default()).into(), name: format!("pipeline #{}", run["id"]), url: run["web_url"].as_str().unwrap_or_default().to_string() }))
+        }
+    }
+}
+
+fn gitlab_state(status: &str) -> &'static str {
+    match status {
+        "success" | "skipped" | "manual" => "success",
+        "failed" | "canceled" => "failure",
+        _ => "running",
+    }
+}
+
 /// Opens a merge/pull request from `source` into `target`; returns its URL.
 pub fn create_request(remote: &Remote, source: &str, target: &str, title: &str, body: &str) -> Result<String> {
     let Some(provider) = remote.provider else { bail!("{} isn't GitHub or GitLab", remote.host) };
+    if let Some(token) = api_token(remote) {
+        return create_request_api(provider, remote, &token, source, target, title, body);
+    }
     let repo = repo_arg(remote);
     let out = match provider {
         Provider::GitHub => cli(
@@ -121,6 +255,9 @@ pub fn create_request(remote: &Remote, source: &str, target: &str, title: &str, 
 /// The newest merge/pull request for `source`, if there is one.
 pub fn request_status(remote: &Remote, source: &str) -> Result<Option<Request>> {
     let Some(provider) = remote.provider else { return Ok(None) };
+    if let Some(token) = api_token(remote) {
+        return request_status_api(provider, remote, &token, source);
+    }
     let repo = repo_arg(remote);
     let out = match provider {
         Provider::GitHub => cli(
@@ -151,6 +288,9 @@ pub struct Ci {
 /// The newest CI run (GitHub Actions or a GitLab pipeline) for `branch`.
 pub fn ci_status(remote: &Remote, branch: &str) -> Result<Option<Ci>> {
     let Some(provider) = remote.provider else { return Ok(None) };
+    if let Some(token) = api_token(remote) {
+        return ci_status_api(provider, remote, &token, branch);
+    }
     let repo = repo_arg(remote);
     match provider {
         Provider::GitHub => {
@@ -173,11 +313,7 @@ pub fn ci_status(remote: &Remote, branch: &str) -> Result<Option<Ci>> {
             let out = cli(provider, remote, &["api", &path])?;
             let list: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
             let Some(run) = list.as_array().and_then(|a| a.first()) else { return Ok(None) };
-            let state = match run["status"].as_str().unwrap_or_default() {
-                "success" | "skipped" | "manual" => "success",
-                "failed" | "canceled" => "failure",
-                _ => "running",
-            };
+            let state = gitlab_state(run["status"].as_str().unwrap_or_default());
             Ok(Some(Ci { state: state.into(), name: format!("pipeline #{}", run["id"]), url: run["web_url"].as_str().unwrap_or_default().to_string() }))
         }
     }

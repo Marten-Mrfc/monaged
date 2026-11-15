@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, SharedString, div, prelude::*, px, rgb};
 
 use crate::agent::Tone;
 use crate::git::{self, BranchState, Cleanup, MergeOutcome};
@@ -132,7 +132,9 @@ impl Monaged {
     }
 
     pub(crate) fn remote(&self, project_id: i64) -> Option<Remote> {
-        self.branch_info.get(&project_id)?.state.remote_url.as_deref().and_then(hosting::parse_remote)
+        let mut remote = self.branch_info.get(&project_id)?.state.remote_url.as_deref().and_then(hosting::parse_remote)?;
+        remote.login = self.git_auth.project_logins.get(&project_id).cloned();
+        Some(remote)
     }
 
     /// Where a subproject's work goes first: the bottom of the chain (develop, or main).
@@ -169,21 +171,32 @@ impl Monaged {
             let result = cx
                 .background_spawn(async move {
                     let state = git::branch_state(&distro, &project.path)?;
+                    // Which account the project signs in as (Settings → Git accounts).
+                    let login = state
+                        .remote_url
+                        .as_deref()
+                        .filter(|u| u.starts_with("http"))
+                        .and_then(|u| crate::git_auth::project_login(&distro, &project.path, &crate::git_auth::normalize_host(u)));
                     let chain = chain_from(&state, &project.base_branch);
                     let mut pairs: Vec<(String, String)> = chain.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect();
                     if let Some(first) = chain.first() {
                         pairs.extend(features.iter().filter(|f| state.has(f)).map(|f| (f.clone(), first.clone())));
                     }
                     let counts = git::ahead_counts(&distro, &project.path, &pairs)?;
-                    anyhow::Ok((state, chain, pairs.into_iter().zip(counts).collect::<HashMap<_, _>>()))
+                    anyhow::Ok((state, chain, pairs.into_iter().zip(counts).collect::<HashMap<_, _>>(), login))
                 })
                 .await;
             view.update(cx, |this, cx| {
                 let info = this.branch_info.entry(project_id).or_default();
                 info.loading = false;
                 match result {
-                    Ok((state, chain, ahead)) => {
+                    Ok((state, chain, ahead, login)) => {
                         info.state = state;
+                        match login {
+                            Some(login) => drop(this.git_auth.project_logins.insert(project_id, login)),
+                            None => drop(this.git_auth.project_logins.remove(&project_id)),
+                        }
+                        let info = this.branch_info.entry(project_id).or_default();
                         info.chain = chain;
                         info.ahead = ahead;
                         // Finished pipelines may now be allowed to merge on their own.
@@ -435,8 +448,9 @@ impl Monaged {
                     Ok(Some(url)) => (Tone::Info, format!("Opened: {url}")),
                     Ok(None) => (Tone::Info, format!("Pushed {} to origin.", sub.branch)),
                     Err(err) => {
-                        let hint = if format!("{err:#}").contains("could not read") || format!("{err:#}").contains("Authentication") {
-                            " Turn on \"Use my Windows Git credentials\" in Settings."
+                        let text = format!("{err:#}");
+                        let hint = if crate::git_auth::looks_like_auth_failure(&text) {
+                            " Sign in under Settings → Git accounts (or test the account there)."
                         } else {
                             ""
                         };
@@ -526,39 +540,6 @@ impl Monaged {
                     text.push_str(&format!(" Problems: {}", failed.join("; ")));
                 }
                 this.set_merge_message(sub_id, if failed.is_empty() { Tone::Info } else { Tone::Warn }, text);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub(crate) fn enable_windows_credentials(&mut self, cx: &mut Context<Self>) {
-        let distro = self.config.distro.clone();
-        cx.spawn(async move |view, cx| {
-            let d = distro.clone();
-            let result = cx.background_spawn(async move { git::use_windows_credentials(&d) }).await;
-            view.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.creds_ok = Some(true);
-                        this.toast(Tone::Info, "Done: git in WSL now uses your Windows logins (Git Credential Manager).", cx);
-                    }
-                    Err(err) => this.toast_error(format!("{err:#}"), cx),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub(crate) fn check_credentials(&mut self, cx: &mut Context<Self>) {
-        let distro = self.config.distro.clone();
-        cx.spawn(async move |view, cx| {
-            let ok = cx.background_spawn(async move { git::uses_windows_credentials(&distro) }).await;
-            view.update(cx, |this, cx| {
-                this.creds_ok = Some(ok);
                 cx.notify();
             })
             .ok();
@@ -669,7 +650,15 @@ impl Monaged {
                 r.host,
                 r.slug,
                 match r.provider {
-                    Some(p) => format!(" · {}s via {}", p.request_name(), if p == hosting::Provider::GitHub { "gh" } else { "glab" }),
+                    Some(p) => match self
+                        .git_auth
+                        .accounts
+                        .iter()
+                        .find(|a| a.host == crate::git_auth::normalize_host(&r.host) && r.login.as_ref().map_or(a.default, |l| *l == a.login))
+                    {
+                        Some(a) => format!(" · {}s as {}", p.request_name(), a.login),
+                        None => format!(" · {}s via {}", p.request_name(), if p == hosting::Provider::GitHub { "gh" } else { "glab" }),
+                    },
                     None => " · push only".into(),
                 }
             ),
@@ -856,26 +845,5 @@ impl Monaged {
             col = col.child(div().px(px(16.)).py(px(12.)).text_size(px(12.5)).text_color(rgb(tone_color(*tone))).child(text.clone()));
         }
         col.into_any_element()
-    }
-
-    pub(crate) fn render_credentials_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let status = match self.creds_ok {
-            Some(true) => "On: git in WSL uses your Windows logins (Git Credential Manager).",
-            Some(false) => "Off: git in WSL has no credentials, so pushing to GitLab or GitHub and cloning private repos will fail.",
-            None => "Checking…",
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Git credentials in WSL"))
-            .child(div().text_size(px(13.)).text_color(rgb(theme::text_3())).child(status))
-            .when(self.creds_ok == Some(false), |d| {
-                d.child(div().flex().child(
-                    ui::button("use-gcm", Kind::Secondary, Some(Icon::Key), "Use my Windows Git credentials in WSL")
-                        .on_click(cx.listener(|this, _, _, cx| this.enable_windows_credentials(cx))),
-                ))
-            })
-            .into_any_element()
     }
 }

@@ -356,6 +356,19 @@ Decided with the user: build everything ready for a public release but don't dep
 - A relay only exits when its agent session closes its input; WSL doesn't force-stop windowed children.
 - The installer and the app aren't code-signed, so SmartScreen warns on first run.
 
+### Git sign-in and a fuller Git tab (done 2026-11-15)
+- [x] **Accounts** (Settings → Git accounts): GitHub, GitLab (Enterprise and self-hosted too) and any other host. Fully on your PC: no OAuth app, client ID, secret or server. Sign in in the browser (the host's own token page opens with the scopes ticked; you click Generate and Copy, and Monaged picks the token up from the clipboard, only if it has the host's token shape, then empties the clipboard), by pasting a token, with a username and app password for other hosts, or by importing what the GitHub CLI, the GitLab CLI or Git Credential Manager already has. Every token is checked with the host's API (who you are, your email, its scopes, when it expires); tokens that expire within two weeks are flagged in Settings and the health check.
+- [x] **No Git Credential Manager needed:** tokens live in Windows Credential Manager under Monaged's name, and `monaged.exe --git-credential` is git's helper in WSL for each host with an account (through WSL interop, window open or not). It's set up again by itself when monaged.exe moves (updates, dev builds). A token git finds rejected shows up in Settings.
+- [x] **Or with it:** Git Credential Manager is found wherever Git for Windows or its own installer put it, and one switch makes it the helper for hosts without an account (or turns it off).
+- [x] **Several accounts per host:** a default, and a project can sign in as another (`credential.<url>.username` in its git config), switched from the Git tab.
+- [x] **Without gh and glab:** pull/merge requests, their status and CI go through the REST API with the account; the CLIs get the account's token when they're used.
+- [x] **Safety:** tokens never touch the database, a file in WSL or a command line; they're masked like environment secrets, and merges and pushes that contain one are refused.
+- [x] **SSH keys in WSL:** list, create (ed25519), add to GitHub or GitLab through the API, test per host, trust a host's key.
+- [x] **Commit as an account:** its name and email become git's identity in WSL.
+- [x] **Git tab:** commit only the files you tick, amend the last commit, take back a commit that isn't pushed, pull with a merge when a branch moved on both sides, and an Origin row with who it signs in as, a connection test, and HTTPS ⇄ SSH.
+- [x] Clone checks, push errors and the health check point to Settings → Git accounts.
+- [ ] Not exercised live yet (written and type-checked off Windows): the clipboard pick-up against the real token pages, the helper through WSL interop, imports from gh/glab/GCM.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.

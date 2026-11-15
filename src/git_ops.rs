@@ -81,11 +81,93 @@ pub fn commit(distro: &str, worktree: &str, message: &str, paths: &[String]) -> 
     } else {
         format!("git add -A -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" "))
     };
+    // With paths, only those go in, even if other files were staged before.
+    let only = if paths.is_empty() { String::new() } else { format!(" -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ")) };
     let out = run(
         distro,
-        &format!("cd {} || exit 1\n{add} && git commit -q -m {} && git rev-parse --short HEAD", quote(worktree), quote(message)),
+        &format!("cd {} || exit 1\n{add} && git commit -q -m {}{only} && git rev-parse --short HEAD", quote(worktree), quote(message)),
     )?;
     Ok(out.lines().last().unwrap_or_default().trim().to_string())
+}
+
+/// The newest commit of a worktree: (short sha, subject, already on a remote).
+pub fn last_commit(distro: &str, worktree: &str) -> Result<Option<(String, String, bool)>> {
+    let out = run(
+        distro,
+        &format!(
+            "cd {} || exit 1\ngit rev-parse -q --verify HEAD >/dev/null || exit 0\n\
+             git log -1 --format='%h%x1f%s'\n\
+             if [ -n \"$(git branch -r --contains HEAD 2>/dev/null | head -n 1)\" ]; then echo pushed; else echo local; fi",
+            quote(worktree)
+        ),
+    )?;
+    let mut lines = out.lines();
+    let Some((sha, subject)) = lines.next().and_then(|l| l.split_once('\u{1f}')) else { return Ok(None) };
+    Ok(Some((sha.to_string(), subject.to_string(), lines.next() == Some("pushed"))))
+}
+
+/// Adds the uncommitted changes (all, or the given paths) to the last commit,
+/// with a new message when one is given. Refuses once the commit is pushed.
+pub fn amend(distro: &str, worktree: &str, message: &str, paths: &[String]) -> Result<String> {
+    let add = if paths.is_empty() { "git add -A".to_string() } else { format!("git add -A -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ")) };
+    let msg = if message.trim().is_empty() { "--no-edit".to_string() } else { format!("-m {}", quote(message)) };
+    let only = if paths.is_empty() { String::new() } else { format!(" -- {}", paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ")) };
+    let out = run(
+        distro,
+        &format!(
+            "cd {} || exit 1\n\
+             if [ -n \"$(git branch -r --contains HEAD 2>/dev/null | head -n 1)\" ]; then echo 'The last commit is already pushed; make a new commit instead.' >&2; exit 1; fi\n\
+             {add} && git commit -q --amend {msg}{only} && git rev-parse --short HEAD",
+            quote(worktree)
+        ),
+    )?;
+    Ok(out.lines().last().unwrap_or_default().trim().to_string())
+}
+
+/// Takes back the last commit and keeps its changes as uncommitted work.
+/// Refuses once the commit is pushed.
+pub fn undo_commit(distro: &str, worktree: &str) -> Result<String> {
+    let out = run(
+        distro,
+        &format!(
+            "cd {} || exit 1\n\
+             if [ -n \"$(git branch -r --contains HEAD 2>/dev/null | head -n 1)\" ]; then echo 'The last commit is already pushed, so it stays.' >&2; exit 1; fi\n\
+             git rev-parse -q --verify HEAD~1 >/dev/null || {{ echo 'This is the first commit; there is nothing before it.' >&2; exit 1; }}\n\
+             s=$(git log -1 --format=%s); git reset -q --soft HEAD~1 && echo \"$s\"",
+            quote(worktree)
+        ),
+    )?;
+    Ok(out.trim().to_string())
+}
+
+/// Merges origin's version of a branch into it when both have moved
+/// (no rebase: nothing that's pushed gets rewritten). A conflict leaves
+/// everything as it was and lists the files.
+pub fn pull_merge(distro: &str, repo: &str, branch: &str) -> Result<String> {
+    let merge_worktree = worktree_path(repo, "_merge", "worktree");
+    let script = format!(
+        "cd {repo} || exit 1\nb={b}; mwt={mwt}\n\
+         wt=$(git worktree list --porcelain | awk -v r=\"refs/heads/$b\" '/^worktree /{{p=substr($0,10)}} $1==\"branch\" && $2==r {{print p}}')\n\
+         release=0\n\
+         if [ -n \"$wt\" ]; then\n\
+           if [ -n \"$(git -C \"$wt\" status --porcelain)\" ]; then echo \"$b has uncommitted changes in $wt; commit or stash them first\" >&2; exit 1; fi\n\
+         else\n\
+           wt=\"$mwt\"\n\
+           if [ ! -d \"$wt\" ]; then mkdir -p \"$(dirname \"$wt\")\"; git worktree add -q --detach \"$wt\" >/dev/null 2>&1 || {{ echo \"couldn't create the merge worktree\" >&2; exit 1; }}; fi\n\
+           git -C \"$wt\" checkout -q \"$b\" || exit 1\n\
+           release=1\n\
+         fi\n\
+         if out=$(git -C \"$wt\" merge --no-edit -q \"origin/$b\" 2>&1); then sha=$(git -C \"$wt\" rev-parse --short HEAD); ok=1\n\
+         else files=$(git -C \"$wt\" diff --name-only --diff-filter=U | tr '\\n' ' '); git -C \"$wt\" merge --abort >/dev/null 2>&1; ok=0; fi\n\
+         [ \"$release\" = 1 ] && git -C \"$wt\" checkout -q --detach\n\
+         if [ \"$ok\" = 1 ]; then echo \"$sha\"\n\
+         elif [ -n \"$files\" ]; then echo \"$b and origin/$b conflict in: $files\" >&2; exit 1\n\
+         else echo \"$out\" | grep -v '^[[:space:]]*$' | tail -n 1 >&2; exit 1; fi",
+        repo = quote(repo),
+        b = quote(branch),
+        mwt = quote(&merge_worktree),
+    );
+    Ok(run(distro, &script)?.trim().to_string())
 }
 
 /// Throws away a file's uncommitted changes (a new file is deleted).

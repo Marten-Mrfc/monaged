@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod acp;
+mod accounts_ui;
 mod add_project;
 mod agent;
 mod attach;
@@ -23,6 +24,7 @@ mod extras;
 mod dots;
 mod feedback;
 mod git;
+mod git_auth;
 mod git_ops;
 mod git_ui;
 mod health;
@@ -214,7 +216,7 @@ struct Monaged {
     // Merging (Phase 5).
     branch_info: HashMap<i64, merge_ui::BranchInfo>,
     merges: HashMap<i64, merge_ui::MergeState>,
-    /// Git in WSL uses Windows' credential manager.
+    /// Git in WSL can sign in somewhere (Monaged accounts or Git Credential Manager).
     creds_ok: Option<bool>,
     // Coordination (Phase 4).
     bridge: Option<coord::Bridge>,
@@ -342,6 +344,8 @@ struct Monaged {
     last_place: String,
     /// Settings → Git: your identity inside WSL.
     git_identity: Option<(Entity<TextInput>, Entity<TextInput>)>,
+    /// Settings → Git accounts: sign-ins, Git Credential Manager, SSH keys.
+    git_auth: accounts_ui::GitAuthUi,
     /// The Run tab: per worktree, its commands, dev server and test results.
     run_states: HashMap<String, run_ui::RunState>,
     /// Which worktree the Run tab shows, per subproject.
@@ -535,6 +539,7 @@ impl Monaged {
             commit_view: None,
             fetched: HashMap::new(),
             git_identity: None,
+            git_auth: accounts_ui::GitAuthUi::default(),
             profile_inputs: None,
             update: update::UpdateState::default(),
             setup: onboarding::Setup::default(),
@@ -599,6 +604,9 @@ impl Monaged {
         }
         this.apply_theme(window);
         window.focus(&this.focus);
+        // Git accounts for Settings; git's helper in WSL is set up (and
+        // repaired if Monaged moved) once WSL is there, in `after_setup`.
+        this.git_auth.accounts = git_auth::load_accounts(&this.store);
         // A fresh PC gets the setup guide first; it connects when it's done.
         if this.setup_needed(std::env::args().any(|a| a == "--setup")) {
             this.setup.pending = true;
@@ -1184,6 +1192,7 @@ impl Monaged {
         self.form = Some(Form::Settings { error: None });
         self.load_git_identity(cx);
         self.ensure_profile_inputs(cx);
+        self.refresh_git_auth(false, cx);
         cx.notify();
     }
 
@@ -1694,6 +1703,13 @@ fn main() {
         if let Err(err) = coord::run_relay(relay) {
             eprintln!("monaged relay: {err:#}");
             std::process::exit(1);
+        }
+        return;
+    }
+    // Started by git inside WSL as its credential helper (Settings → Git accounts).
+    if let Some(operation) = git_auth::parse_helper_args(&args) {
+        if let Err(err) = git_auth::run_helper(&operation) {
+            eprintln!("monaged git-credential: {err:#}");
         }
         return;
     }

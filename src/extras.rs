@@ -11,7 +11,6 @@ use anyhow::{Context as _, Result, bail};
 pub enum Extra {
     Zed,
     Gh,
-    Glab,
     Sandbox,
     Pytest,
     /// curl and tar, which downloading the Claude agent needs.
@@ -23,7 +22,6 @@ impl Extra {
         match self {
             Extra::Zed => "Zed",
             Extra::Gh => "the GitHub CLI",
-            Extra::Glab => "the GitLab CLI",
             Extra::Sandbox => "bubblewrap and socat",
             Extra::Pytest => "pytest",
             Extra::Curl => "curl and tar",
@@ -35,7 +33,6 @@ impl Extra {
         match self {
             Extra::Zed => Some("ZedIndustries.Zed"),
             Extra::Gh => Some("GitHub.cli"),
-            Extra::Glab => Some("GLab.GLab"),
             _ => None,
         }
     }
@@ -55,7 +52,6 @@ impl Extra {
         match self {
             Extra::Zed => Some("https://zed.dev/download"),
             Extra::Gh => Some("https://cli.github.com"),
-            Extra::Glab => Some("https://gitlab.com/gitlab-org/cli#installation"),
             _ => None,
         }
     }
