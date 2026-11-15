@@ -364,7 +364,7 @@ fn item(f: &Facts, part: Part) -> Option<Item> {
     let (title, detail, bytes) = match part {
         Part::Program => (
             "The program".to_string(),
-            "monaged.exe, its shortcuts, its entry in Settings → Apps and leftover downloads.".to_string(),
+            "monaged.exe, its shortcuts, its entry in Settings → Apps, its place in Claude Desktop's MCP servers and leftover downloads.".to_string(),
             f.program.as_ref().map(|p| p.bytes),
         ),
         Part::GitHelper => (
@@ -1227,7 +1227,11 @@ pub fn run_step(task: Task, f: &Facts, chosen: &HashSet<Part>) -> Result<String>
         Part::Distro => remove_distro(f),
         Part::Credentials => remove_sign_ins(f),
         Part::Data => remove_data(f),
-        Part::Program => install::remove_program(),
+        Part::Program => {
+            // Claude Desktop shouldn't keep starting a program that's gone.
+            let _ = crate::debug_mcp::uninstall_desktop();
+            install::remove_program()
+        }
     }
 }
 

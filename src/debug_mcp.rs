@@ -200,6 +200,26 @@ pub fn install_desktop() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The config without Monaged's server (None: nothing to change).
+pub fn remove_from_desktop_config(text: &str) -> Option<String> {
+    let mut config: Value = serde_json::from_str(text).ok()?;
+    config.get_mut("mcpServers")?.as_object_mut()?.remove("monaged")?;
+    serde_json::to_string_pretty(&config).ok()
+}
+
+/// Uninstalling: Claude Desktop shouldn't keep starting a program that's gone.
+pub fn uninstall_desktop() -> Result<bool> {
+    let Some(path) = claude_desktop_config() else { return Ok(false) };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    match remove_from_desktop_config(&text) {
+        Some(updated) => {
+            std::fs::write(&path, updated)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 /// The command that adds Monaged to Claude Code on Windows.
 pub fn claude_code_windows_command() -> String {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "monaged.exe".into());
@@ -656,6 +676,13 @@ mod tests {
         assert!(add_to_desktop_config(Some("  "), "m").is_ok());
         assert!(add_to_desktop_config(Some("{ not json"), "m").is_err());
         assert!(add_to_desktop_config(Some("[1]"), "m").is_err());
+        // Uninstalling takes only Monaged's entry out.
+        let with = add_to_desktop_config(Some(before), "m").unwrap();
+        let without: Value = serde_json::from_str(&remove_from_desktop_config(&with).unwrap()).unwrap();
+        assert!(without["mcpServers"].get("monaged").is_none());
+        assert_eq!(without["mcpServers"]["files"]["command"], "x");
+        assert!(remove_from_desktop_config(before).is_none(), "nothing to change");
+        assert!(remove_from_desktop_config("not json").is_none());
     }
 
     #[test]

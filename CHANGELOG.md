@@ -2,6 +2,30 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Export for analysis** (Ctrl K, a project's menu, Settings → Connect Claude): a Markdown report to read or paste into a chat with Claude, and a zip with every conversation in full, the pipeline data as JSON, git's view of each project, Monaged's log and a screenshot. Secret values and token-shaped text are masked.
+- **Connect Claude**: an MCP server (`monaged.exe --mcp-debug`) for Claude Desktop or Claude Code, so Claude can look at the running app: its status, projects, subprojects, agents and their conversations, diffs, what waits for you, the log, screenshots, and exports; with your permission it can also message, stop and review agents. One click adds it to Claude Desktop or to Claude Code in WSL.
+- **The dashboard's Recent list**, and agents ordered by what matters now (needing you, working, then the agents doing the work, then the ones whose part is done).
+
+### Changed
+
+- **Agents get no git tokens by default.** Git in agents' commands has no credential helpers and Monaged's helper refuses agents, so an agent can't ask git for your GitHub or GitLab token. Settings → Git accounts can allow it; Monaged's own pushes and your terminal are unaffected.
+- **Sandboxed projects' tests run fenced**: when a project uses Claude Code's sandbox, the review runs the tests in bubblewrap without Windows drives or WSL interop.
+- The merge rule chip says what it does: "auto from 4/5".
+
+### Fixed
+
+- **Security**: a command that merely mentioned one of Monaged's tools was approved without asking (and "always"); any agent could act as another on the local bridge (each now has its own key); vault values could reach Haiku through the review's full files, notes and test output, or a commit-message diff (everything sent is masked now, and the review reads no symlinks or files outside the worktree); links from servers or agents could start programs (only web pages open now); the updater installed a release whose checksums didn't download; the elevated WSL install could run a wsl.exe planted next to Monaged; scripts that carry secrets found `timeout` and `bash` through a PATH an agent can write to; agent output reached the log unmasked.
+- **Crashes**: HTML tag names with non-ASCII letters in a diff, and long output with non-ASCII text from `run_with_env`.
+- **Pipelines**: an agent outside the current stage or run could move it (a planner asked "why?" during Build re-planned and started new builders; an old integrator could finish a new run); Build never finished after a rerun with other workstreams; a second integration failed on the feature branch's worktree; Approve and build twice started two sets of builders; a builder that reported done again stayed "passed"; reruns matched builders by name prefix; renaming an agent lost its place in the quality gate; cleaning up worktrees archived a running pipeline's agents and the lead.
+- **Auto-merge** waits for the integrator's latest work to be reviewed, never falls back to a builder's score when there's an integrator, and a ruled-out finding no longer merges by itself.
+- **The quality gate**: reviews it was waiting for when Monaged closed run again; a review that can't start answers it instead of leaving it waiting; Fix again without a score sends a message.
+- **The dashboard**: agent cards were far taller than their contents; the lead's box lost the cursor after dialogs and kept the keyboard when it wasn't on screen; updates for a busy lead swallowed what you typed; "Send anyway" sent every paused agent's message; the lead could be started twice.
+- Failing tests no longer run twice in full: the base branch's result is cached per commit and borrows the worktree's installed dependencies.
+
 ## [0.6.0] - 2026-11-15
 
 Each subproject gets a dashboard where everything that needs you can be answered, with a lead agent to talk to, and pipeline work now has to pass review before it's integrated or merged.

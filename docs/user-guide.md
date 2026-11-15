@@ -83,7 +83,7 @@ Every agent has Monaged's tools: `board_read`, `board_post` (contracts, decision
 
 ## Merging
 
-- **The project view** shows your branch chain (develop → acceptance → main) with a rule per target you can click to change: develop merges automatically unless the score is 1, acceptance asks you, the top branch asks twice. **Set up develop and acceptance** creates them.
+- **The project view** shows your branch chain (develop → acceptance → main) with a rule per target you can click to change: develop merges automatically when the integrator's latest work is reviewed at the quality bar (4/5 by default), acceptance asks you, the top branch asks twice. **Set up develop and acceptance** creates them.
 - **The Merge tab**: merge, push, open a GitHub pull request or GitLab merge request (through the REST API with your Git account, or `gh`/`glab` when you have them), resolve conflicts with an agent, and clean up worktrees.
 - **The merge queue** (project overview): ready first, with confidence, conflicts, the request and its CI status; **Merge N ready** merges them one at a time.
 - **The Git tab**: a worktree's changes; commit everything or only the files you tick, with a suggested message, or amend the last commit; take back a commit that isn't pushed yet; stash, fetch, pull (a merge when both sides moved, never a rebase) and push; finish a conflicted merge; and the history graph. Its **Origin** row says which account the project signs in as, switches account, tests the connection, and flips origin between HTTPS and SSH.
@@ -153,6 +153,20 @@ Monaged plays a few short sounds, only for moments you might miss because you're
 Nothing plays for messages, tool calls, typing or clicks, or for the agent you're looking at (unless you want that too). Several things at once play as one sound, and the most important one wins. Sounds stay off while you present, while a full-screen game or video runs, and while you're away from the PC. While they're on, Monaged's Windows notifications come without Windows' own ding, so nothing plays twice.
 
 Settings → Sounds turns them off or each one separately, sets the volume (quiet, normal, loud) and plays each one. **Ctrl K → Mute sounds** silences them in one go.
+
+## Letting Claude look at Monaged
+
+Settings → Connect Claude, or Ctrl K:
+
+- **Export for analysis** (also in a project's menu): a Markdown report and a zip in your Downloads folder. The report is made to read, or to paste or upload into any chat with Claude: what waits for you, each subproject's request, pipeline, plan and quality gate, every agent's state, summary, score and findings, the board, the timeline and the settings. The zip adds every conversation in full (from Claude's session files when one isn't open), the data as JSON, git's view of each project, Monaged's log and a screenshot of the window. Secret values and anything that looks like a token or key are masked.
+- **Connect Claude** (an MCP server): turn on "Let Claude Desktop or Claude Code read Monaged", then **Add to Claude Desktop** (restart it after), **Add to Claude Code in WSL**, or copy the command for Claude Code on Windows. Claude then has these tools: `status`, `projects`, `subproject`, `agent`, `changes`, `inbox`, `log`, `screenshot`, `show` (switches what Monaged shows, so a screenshot can follow) and `export`. With "Let Claude act too" it can also send agents messages, stop them and run reviews. It works only while Monaged runs and the switch is on; agents run as you, so they could reach it too: leave actions off unless you're debugging with Claude.
+
+## Security
+
+- Agents get **no git tokens** by default: Monaged pushes and opens pull requests itself, so git in an agent's commands has no credential helpers (Settings → Git accounts can allow it).
+- With Claude Code's **sandbox** on for a project (Project settings), agents' commands can't see Windows drives, Windows programs or other processes, and the review runs the tests in the same kind of fence.
+- Everything sent to Haiku (summaries, reviews, commit messages, the side chat) is masked first; links only open when they're web pages; each agent's connection to Monaged has its own key.
+- Without the sandbox, agents run as you inside WSL: Monaged keeps its own doors shut, but can't fence an agent off from everything you can reach.
 
 ## Appearance
 

@@ -39,11 +39,12 @@ impl Policy {
         }
     }
 
-    fn short(self) -> &'static str {
+    /// The rule as a chip says it; `min` is the quality bar (Settings → Reviews).
+    fn short(self, min: u8) -> String {
         match self {
-            Policy::Auto => "auto unless 1/5",
-            Policy::Ask => "asks you",
-            Policy::Confirm => "you confirm twice",
+            Policy::Auto => format!("auto from {min}/5"),
+            Policy::Ask => "asks you".into(),
+            Policy::Confirm => "you confirm twice".into(),
         }
     }
 
@@ -589,7 +590,7 @@ impl Monaged {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text())))
             .tooltip(crate::shell::tip("Click to change the rule"))
-            .child(policy.short())
+            .child(policy.short(self.min_score()))
             .on_click(cx.listener(move |this, _, _, cx| this.cycle_policy(project_id, t.clone(), cx)))
             .into_any_element()
     }
