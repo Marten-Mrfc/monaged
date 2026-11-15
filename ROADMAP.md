@@ -426,11 +426,21 @@ Asked for: one agent at a time and a close button that works; Fix findings next 
 
 **Not tested yet:** a real lead on Claude (does it use its tools well and keep its replies short), and how much its updates cost over a long pipeline.
 
+### After 0.6.0: export, Connect Claude, audits (done 2026-11-15)
+Asked for: export a project to hand to Claude, a debug connection Claude can use to see the app, then security fixes, UI/UX and layout work, and every standard check.
+
+- [x] **Export for analysis:** a Markdown report and a zip (conversations, data, git, log, screenshot), masked.
+- [x] **Connect Claude:** `monaged.exe --mcp-debug`, an MCP server for Claude Desktop and Claude Code, over the bridge with its own token; read tools always, actions only when allowed; one-click setup; uninstalling removes it from Claude Desktop.
+- [x] **A security audit**, fixed: exact tool names for auto-approval (a mention in a command was approved "always"), per-agent bridge tokens, masked LLM prompts, no symlinks or outside files in the review, web-only links, required checksums, System32's wsl.exe when elevated, absolute tool paths in scripts with secrets, masked logs, no git tokens for agents by default, fenced tests in sandboxed projects, two UTF-8 panics.
+- [x] **A bug hunt in the core flows**, fixed: run membership for pipeline results, builders per run, integrator reuse, double approve, done-again, rename, cleanup, auto-merge on a stale or borrowed score, interrupted reviews, the dashboard's focus and the lead's update queue.
+- [x] **UI:** dashboard cards (exact widths, no wrapping rows, ordered by what matters), Recent activity, the title bar's path beside the search box, the merge rule chip.
+- [ ] Left from the audits: "Always allow" for a command that uses secrets trusts its words while the scripts it runs can change (the button now says so); per-agent tokens still sit in process arguments any same-user process can read (true isolation needs the sandbox); Win+V history can keep a token copied from the browser.
+
 ### What's next (proposed order, 2026-11-15)
 Sizes: S about half a day, M one or two days, L several.
 
 **1. Prove it on a real PC.** Most of 0.3–0.5 (the setup guide, signing in, the uninstaller, sounds, staying clear of Sophos) has only run against stand-ins.
-- [ ] S · **Report a problem:** one button (Ctrl K, Settings → General, the connection bar) that copies or saves a report: version, Windows and WSL versions, the distro, setup state, and the ends of `monaged.log` and `wsl-install.log`, with secrets and tokens masked. Every real-PC issue becomes one paste.
+- [x] S · **Report a problem:** done as **Export for analysis** and **Connect Claude** (below, after 0.6.0).
 - [ ] S · **A real-PC checklist per release** (`docs/testing.md`): a fresh install, the guide, signing in, the playground, an update, uninstalling; with endpoint security on.
 - [ ] M · **Code signing** (Azure Trusted Signing, about $10 a month, or SignPath, free once the repository is public): no SmartScreen warning, and fewer antivirus flags. Needs an account: your call.
 

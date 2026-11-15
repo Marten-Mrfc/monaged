@@ -988,7 +988,13 @@ impl Monaged {
                                 .gap(px(6.))
                                 .child(ui::button(SharedString::from(format!("env-allow-{id}")), Kind::Primary, None, "Allow once").on_click(cx.listener(move |this, _, _, cx| this.answer_env_request(id, true, false, cx))))
                                 .when(r.warnings.is_empty() && full, |d| {
-                                    d.child(ui::button(SharedString::from(format!("env-always-{id}")), Kind::Secondary, None, "Always allow this command").on_click(cx.listener(move |this, _, _, cx| this.answer_env_request(id, true, true, cx))))
+                                    d.child(
+                                        ui::button(SharedString::from(format!("env-always-{id}")), Kind::Secondary, None, "Always allow this command")
+                                            // The command's words stay the same; what they run (a package.json
+                                            // script, a Makefile, a test) is code the agent can change.
+                                            .tooltip(crate::shell::tip("Trusts these words from now on. If they run the project's own scripts (npm test, make, a .py file), the agent can change what those do; allow once for those."))
+                                            .on_click(cx.listener(move |this, _, _, cx| this.answer_env_request(id, true, true, cx))),
+                                    )
                                 })
                                 .child(ui::button(SharedString::from(format!("env-deny-{id}")), Kind::Ghost, None, "Don't allow").on_click(cx.listener(move |this, _, _, cx| this.answer_env_request(id, false, false, cx)))),
                         )

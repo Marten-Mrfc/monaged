@@ -548,12 +548,23 @@ impl Monaged {
         if self.zen && self.form.is_none() {
             crumbs.push(format!("Zen · {} to leave", crate::keys::label("zen")));
         }
+                // The search box is centred over the title bar: the path stops short
+        // of it (the last part shortens with "…") instead of running under it.
+        let window_w = f32::from(window.viewport_size().width);
+        let search_w = if window_w < 1200. { 300. } else { 420. };
+        let crumbs_max = (window_w / 2. - search_w / 2. - 16. - sidebar_w.max(200.) - 14.).max(0.);
+        // Too long for the room: only the most specific part (it says where you are).
+        let estimate: f32 = crumbs.iter().map(|c| c.chars().count() as f32 * 7.).sum::<f32>() + crumbs.len().saturating_sub(1) as f32 * 18.;
+        if estimate > crumbs_max && crumbs.len() > 1 {
+            crumbs.drain(..crumbs.len() - 1);
+        }
         let last = crumbs.len().saturating_sub(1);
-        let crumb_row = div().flex().items_center().gap(px(6.)).min_w(px(0.)).overflow_hidden().children(
+        let crumb_row = div().flex().items_center().gap(px(6.)).min_w(px(0.)).max_w(px(crumbs_max)).overflow_hidden().children(
             crumbs.into_iter().enumerate().flat_map(|(i, c)| {
                 let sep = (i > 0).then(|| icon_sized(Icon::ChevronRight, 12.).text_color(rgb(theme::text_4())).into_any_element());
                 let text = div()
-                    .flex_none()
+                    .when(i == last, |d| d.flex_shrink().min_w(px(0.)).truncate())
+                    .when(i != last, |d| d.flex_none())
                     .text_size(px(12.5))
                     .text_color(rgb(if i == last { theme::text() } else { theme::text_3() }))
                     .child(c)
@@ -620,7 +631,7 @@ impl Monaged {
                     div()
                         .id("titlebar-search")
                         .occlude()
-                        .w(px(420.))
+                        .w(px(search_w))
                         .h(px(26.))
                         .flex()
                         .items_center()
