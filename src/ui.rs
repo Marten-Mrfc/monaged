@@ -617,3 +617,36 @@ pub fn field_checked(
         .child(input)
         .children(under)
 }
+
+/// Opens a web page. Only http(s): Windows would run anything else it's
+/// given (a path to an .exe, a share, a `search-ms:` query), and some links
+/// come from servers and agents.
+pub fn open_web(cx: &mut gpui::App, url: &str) {
+    let url = url.trim();
+    if is_web_link(url) {
+        cx.open_url(url);
+    } else {
+        eprintln!("[ui] refused to open a link that isn't a web page: {url:?}");
+    }
+}
+
+pub fn is_web_link(url: &str) -> bool {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://")) && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+#[cfg(test)]
+mod link_tests {
+    #[test]
+    fn only_web_links_count() {
+        let ok = super::is_web_link;
+        assert!(ok("https://github.com/x"));
+        assert!(ok("http://localhost:3000"));
+        assert!(!ok(r"C:\Windows\System32\calc.exe"));
+        assert!(!ok(r"\\host\share\x.exe"));
+        assert!(!ok("search-ms:query=x"));
+        assert!(!ok("file:///C:/x.exe"));
+        assert!(!ok("https://x.com/a b"));
+    }
+}

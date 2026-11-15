@@ -338,7 +338,7 @@ impl Monaged {
             form.watching = true;
             form.working = Some(format!("Waiting for you to copy the new token on {host}…"));
         }
-        cx.open_url(&page);
+        crate::ui::open_web(cx, &page);
         cx.notify();
         cx.spawn(async move |view, cx| {
             let started = std::time::Instant::now();
@@ -456,7 +456,7 @@ impl Monaged {
     fn open_token_page(&mut self, cx: &mut Context<Self>) {
         let Some((provider, host)) = self.sign_in_host(cx) else { return };
         match git_auth::token_page(provider, &host) {
-            Some(url) if !host.is_empty() => cx.open_url(&url),
+            Some(url) if !host.is_empty() => crate::ui::open_web(cx, &url),
             _ => self.set_sign_in_error(Some("Make a token (or app password) in your account settings on that host, then paste it here.".into()), cx),
         }
     }
@@ -676,7 +676,7 @@ impl Monaged {
                 })
                 .when(!gcm_found && !gcm_on, |d| {
                     d.child(div().flex().child(ui::button("gcm-get", Kind::Ghost, Some(Icon::External), "Get Git Credential Manager").on_click(cx.listener(|_, _, _, cx| {
-                        cx.open_url("https://github.com/git-ecosystem/git-credential-manager/releases/latest")
+                        crate::ui::open_web(cx, "https://github.com/git-ecosystem/git-credential-manager/releases/latest")
                     }))))
                 }),
         );
@@ -814,7 +814,7 @@ impl Monaged {
                             .gap(px(8.))
                             .child(ui::button("signin-reopen", Kind::Secondary, Some(Icon::External), "Open the page again").on_click(cx.listener(move |_, _, _, cx| {
                                 if let Some(page) = &page {
-                                    cx.open_url(page)
+                                    crate::ui::open_web(cx, page)
                                 }
                             })))
                             .child(ui::button("signin-cancel", Kind::Ghost, None, "Stop waiting").on_click(cx.listener(|this, _, _, cx| this.cancel_browser_sign_in(cx))))

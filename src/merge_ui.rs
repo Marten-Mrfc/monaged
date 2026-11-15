@@ -848,7 +848,7 @@ impl Monaged {
                         .hover(|s| s.text_color(rgb(theme::text())))
                         .child(format!("#{} · {}", r.number, r.state))
                         .child(icon_sized(Icon::External, 13.))
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+                        .on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &url))),
                 ),
             );
         }

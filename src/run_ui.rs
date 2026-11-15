@@ -518,7 +518,7 @@ impl Monaged {
             );
         if let Some(port) = dev.and_then(|d| d.port).filter(|_| running) {
             let url = format!("http://localhost:{port}");
-            server = server.child(ui::button("dev-open", Kind::Secondary, Some(Icon::External), format!("Open {url}")).on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))));
+            server = server.child(ui::button("dev-open", Kind::Secondary, Some(Icon::External), format!("Open {url}")).on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &url))));
         }
         if let Some(dev) = dev.filter(|d| !d.logs.is_empty()) {
             let scroll = state.map(|s| s.scroll.clone()).unwrap_or_default();

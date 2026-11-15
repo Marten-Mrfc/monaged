@@ -81,6 +81,24 @@ fn base_tools() -> Value {
     ])
 }
 
+/// Whether an ACP tool call is one of Monaged's own MCP tools: its title (and
+/// the tool name Claude Code reports, when it does) is exactly
+/// `mcp__monaged__<tool>` for a tool Monaged has. Anything that merely
+/// mentions one (a Bash command, an edit) isn't.
+pub fn is_own_tool_call(tool_call: &Value) -> bool {
+    let own = |name: &str| {
+        name.strip_prefix("mcp__monaged__").is_some_and(|tool| {
+            let tools = tool_list();
+            let lead = crate::lead::tools();
+            tools.as_array().into_iter().chain(lead.as_array()).flatten().any(|t| t["name"].as_str() == Some(tool))
+        })
+    };
+    let title = tool_call["title"].as_str().unwrap_or_default().trim();
+    let reported = tool_call["_meta"]["claudeCode"]["toolName"].as_str();
+    let kind = tool_call["kind"].as_str().unwrap_or("other");
+    own(title) && reported.is_none_or(own) && !matches!(kind, "execute" | "edit" | "delete" | "move" | "fetch")
+}
+
 // ---- The relay (runs as `monaged.exe --mcp-relay`) -------------------------------
 
 pub struct RelayArgs {
@@ -195,10 +213,26 @@ impl ToolReply {
 
 pub struct Bridge {
     pub port: u16,
-    /// What agents' relays send.
-    pub token: String,
+    /// Each agent's relay gets its own token; the bridge knows the caller
+    /// from it (the agent id a request claims is ignored).
+    tokens: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>>,
     /// What the debug relay sends (kept in a file only while debugging is on).
     pub debug_token: String,
+}
+
+impl Bridge {
+    /// The agent's token (made once per run).
+    pub fn token_for(&self, agent: i64) -> String {
+        let Ok(mut tokens) = self.tokens.lock() else { return String::new() };
+        if let Some((token, _)) = tokens.iter().find(|(_, id)| **id == agent) {
+            return token.clone();
+        }
+        let token = random_token().unwrap_or_default();
+        if !token.is_empty() {
+            tokens.insert(token.clone(), agent);
+        }
+        token
+    }
 }
 
 /// The most a request may hold; tool arguments are small.
@@ -208,18 +242,34 @@ const MAX_REQUEST: u64 = 2 * 1024 * 1024;
 pub fn start_bridge() -> Result<(Bridge, UnboundedReceiver<ToolRequest>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("couldn't open the local coordination port")?;
     let port = listener.local_addr()?.port();
-    let (token, debug_token) = (random_token()?, random_token()?);
+    let debug_token = random_token()?;
+    let tokens: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>> = Default::default();
     let (tx, rx) = unbounded();
-    let expected = (token.clone(), debug_token.clone());
+    let expected = (tokens.clone(), debug_token.clone());
     thread::Builder::new().name("monaged-bridge".into()).spawn(move || {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Enough for every agent waiting on an `ask` at once; more is someone knocking.
+        const MAX_OPEN: usize = 64;
+        let open = Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming().flatten() {
-            let (tx, expected) = (tx.clone(), expected.clone());
-            let _ = thread::Builder::new().name("monaged-tool".into()).spawn(move || {
+            if open.load(Ordering::SeqCst) >= MAX_OPEN {
+                drop(stream);
+                continue;
+            }
+            open.fetch_add(1, Ordering::SeqCst);
+            let (tx, expected, counter) = (tx.clone(), expected.clone(), open.clone());
+            let spawned = thread::Builder::new().name("monaged-tool".into()).spawn(move || {
                 let _ = serve(stream, &tx, &expected.0, &expected.1);
+                counter.fetch_sub(1, Ordering::SeqCst);
             });
+            // A thread that never ran can't count itself out.
+            if spawned.is_err() {
+                open.fetch_sub(1, Ordering::SeqCst);
+            }
         }
     })?;
-    Ok((Bridge { port, token, debug_token }, rx))
+    Ok((Bridge { port, tokens, debug_token }, rx))
 }
 
 /// Compares without leaking where the first difference is.
@@ -227,7 +277,9 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn serve(stream: TcpStream, tx: &futures::channel::mpsc::UnboundedSender<ToolRequest>, token: &str, debug_token: &str) -> Result<()> {
+type Tokens = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>>;
+
+fn serve(stream: TcpStream, tx: &futures::channel::mpsc::UnboundedSender<ToolRequest>, tokens: &Tokens, debug_token: &str) -> Result<()> {
     use std::io::Read as _;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?.take(MAX_REQUEST));
@@ -236,12 +288,16 @@ fn serve(stream: TcpStream, tx: &futures::channel::mpsc::UnboundedSender<ToolReq
     let request: Value = serde_json::from_str(&line)?;
     let debug = request["debug"].as_bool().unwrap_or(false);
     let given = request["token"].as_str().unwrap_or_default();
-    let reply = if !same(given, if debug { debug_token } else { token }) {
-        ToolReply::error("bad token")
+    // Who's calling comes from the token alone.
+    let caller = if debug {
+        same(given, debug_token).then_some(0)
     } else {
+        tokens.lock().ok().and_then(|t| t.iter().find(|(token, _)| same(given, token)).map(|(_, id)| *id))
+    };
+    let reply = if let Some(agent) = caller {
         let (reply_tx, reply_rx) = mpsc::channel();
         tx.unbounded_send(ToolRequest {
-            agent: if debug { 0 } else { request["agent"].as_i64().unwrap_or(0) },
+            agent,
             tool: request["tool"].as_str().unwrap_or_default().to_string(),
             arguments: request["arguments"].clone(),
             reply: reply_tx,
@@ -254,6 +310,8 @@ fn serve(stream: TcpStream, tx: &futures::channel::mpsc::UnboundedSender<ToolReq
                 ToolReply::ok("No answer in time. Continue with your best assumption and post it on the board with board_post.")
             }
         })
+    } else {
+        ToolReply::error("bad token")
     };
     let mut stream = stream;
     writeln!(stream, "{}", json!({ "text": reply.text, "is_error": reply.is_error, "image": reply.image }))?;
@@ -271,7 +329,7 @@ fn random_token() -> Result<String> {
 /// The MCP server entry for ACP's `session/new` / `session/load`.
 pub fn mcp_server_spec(bridge: &Bridge, agent: i64, lead: bool) -> Value {
     let exe = std::env::current_exe().map(|p| windows_to_wsl_path(&p.to_string_lossy())).unwrap_or_default();
-    let mut args = vec!["--mcp-relay".to_string(), "--port".into(), bridge.port.to_string(), "--token".into(), bridge.token.clone(), "--agent".into(), agent.to_string()];
+    let mut args = vec!["--mcp-relay".to_string(), "--port".into(), bridge.port.to_string(), "--token".into(), bridge.token_for(agent), "--agent".into(), agent.to_string()];
     if lead {
         args.push("--lead".into());
     }

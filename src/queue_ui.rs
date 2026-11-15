@@ -177,7 +177,7 @@ impl Monaged {
                         .tooltip(tip("Open the CI run"))
                         .child(icon_sized(glyph, 11.).text_color(rgb(fg)))
                         .child(format!("CI {}", c.state))
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                        .on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &url)))
                 });
                 let action: Option<AnyElement> = match readiness {
                     Readiness::Ready => Some(
@@ -225,7 +225,7 @@ impl Monaged {
                             .cursor_pointer()
                             .hover(|s| s.text_color(rgb(theme::text())))
                             .child(format!("#{} {}", r.number, r.state))
-                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                            .on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &url)))
                     }))
                     .children(action)
             }));

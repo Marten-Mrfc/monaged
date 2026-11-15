@@ -217,7 +217,7 @@ impl Monaged {
             ToastAction::Restore(agent_id) => self.restore_agent(agent_id, cx),
             ToastAction::Update => self.install_update(cx),
             ToastAction::UndoRollback(agent_id) => self.undo_rollback(agent_id, cx),
-            ToastAction::OpenUrl(url) => cx.open_url(&url),
+            ToastAction::OpenUrl(url) => crate::ui::open_web(cx, &url),
             ToastAction::Open { sub_id, agent_id } => {
                 self.form = None;
                 self.select_sub(sub_id, cx);

@@ -767,7 +767,7 @@ impl Monaged {
                 );
             }
             AgentEvent::Message(message) => self.on_message(message),
-            AgentEvent::Log(line) => eprintln!("[agent] {line}"),
+            AgentEvent::Log(line) => eprintln!("[agent] {}", export::mask_all(&line)),
             AgentEvent::Failed(err) => {
                 if matches!(self.conn, Conn::Ready) {
                     self.chime(sound::Cue::Error);
@@ -993,8 +993,9 @@ impl Monaged {
     }
 
     fn on_agent_request(&mut self, method: &str, id: Value, params: &Value) {
-        // Monaged's own coordination tools never need the user's OK.
-        if method == "session/request_permission" && params["toolCall"].to_string().contains("mcp__monaged__") {
+        // Monaged's own coordination tools never need the user's OK; only a
+        // call whose tool *is* one of them (not a command that mentions one).
+        if method == "session/request_permission" && coord::is_own_tool_call(&params["toolCall"]) {
             let options = params["options"].as_array().cloned().unwrap_or_default();
             let pick = ["allow_always", "allow_once"]
                 .iter()

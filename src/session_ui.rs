@@ -697,7 +697,7 @@ impl Monaged {
                         .flex()
                         .gap(px(8.))
                         .child(ui::button(("form-open", index), Kind::Primary, Some(Icon::External), "Open the link").on_click(cx.listener(
-                            move |_, _, _, cx| cx.open_url(&url_for_open),
+                            move |_, _, _, cx| crate::ui::open_web(cx, &url_for_open),
                         )))
                         .child(ui::button(("form-done", index), Kind::Secondary, Some(Icon::Check), "I've done it").on_click(cx.listener(
                             move |this, _, _, cx| this.answer_form(agent_id, index, "accept", cx),

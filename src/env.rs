@@ -906,7 +906,15 @@ impl Monaged {
                 Ok(out) => {
                     let (body, code) = out.rsplit_once("MONAGED_EXIT ").map(|(b, c)| (b.to_string(), c.trim().to_string())).unwrap_or((out.clone(), "?".into()));
                     let (masked, _) = mask_names(&body);
-                    let tail: String = if masked.len() > 12_000 { format!("…(earlier output cut)\n{}", &masked[masked.len() - 12_000..]) } else { masked };
+                    let tail: String = if masked.len() > 12_000 {
+                        let mut cut = masked.len() - 12_000;
+                        while !masked.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        format!("…(earlier output cut)\n{}", &masked[cut..])
+                    } else {
+                        masked
+                    };
                     let note = if code == "124" { " (stopped after 5 minutes)" } else { "" };
                     ToolReply::ok(format!("Exit code {code}{note}. Secrets in the output show as [secret:NAME].\n{tail}"))
                 }

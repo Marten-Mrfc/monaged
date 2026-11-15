@@ -49,6 +49,10 @@ pub struct Usage {
 
 /// Sends one request and returns the parsed JSON object that matches `schema`.
 pub fn complete_json(backend: &Backend, system: &str, prompt: &str, schema: &Value) -> Result<(Value, Usage)> {
+    // Nothing secret leaves the machine: vault values by name, and anything
+    // shaped like a token or key (diffs, full files, notes, test output, chats).
+    let masked = crate::export::mask_all(prompt);
+    let prompt = masked.as_str();
     match backend {
         Backend::Api { key } => via_api(key, system, prompt, schema),
         Backend::Cli { distro } => via_cli(distro, system, prompt, schema),

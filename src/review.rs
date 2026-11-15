@@ -341,12 +341,16 @@ const MAX_FILE_CHARS: usize = 40_000;
 /// worktree: each text file between markers, binary files skipped.
 pub fn context_script(worktree: &str, shared_notes: Option<&str>, paths: &[String], marker: &str) -> String {
     let mut s = format!(
-        "cd {} || exit 1\nemit() {{ [ -f \"$1\" ] || return 0; if [ -s \"$1\" ] && ! grep -Iq . \"$1\" 2>/dev/null; then return 0; fi; echo \"{marker}_BEGIN $2\"; head -c \"$3\" \"$1\"; echo; [ \"$(wc -c < \"$1\")\" -gt \"$3\" ] && echo '[… the rest of this file is left out …]'; echo \"{marker}_END\"; }}\n",
+        "cd {} || exit 1\nroot=$(pwd -P)\n\
+         inside() {{ case \"$(realpath -- \"$1\" 2>/dev/null)\" in \"$root\"/*) return 0 ;; *) return 1 ;; esac; }}\n\
+         emit() {{ inside \"$1\" || return 0; show \"$@\"; }}\n\
+         show() {{ [ -f \"$1\" ] || return 0; [ -L \"$1\" ] && return 0; if [ -s \"$1\" ] && ! grep -Iq . \"$1\" 2>/dev/null; then return 0; fi; echo \"{marker}_BEGIN $2\"; head -c \"$3\" \"$1\"; echo; [ \"$(wc -c < \"$1\")\" -gt \"$3\" ] && echo '[… the rest of this file is left out …]'; echo \"{marker}_END\"; }}\n",
         quote(worktree)
     );
     s.push_str("emit CLAUDE.md knowledge:CLAUDE.md 8000\n");
     if let Some(notes) = shared_notes {
-        s.push_str(&format!("emit {} knowledge:shared 6000\n", crate::wsl::shell_path(notes)));
+        // The shared notes live next to the repo, outside the worktree.
+        s.push_str(&format!("show {} knowledge:shared 6000\n", crate::wsl::shell_path(notes)));
     }
     for path in paths {
         s.push_str(&format!("emit {} {} {}\n", quote(path), quote(&format!("file:{path}")), MAX_FILE_CHARS));

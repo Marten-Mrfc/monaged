@@ -329,8 +329,8 @@ impl Monaged {
                         "Monaged {} · MIT license with the Commons Clause · an independent project, not affiliated with Anthropic.",
                         env!("CARGO_PKG_VERSION")
                     )))
-                    .child(ui::button("open-website", Kind::Ghost, Some(Icon::External), "GitHub").on_click(cx.listener(|_, _, _, cx| cx.open_url("https://github.com/Marten-Mrfc/monaged"))))
-                    .child(ui::button("open-docs", Kind::Ghost, Some(Icon::External), "Help").on_click(cx.listener(|_, _, _, cx| cx.open_url("https://github.com/Marten-Mrfc/monaged/blob/main/docs/user-guide.md")))),
+                    .child(ui::button("open-website", Kind::Ghost, Some(Icon::External), "GitHub").on_click(cx.listener(|_, _, _, cx| crate::ui::open_web(cx, "https://github.com/Marten-Mrfc/monaged"))))
+                    .child(ui::button("open-docs", Kind::Ghost, Some(Icon::External), "Help").on_click(cx.listener(|_, _, _, cx| crate::ui::open_web(cx, "https://github.com/Marten-Mrfc/monaged/blob/main/docs/user-guide.md")))),
             )
             .into_any_element()
     }

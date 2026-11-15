@@ -215,12 +215,12 @@ pub fn download_and_swap(repo: &str, release: &Release) -> Result<()> {
     if &head != b"MZ" {
         bail!("the download isn't a Windows program");
     }
-    if let Ok(sums) = std::fs::read_to_string(dir.join("SHA256SUMS.txt")) {
-        let expected = listed_hash(&sums, &name).with_context(|| format!("SHA256SUMS.txt doesn't list {name}"))?;
-        let actual = sha256_file(&file)?;
-        if actual != expected {
-            bail!("the download doesn't match its checksum (expected {expected}, got {actual}); nothing was changed");
-        }
+    // Every release has checksums; without them the download isn't trusted.
+    let sums = std::fs::read_to_string(dir.join("SHA256SUMS.txt")).context("the release's checksums (SHA256SUMS.txt) couldn't be downloaded; nothing was changed")?;
+    let expected = listed_hash(&sums, &name).with_context(|| format!("SHA256SUMS.txt doesn't list {name}; nothing was changed"))?;
+    let actual = sha256_file(&file)?;
+    if actual != expected {
+        bail!("the download doesn't match its checksum (expected {expected}, got {actual}); nothing was changed");
     }
     let target = std::env::current_exe()?;
     install::replace_exe(&file, &target)
@@ -418,7 +418,7 @@ impl Monaged {
                     .border_color(rgb(theme::line()))
                     .child(ui::label(format!("What's new in {}", r.version)))
                     .child(crate::review_ui::render_markdown(&r.notes.chars().take(3000).collect::<String>()))
-                    .child(div().flex().child(ui::button("update-notes", Kind::Ghost, Some(Icon::External), "Open on GitHub").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))))),
+                    .child(div().flex().child(ui::button("update-notes", Kind::Ghost, Some(Icon::External), "Open on GitHub").on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &url))))),
             );
         }
         col.child(ui::meta(format!(

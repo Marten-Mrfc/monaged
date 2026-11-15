@@ -195,7 +195,11 @@ fn tokens(line: &str, lang: Lang) -> Vec<(Range<usize>, Token)> {
             if j > start {
                 out.push((start..j, Token::Keyword));
             }
+            // Names can hold non-ASCII letters: stop on a character boundary.
             i = j.max(i + 1);
+            while i < line.len() && !line.is_char_boundary(i) {
+                i += 1;
+            }
             continue;
         }
         i += c.len_utf8();
@@ -233,6 +237,13 @@ pub fn line(text: &str, lang: Option<Lang>) -> StyledText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_ascii_tag_names_dont_panic() {
+        for line in ["<é>", "<日本>", "</straße attr=\"ü\">", "<a>ñ</a>"] {
+            let _ = tokens(line, Lang::Html);
+        }
+    }
 
     #[test]
     fn finds_tokens() {

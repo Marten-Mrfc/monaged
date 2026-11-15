@@ -311,7 +311,11 @@ pub fn install_wsl_here(log: Option<std::path::PathBuf>) -> i32 {
             Some((a, b)) => (Stdio::from(a), b.try_clone().map(Stdio::from).unwrap_or_else(|_| Stdio::null())),
             None => (Stdio::null(), Stdio::null()),
         };
-        quiet("wsl.exe").args(args).env("WSL_UTF8", "1").stdout(out).stderr(err).status().ok().and_then(|s| s.code()).unwrap_or(1)
+        // Running as administrator: Windows' own wsl.exe by its full path, never
+        // one found next to monaged.exe (Windows looks in the program's folder first).
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let exe = std::path::Path::new(&system).join("System32").join("wsl.exe");
+        quiet(&exe.to_string_lossy()).args(args).env("WSL_UTF8", "1").stdout(out).stderr(err).status().ok().and_then(|s| s.code()).unwrap_or(1)
     };
     let code = run(&["--install", "--no-distribution"]);
     if code == 0 || code == 3010 {
@@ -1020,7 +1024,7 @@ impl Monaged {
                     s.url = Some(url.clone());
                 }
                 if first {
-                    cx.open_url(&url);
+                    crate::ui::open_web(cx, &url);
                 }
             }
             signin::Event::Note(note) => {
@@ -1239,7 +1243,7 @@ impl Monaged {
                                     *u = Some(url.clone());
                                 }
                                 if first {
-                                    cx.open_url(&url);
+                                    crate::ui::open_web(cx, &url);
                                 }
                             }
                             signin::Event::Note(note) => {
@@ -1643,7 +1647,7 @@ impl Monaged {
                             .flex()
                             .gap(px(8.))
                             .child(ui::button("setup-wsl", Kind::Primary, Some(Icon::Shield), "Install WSL").on_click(cx.listener(|this, _, _, cx| this.setup_install_wsl(cx))))
-                            .child(ui::button("setup-wsl-docs", Kind::Ghost, Some(Icon::External), "About WSL").on_click(cx.listener(|_, _, _, cx| cx.open_url("https://learn.microsoft.com/windows/wsl/install")))),
+                            .child(ui::button("setup-wsl-docs", Kind::Ghost, Some(Icon::External), "About WSL").on_click(cx.listener(|_, _, _, cx| crate::ui::open_web(cx, "https://learn.microsoft.com/windows/wsl/install")))),
                     );
             }
             StepId::Distro => {
@@ -1720,7 +1724,7 @@ impl Monaged {
                                 .flex()
                                 .gap(px(8.))
                                 .child(ui::button("setup-agent", Kind::Primary, Some(Icon::ArrowDown), "Install the Claude agent").on_click(cx.listener(|this, _, _, cx| this.setup_install_agent(cx))))
-                                .child(ui::button("setup-agent-docs", Kind::Ghost, Some(Icon::External), "About it").on_click(cx.listener(|_, _, _, cx| cx.open_url(&format!("https://github.com/{AGENT_REPO}"))))),
+                                .child(ui::button("setup-agent-docs", Kind::Ghost, Some(Icon::External), "About it").on_click(cx.listener(|_, _, _, cx| crate::ui::open_web(cx, &format!("https://github.com/{AGENT_REPO}"))))),
                         );
                 }
             }
@@ -1813,7 +1817,7 @@ impl Monaged {
                                     d.child(
                                         ui::button(SharedString::from(format!("{id}-site")), Kind::Ghost, Some(Icon::External), "Website")
                                             .tooltip(crate::shell::tip("Download it from its website instead"))
-                                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(site))),
+                                            .on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, site))),
                                     )
                                 })
                                 .child(ui::button(id, Kind::Secondary, Some(Icon::ArrowDown), "Install").on_click(cx.listener(move |this, _, _, cx| this.setup_install_extra(extra, cx))));
@@ -1928,7 +1932,7 @@ impl Monaged {
                     .border_color(rgb(theme::line()))
                     .bg(rgb(theme::bg()))
                     .child(div().flex_1().min_w(px(0.)).font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).truncate().child(url.clone()))
-                    .child(ui::button("setup-signin-open", Kind::Secondary, Some(Icon::External), "Open the page").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&link))))
+                    .child(ui::button("setup-signin-open", Kind::Secondary, Some(Icon::External), "Open the page").on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &link))))
                     .child(ui::button("setup-signin-copy", Kind::Ghost, Some(Icon::Copy), "Copy link").on_click(cx.listener(move |this, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
                         this.toast(Tone::Info, "Copied the sign-in link.", cx);
@@ -1992,7 +1996,7 @@ impl Monaged {
                         cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
                         this.toast(Tone::Info, "Copied the code.", cx);
                     })))
-                    .child(ui::button("setup-gh-open", Kind::Secondary, Some(Icon::External), "Open GitHub").on_click(cx.listener(move |_, _, _, cx| cx.open_url(&page))))
+                    .child(ui::button("setup-gh-open", Kind::Secondary, Some(Icon::External), "Open GitHub").on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &page))))
                     .child(div().flex_1())
                     .child(ui::button("setup-gh-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|this, _, _, cx| this.setup_cancel(cx)))),
             )
