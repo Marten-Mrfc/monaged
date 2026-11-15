@@ -7,13 +7,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run per commit: the same commit pushed to a branch and to main moments
+# later would otherwise build twice; the later push takes over.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: false
+  group: ci-${{ github.sha }}
+  cancel-in-progress: true
 
 jobs:
   windows:
     name: Build and test (Windows)
+    # A "Release v…" commit is built and tested by the Release workflow.
+    if: ${{ !startsWith(github.event.head_commit.message, 'Release v') }}
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -26,17 +30,13 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
           rustc --version
-      - uses: actions/cache@v4
+      # Keyed on Cargo.lock but falling back to the newest cache, so a version
+      # bump rebuilds only Monaged itself, not GPUI and every other dependency.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: windows-cargo-${{ hashFiles('Cargo.lock') }}-ci
-          restore-keys: windows-cargo-${{ hashFiles('Cargo.lock') }}-
-      - name: Build
-        run: cargo build --locked
+          shared-key: windows-debug
+      # Builds the app (as its test binary) and runs the tests; Clippy below
+      # checks the app build itself.
       - name: Test
         run: cargo test --locked
       - name: Clippy
@@ -58,15 +58,9 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: windows-cargo-${{ hashFiles('Cargo.lock') }}-release
-          restore-keys: windows-cargo-${{ hashFiles('Cargo.lock') }}-
+          shared-key: windows-release
       - name: Build
         run: cargo build --release --locked
       - name: Package

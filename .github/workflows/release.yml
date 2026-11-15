@@ -32,15 +32,11 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustc --version
-      - uses: actions/cache@v4
+      # Falls back to the newest release cache when Cargo.lock changed (every
+      # version bump does), so only Monaged itself is rebuilt.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: windows-cargo-${{ hashFiles('Cargo.lock') }}-release
-          restore-keys: windows-cargo-${{ hashFiles('Cargo.lock') }}-
+          shared-key: windows-release
       - name: Version
         id: version
         shell: pwsh
