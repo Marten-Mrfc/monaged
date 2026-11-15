@@ -1183,7 +1183,7 @@ impl Monaged {
                     .child(div().flex_1())
                     .when(page.check.busy, |d| d.child(ui::spinner("check-busy", 12., theme::text_3())).child(ui::meta("Checking"))),
             )
-            .children(empty.filter(|_| page.check.notes.is_empty()).map(|t| ui::meta(t)))
+            .children(empty.filter(|_| page.check.notes.is_empty()).map(ui::meta))
             .children(notes)
             .into_any_element()
     }

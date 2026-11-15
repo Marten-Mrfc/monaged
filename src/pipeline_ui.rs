@@ -529,7 +529,7 @@ impl Monaged {
         };
         let _ = self.store.log_event(sub_id, Some(agent_id), "gate", &format!("{name}: {how}"));
         if role == Role::Integrator {
-            let summary = self.agent(agent_id).and_then(|a| last_done_summary(a)).unwrap_or_else(|| "Integrated.".into());
+            let summary = self.agent(agent_id).and_then(last_done_summary).unwrap_or_else(|| "Integrated.".into());
             let branch = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.branch.clone()).unwrap_or_default();
             if let Some(p) = self.pipelines.get_mut(&sub_id) {
                 p.stage = Stage::Done;

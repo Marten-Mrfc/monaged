@@ -84,7 +84,7 @@ impl Monaged {
 }
 
 /// Icon, sentence and whether it's bad news.
-fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -> String) -> (Icon, String, bool) {
+pub(crate) fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -> String) -> (Icon, String, bool) {
     let parts: Vec<&str> = event.data.split('|').collect();
     let part = |i: usize| parts.get(i).copied().unwrap_or_default();
     match event.kind.as_str() {
@@ -103,6 +103,10 @@ fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -> String) -
             (Icon::Plus, format!("{} joined{role}", part(0)), false)
         }
         "run" => (Icon::Flow, format!("Pipeline finished: {} plan, {} workstream(s), ${}", part(0), part(1), part(2)), false),
+        // The quality gate: below the bar is worth seeing in red.
+        "gate" => (Icon::Shield, event.data.clone(), event.data.contains("waits for you")),
+        "lead" => (Icon::Flow, event.data.clone(), false),
+        "debug" => (Icon::Ask, event.data.clone(), false),
         kind if kind.starts_with("board:") => {
             let what = kind.trim_start_matches("board:");
             (Icon::Board, format!("{} posted a {what}: {}", part(0), part(1)), false)

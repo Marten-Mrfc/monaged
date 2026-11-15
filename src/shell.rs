@@ -546,7 +546,7 @@ impl Monaged {
             crumbs = vec!["Setup".into()];
         }
         if self.zen && self.form.is_none() {
-            crumbs.push(format!("Zen · {} to leave", crate::keys::label("zen")).into());
+            crumbs.push(format!("Zen · {} to leave", crate::keys::label("zen")));
         }
         let last = crumbs.len().saturating_sub(1);
         let crumb_row = div().flex().items_center().gap(px(6.)).min_w(px(0.)).overflow_hidden().children(

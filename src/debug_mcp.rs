@@ -222,7 +222,7 @@ pub fn install_claude_code_wsl(distro: &str, agent_cmd: &str) -> Result<String> 
 // ---- The tools, inside the window ---------------------------------------------------
 
 fn arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args[key].as_str().map(str::trim).filter(|s| !s.is_empty()).or_else(|| None)
+    args[key].as_str().map(str::trim).filter(|s| !s.is_empty()).or(None)
 }
 
 fn number_arg(args: &Value, key: &str) -> Option<i64> {

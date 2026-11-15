@@ -618,11 +618,10 @@ impl AgentView {
             "config_option_update" => {
                 if update["configOptions"].is_array() {
                     self.set_config(&update["configOptions"]);
-                } else if let (Some(id), Some(value)) = (update["configId"].as_str(), update["value"].as_str()) {
-                    if let Some(option) = self.config.iter_mut().find(|o| o.id == id) {
+                } else if let (Some(id), Some(value)) = (update["configId"].as_str(), update["value"].as_str())
+                    && let Some(option) = self.config.iter_mut().find(|o| o.id == id) {
                         option.current = value.to_string();
                     }
-                }
             }
             "current_mode_update" => {
                 if let Some(mode) = update["currentModeId"].as_str()

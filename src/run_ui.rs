@@ -161,11 +161,7 @@ fn parse_tests(output: &str, ok: bool) -> (String, Vec<String>) {
             Some(rest.split_whitespace().next().unwrap_or(rest).to_string())
         } else if t.starts_with("test ") && t.ends_with("FAILED") {
             Some(t.trim_start_matches("test ").trim_end_matches("... FAILED").trim().to_string())
-        } else if let Some(rest) = t.strip_prefix("✕ ").or_else(|| t.strip_prefix("× ")) {
-            Some(rest.to_string())
-        } else {
-            None
-        };
+        } else { t.strip_prefix("✕ ").or_else(|| t.strip_prefix("× ")).map(|rest| rest.to_string()) };
         if let Some(n) = name
             && !failing.contains(&n)
         {

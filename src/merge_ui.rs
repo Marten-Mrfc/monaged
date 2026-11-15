@@ -356,28 +356,25 @@ impl Monaged {
                     (None, Tone::Warn | Tone::Error) => this.chime(crate::sound::Cue::Error),
                     _ => {}
                 }
-                match sub_id {
-                    Some(sub_id) => {
-                        if let Some(sha) = &merged_sha {
-                            let _ = this.store.set_setting(&format!("sub:{sub_id}:merged"), &format!("{target} {sha}"));
-                            if let Some(p) = this.pipelines.get_mut(&sub_id) {
-                                p.note = Some(text.clone());
-                            }
-                            if this.pipelines.contains_key(&sub_id) {
-                                let _ = this.store.save_pipeline(&this.pipelines[&sub_id]);
-                            }
+                if let Some(sub_id) = sub_id {
+                    if let Some(sha) = &merged_sha {
+                        let _ = this.store.set_setting(&format!("sub:{sub_id}:merged"), &format!("{target} {sha}"));
+                        if let Some(p) = this.pipelines.get_mut(&sub_id) {
+                            p.note = Some(text.clone());
                         }
-                        let kind = if merged_sha.is_some() { "merge" } else if !conflict.is_empty() { "conflict" } else { "failed" };
-                        let _ = this.store.log_event(sub_id, None, kind, &text);
-                        let state = this.merge_state(sub_id);
-                        state.busy = false;
-                        state.conflict = conflict;
-                        state.message = Some((tone, text.clone()));
-                        if let Some(sha) = merged_sha {
-                            state.merged = Some((target.clone(), sha));
+                        if this.pipelines.contains_key(&sub_id) {
+                            let _ = this.store.save_pipeline(&this.pipelines[&sub_id]);
                         }
                     }
-                    None => {}
+                    let kind = if merged_sha.is_some() { "merge" } else if !conflict.is_empty() { "conflict" } else { "failed" };
+                    let _ = this.store.log_event(sub_id, None, kind, &text);
+                    let state = this.merge_state(sub_id);
+                    state.busy = false;
+                    state.conflict = conflict;
+                    state.message = Some((tone, text.clone()));
+                    if let Some(sha) = merged_sha {
+                        state.merged = Some((target.clone(), sha));
+                    }
                 }
                 this.settle("merge", tone, text, cx);
                 this.advance_merge_queue(cx);

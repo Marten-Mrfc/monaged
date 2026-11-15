@@ -14,6 +14,10 @@ use crate::{Monaged, review, theme};
 
 /// Below this the lead's chat isn't shown beside the dashboard (it opens as a pane).
 pub(crate) const CHAT_MIN_MAIN: f32 = 980.;
+const CONTENT_MAX: f32 = 1100.;
+const PAD_X: f32 = 24.;
+const TILE_MIN: f32 = 290.;
+const TILE_GAP: f32 = 10.;
 
 fn section_title(text: &str, count: Option<usize>) -> AnyElement {
     div()
@@ -30,7 +34,12 @@ fn section_title(text: &str, count: Option<usize>) -> AnyElement {
 impl Monaged {
     pub(crate) fn render_dashboard(&self, sub_id: i64, main_w: f32, cx: &mut Context<Self>) -> AnyElement {
         let chat_w = if main_w >= CHAT_MIN_MAIN { (main_w * 0.4).clamp(380., 560.) } else { 0. };
-        let main = self.render_dashboard_main(sub_id, chat_w == 0., cx);
+        // Cards get an exact width: GPUI measures wrapped text against the
+        // width it's given, and a flexible card came out far too tall.
+        let inner = ((main_w - chat_w).min(CONTENT_MAX) - 2. * PAD_X - 8.).max(240.);
+        let per_row = if inner >= 3. * TILE_MIN + 2. * TILE_GAP { 3. } else if inner >= 2. * TILE_MIN + TILE_GAP { 2. } else { 1. };
+        let tile_w = ((inner - TILE_GAP * (per_row - 1.)) / per_row).floor();
+        let main = self.render_dashboard_main(sub_id, chat_w == 0., (tile_w, per_row as usize), cx);
         div()
             .flex_1()
             .min_h(px(0.))
@@ -40,7 +49,7 @@ impl Monaged {
             .into_any_element()
     }
 
-    fn render_dashboard_main(&self, sub_id: i64, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_dashboard_main(&self, sub_id: i64, narrow: bool, (tile_w, per_row): (f32, usize), cx: &mut Context<Self>) -> AnyElement {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id) else { return div().into_any_element() };
         let pipeline = self.pipelines.get(&sub_id);
         let running = pipeline.is_some_and(|p| !matches!(p.stage, Stage::Done | Stage::Stopped));
@@ -141,18 +150,48 @@ impl Monaged {
             .children(needs);
 
         // ---- Agents
-        let agents: Vec<&AgentView> = self
+        let mut agents: Vec<&AgentView> = self
             .agents
             .iter()
             .filter(|a| a.record.subproject_id == sub_id && !a.record.archived && (narrow || a.role() != Role::Lead))
             .collect();
+        // What needs you or works first, then the agents doing the work, then
+        // the ones whose part is long done (research, verification, the plan).
+        let rank = |a: &AgentView| {
+            let state = match agent_state(a) {
+                State::NeedsYou => 0,
+                State::Working => 1,
+                _ => 2,
+            };
+            let role = match a.role() {
+                Role::Lead => 0,
+                Role::Integrator => 1,
+                Role::Builder(_) => 2,
+                Role::Free => 3,
+                Role::Planner => 4,
+                Role::Verifier(_) => 5,
+                Role::Researcher => 6,
+            };
+            (state, role, std::cmp::Reverse(a.record.id))
+        };
+        agents.sort_by_key(|a| rank(a));
+        // What happened lately, in words (turns are left out: there are many, and the cards say who's working).
+        let events: Vec<_> = self.store.timeline(sub_id, 40).unwrap_or_default().into_iter().filter(|e| e.kind != "turn").take(8).collect();
+        let name_of = |id: Option<i64>| id.map(|id| self.agent_name(id)).unwrap_or_else(|| "Monaged".into());
         let agents_section = div()
             .flex()
             .flex_col()
             .gap(px(10.))
             .child(section_title("Agents", None))
             .when(agents.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(rgb(theme::text_3())).child("No agents yet.")))
-            .child(div().flex().flex_wrap().items_start().gap(px(10.)).children(agents.into_iter().map(|a| self.render_agent_tile(a, cx))));
+            .children({
+                // Rows of cards (not a wrapping row: GPUI sized wrapped cards
+                // by their text at a much smaller width, leaving them tall).
+                agents
+                    .chunks(per_row)
+                    .map(|row| div().flex().items_start().gap(px(TILE_GAP)).children(row.iter().map(|a| self.render_agent_tile(a, tile_w, cx))).into_any_element())
+                    .collect::<Vec<_>>()
+            });
 
         div()
             .id(("dashboard", sub_id as usize))
@@ -164,13 +203,40 @@ impl Monaged {
                     .flex()
                     .flex_col()
                     .gap(px(22.))
-                    .px(px(24.))
+                    .px(px(PAD_X))
                     .py(px(20.))
-                    .max_w(px(1100.))
+                    .max_w(px(CONTENT_MAX))
                     .child(header)
                     .child(request_card)
                     .child(needs_section)
-                    .child(agents_section),
+                    .child(agents_section)
+                    .when(!events.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(section_title("Recent", None))
+                                .children(events.iter().map(|e| {
+                                    let (glyph, text, attention) = crate::timeline::describe(e, &name_of);
+                                    div()
+                                        .flex()
+                                        .gap(px(10.))
+                                        .text_size(px(12.5))
+                                        .items_center()
+                                        .child(div().flex_none().w(px(64.)).font_family(theme::MONO).text_size(px(11.5)).text_color(rgb(theme::text_3())).child(ago(e.at)))
+                                        .child(icon(glyph).size(px(13.)).flex_none().text_color(rgb(if attention { theme::red_text() } else { theme::text_3() })))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_color(rgb(if attention { theme::red_text() } else { theme::text_2() }))
+                                                .child(text.replace('\n', " ")),
+                                        )
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -359,7 +425,7 @@ impl Monaged {
     }
 
     /// One agent on the dashboard: state, score, what it's doing, and controls.
-    fn render_agent_tile(&self, agent: &AgentView, cx: &mut Context<Self>) -> AnyElement {
+    fn render_agent_tile(&self, agent: &AgentView, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let id = agent.record.id;
         let state = agent_state(agent);
         let word = match state {
@@ -394,10 +460,11 @@ impl Monaged {
         };
         let can_fix = !agent.reviewing && agent.confidence.as_ref().is_some_and(|c| review::fix_prompt(c).is_some());
         let findings = agent.confidence.as_ref().map_or(0, |c| c.issues.len());
+        // The card's padding and border, both sides.
+        let text_w = (width - 2. * 15.).max(120.);
         ui::card()
-            .flex_1()
-            .min_w(px(280.))
-            .max_w(px(520.))
+            .w(px(width))
+            .flex_none()
             .child(
                 div()
                     .flex()
@@ -407,25 +474,27 @@ impl Monaged {
                     .child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(12.5)).child(agent.record.name.clone()))
                     .children(agent.confidence.as_ref().map(|c| ui::score_meter(c.score))),
             )
-            .child(
+            .child({
+                // One line (rows that wrap inside a card made GPUI size it far too tall).
+                let mut parts = vec![role_label(&agent.role()), word.to_string()];
+                parts.extend(gate.map(str::to_string));
+                if findings > 0 {
+                    parts.push(format!("{findings} finding{}", if findings == 1 { "" } else { "s" }));
+                }
+                let below = gate == Some("below the bar");
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(6.))
+                    .w(px(text_w))
+                    .truncate()
                     .text_size(px(12.))
-                    .text_color(rgb(theme::text_3()))
-                    .child(role_label(&agent.role()))
-                    .child("·")
-                    .child(word)
-                    .children(gate.map(|g| div().text_color(rgb(if g == "below the bar" { theme::red_text() } else { theme::text_2() })).child(format!("· {g}"))))
-                    .when(findings > 0, |d| d.child(format!("· {findings} finding{}", if findings == 1 { "" } else { "s" }))),
-            )
+                    .text_color(rgb(if below { theme::red_text() } else { theme::text_3() }))
+                    .child(parts.join(" · "))
+            })
             .children(self.render_working_line(agent))
-            .when(!line.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(review::clip(&line, 280))))
+            .when(!line.is_empty(), |d| d.child(div().w(px(text_w)).text_size(px(13.)).text_color(rgb(theme::text_2())).child(review::clip(&line, 280))))
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
+                    .items_center()
                     .gap(px(6.))
                     .child(ui::button(("tile-open", id as usize), Kind::Secondary, None, "Open").on_click(cx.listener(move |this, _, _, cx| this.select_agent(id, cx))))
                     .child(ui::button(("tile-changes", id as usize), Kind::Secondary, Some(Icon::Diff), "Changes").on_click(cx.listener(move |this, _, _, cx| {
@@ -441,7 +510,8 @@ impl Monaged {
                     })
                     .when(can_fix, |d| {
                         d.child(
-                            ui::button(("tile-fix", id as usize), Kind::Secondary, Some(Icon::Edit), "Fix findings")
+                            ui::icon_button(("tile-fix", id as usize), Icon::Edit)
+                                .tooltip(tip("Fix findings: send the review's findings and failing tests to the agent"))
                                 .on_click(cx.listener(move |this, _, _, cx| this.fix_findings(id, cx))),
                         )
                     })
@@ -539,5 +609,17 @@ impl Monaged {
         let name = self.agent(agent_id).map(|a| a.record.name.clone()).unwrap_or_default();
         self.toast(Tone::Info, format!("Sent to {name}."), cx);
         cx.notify();
+    }
+}
+
+/// "3m ago", "2h ago", "yesterday".
+fn ago(at: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(at);
+    match (now - at).max(0) {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 2 * 86_400 => "yesterday".into(),
+        s => format!("{}d ago", s / 86_400),
     }
 }
