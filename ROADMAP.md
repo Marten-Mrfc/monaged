@@ -413,20 +413,36 @@ What the research said (Material Design's sound guidelines, Google's earcon guid
 - [x] **The 403 when publishing, explained:** GitHub won't let the Actions token create the release tag at a commit whose workflow files differ from main's. 0.5.0's first attempt hit it because the CI change landed on main a minute after the release commit; probably 0.3.0's too. docs/releasing.md says what to do.
 - [ ] Options not taken (yet): a self-hosted runner on your own PC (warm and fast, free, only while it's on), `rust-lld` as the linker (seconds per link; the icon resource needs checking), checks on Linux through Wine (cheaper runners, fragile).
 
-### Next ideas
-- Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
-- A morning summary: what finished overnight, what waits for you, what it cost.
-- Drag an agent into a pane; an accent per project (never red).
-- Search conversations that aren't open (store transcripts, or ask the agent for `session/list`).
-- Several agents at once (Claude and another ACP agent side by side, one connection each).
-- The agent's terminal output (ACP `terminal/*`), and reading and writing files through Monaged (`fs/*`) so edits can be reviewed before they land.
-- A signed installer (a code-signing certificate), and a delta updater.
-- Real screenshots from Windows for the website, and a short video of the pipeline.
+### What's next (proposed order, 2026-11-15)
+Sizes: S about half a day, M one or two days, L several.
 
-### Later
-- Standing subprojects on a schedule (for example a weekly security pass)
-- Recording conversations into Delta threads (the Delta CLI has a producer API: `thread create/append/capture`)
-- External subprojects (links between projects), Gitea, phone notifications
+**1. Prove it on a real PC.** Most of 0.3–0.5 (the setup guide, signing in, the uninstaller, sounds, staying clear of Sophos) has only run against stand-ins.
+- [ ] S · **Report a problem:** one button (Ctrl K, Settings → General, the connection bar) that copies or saves a report: version, Windows and WSL versions, the distro, setup state, and the ends of `monaged.log` and `wsl-install.log`, with secrets and tokens masked. Every real-PC issue becomes one paste.
+- [ ] S · **A real-PC checklist per release** (`docs/testing.md`): a fresh install, the guide, signing in, the playground, an update, uninstalling; with endpoint security on.
+- [ ] M · **Code signing** (Azure Trusted Signing, about $10 a month, or SignPath, free once the repository is public): no SmartScreen warning, and fewer antivirus flags. Needs an account: your call.
+
+**2. Known limits worth fixing.**
+- [ ] M · **A console relay exe** (`monaged-relay.exe` next to `monaged.exe`): no two-second busy cursor on every new agent session, and relays that end with their session.
+- [ ] S · **Layout guardrails:** helpers that make the GPUI pitfalls hit in 0.4 impossible (block wrappers that give bars, fields and text no width; percentage widths), an audit of the remaining spots, and the setup page's scroll overshoot.
+- [ ] S · Tune the sounds once they've been heard on a real PC.
+
+**3. A safety net.**
+- [ ] M · **Linux builds and UI smoke tests in CI:** patch `xattr` (GPUI's HTTP client pulls in a version that doesn't build on current Linux; the demo build already patches it), then run the real UI under Xvfb against stand-ins for WSL and Claude, and check the key screens: the setup guide, a turn with its review, Settings. It would have caught 0.4's empty progress bars, collapsed fields and out-of-reach buttons. Linux runners are cheaper too.
+- [ ] M · Split the largest files along their sections (`shell.rs`, `onboarding.rs`, `uninstall.rs`, `env.rs`, `main.rs`: 1.9–2.2k lines each).
+
+**4. Features for agents that work while you don't.**
+- [ ] M · **While you were away:** coming back to Monaged (or in the morning), one summary of what finished, what waits for you, what failed and what it cost, from the inbox, timeline and usage data that already exist.
+- [ ] M · **Fork an agent:** a new worktree from its branch, with a summary of the conversation as the brief, to try another approach without losing the first.
+- [ ] M · **Standing subprojects on a schedule:** a weekly security pass or dependency check that starts by itself, within the budget.
+- [ ] L · **Review edits before they land:** the agent's terminal output and file writes through Monaged (ACP `terminal/*` and `fs/*`).
+- [ ] M · Search conversations that aren't open (stored transcripts, or the agent's `session/list`).
+- [ ] M · Run `run_with_env` commands in a sandbox too (bubblewrap, optionally without network; per-secret allowed hosts); gitleaks before pushes when it's installed; Windows Hello before revealing a secret.
+
+**5. Bigger bets and later.**
+- [ ] L · Several ACP agents side by side (Claude and another), one connection each.
+- [ ] L · A native Windows on ARM build (the setup guide already installs ARM Ubuntu; Monaged itself runs emulated).
+- [ ] S · Going public, when you decide to: the site on GitHub Pages, the social preview, the launch posts (ready in `marketing/`).
+- [ ] Later: a delta updater, dragging an agent into a pane, an accent per project (never red), recording conversations into Delta threads, links between projects, Gitea, phone notifications.
 
 ## Technical spikes to resolve
 - ~~How the Monaged MCP server is reached from WSL~~: solved with a stdio relay (`monaged.exe --mcp-relay`) started through WSL interop, see Phase 4.
