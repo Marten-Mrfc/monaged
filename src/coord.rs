@@ -87,6 +87,8 @@ pub struct RelayArgs {
     pub port: u16,
     pub token: String,
     pub agent: i64,
+    /// The subproject's lead: it gets the lead's tools too.
+    pub lead: bool,
 }
 
 pub fn parse_relay_args(args: &[String]) -> Option<RelayArgs> {
@@ -94,7 +96,12 @@ pub fn parse_relay_args(args: &[String]) -> Option<RelayArgs> {
         return None;
     }
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
-    Some(RelayArgs { port: value("--port")?.parse().ok()?, token: value("--token")?, agent: value("--agent")?.parse().ok()? })
+    Some(RelayArgs {
+        port: value("--port")?.parse().ok()?,
+        token: value("--token")?,
+        agent: value("--agent")?.parse().ok()?,
+        lead: args.iter().any(|a| a == "--lead"),
+    })
 }
 
 pub fn run_relay(args: RelayArgs) -> Result<()> {
@@ -115,7 +122,15 @@ pub fn run_relay(args: RelayArgs) -> Result<()> {
                 "serverInfo": { "name": "monaged", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": "Monaged coordinates the agents working on this project. Read the board before asking; post contracts others need."
             }),
-            "tools/list" => json!({ "tools": tool_list() }),
+            "tools/list" => {
+                let mut tools = tool_list();
+                if args.lead
+                    && let (Some(list), Some(extra)) = (tools.as_array_mut(), crate::lead::tools().as_array())
+                {
+                    list.extend(extra.iter().cloned());
+                }
+                json!({ "tools": tools })
+            }
             "ping" => json!({}),
             "tools/call" => {
                 let tool = message["params"]["name"].as_str().unwrap_or_default();
@@ -234,14 +249,13 @@ fn random_token() -> String {
 }
 
 /// The MCP server entry for ACP's `session/new` / `session/load`.
-pub fn mcp_server_spec(bridge: &Bridge, agent: i64) -> Value {
+pub fn mcp_server_spec(bridge: &Bridge, agent: i64, lead: bool) -> Value {
     let exe = std::env::current_exe().map(|p| windows_to_wsl_path(&p.to_string_lossy())).unwrap_or_default();
-    json!({
-        "name": "monaged",
-        "command": exe,
-        "args": ["--mcp-relay", "--port", bridge.port.to_string(), "--token", bridge.token, "--agent", agent.to_string()],
-        "env": []
-    })
+    let mut args = vec!["--mcp-relay".to_string(), "--port".into(), bridge.port.to_string(), "--token".into(), bridge.token.clone(), "--agent".into(), agent.to_string()];
+    if lead {
+        args.push("--lead".into());
+    }
+    json!({ "name": "monaged", "command": exe, "args": args, "env": [] })
 }
 
 // ---- Board text ---------------------------------------------------------------------

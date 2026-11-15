@@ -18,6 +18,7 @@ mod changes_ui;
 mod checkpoints;
 mod coord;
 mod coord_ui;
+mod dashboard;
 mod diff;
 mod distro;
 mod env;
@@ -35,6 +36,7 @@ mod install;
 mod instance;
 mod keys;
 mod layout;
+mod lead;
 mod llm;
 mod markdown;
 mod media;
@@ -261,6 +263,10 @@ struct Monaged {
     /// Panes you closed: an agent that's working or needs you doesn't get one
     /// back by itself until you open it again.
     dismissed: HashSet<i64>,
+    /// Subprojects whose lead is being created.
+    starting_lead: HashSet<i64>,
+    /// Agents the lead asked a review of.
+    lead_reviews: lead::LeadReviews,
     /// One agent at a time instead of several side by side (Ctrl K, or the pane's button).
     one_pane: bool,
     /// The focused agent's changes in a pane beside it when there's room.
@@ -525,6 +531,8 @@ impl Monaged {
             collapsed: HashSet::new(),
             pinned: Vec::new(),
             dismissed: HashSet::new(),
+            starting_lead: HashSet::new(),
+            lead_reviews: HashSet::new(),
             one_pane: false,
             changes_beside: true,
             inputs: HashMap::new(),
@@ -1076,13 +1084,13 @@ impl Monaged {
         self.form = None;
         self.refresh_branches(project_id, cx);
         self.refresh_request(sub_id, cx);
-        let first_agent =
-            self.agents.iter().find(|a| a.record.subproject_id == sub_id && !a.record.archived).map(|a| a.record.id);
-        self.sel_agent = first_agent;
-        if let Some(agent_id) = first_agent {
-            self.ensure_session(agent_id);
-            self.focus_request = Some(agent_id);
-            if let Some(handle) = self.scrolls.get(&agent_id) {
+        // The subproject's dashboard; the lead's message box gets the keys.
+        self.sel_agent = None;
+        self.sub_view = None;
+        if let Some(lead) = self.lead_of(sub_id) {
+            self.ensure_session(lead);
+            self.focus_request = Some(lead);
+            if let Some(handle) = self.scrolls.get(&lead) {
                 handle.scroll_to_bottom();
             }
         }
@@ -1255,6 +1263,7 @@ impl Monaged {
             let added = cx.background_spawn(async move { git::add_worktree(&distro, &repo, &wt, &br, &from) }).await;
             view.update(cx, |this, cx| {
                 this.creating_agent = None;
+                this.starting_lead.remove(&sub_id);
                 match added.and_then(|_| this.store.add_agent(sub_id, &name, &branch, &worktree, &role)) {
                     Ok(record) => {
                         let id = record.id;

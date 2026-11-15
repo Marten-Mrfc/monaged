@@ -333,22 +333,24 @@ pub fn role_key(role: &Role) -> &'static str {
         Role::Planner => "planner",
         Role::Builder(_) => "builder",
         Role::Integrator => "integrator",
+        Role::Lead => "lead",
     }
 }
 
-pub const ROLE_KEYS: [(&str, &str); 6] = [
+pub const ROLE_KEYS: [(&str, &str); 7] = [
     ("researcher", "Researcher"),
     ("verifier", "Verifiers"),
     ("planner", "Planner"),
     ("builder", "Builders"),
     ("integrator", "Integrator"),
+    ("lead", "Lead (the dashboard chat)"),
     ("free", "Your own agents"),
 ];
 
 /// Reading, checking and merging don't need the strongest model.
 pub fn default_model(role_key: &str) -> &'static str {
     match role_key {
-        "researcher" | "verifier" | "integrator" => "sonnet",
+        "researcher" | "verifier" | "integrator" | "lead" => "sonnet",
         _ => "default",
     }
 }

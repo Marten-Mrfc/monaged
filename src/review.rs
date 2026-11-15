@@ -26,6 +26,9 @@ pub enum Checks {
     Unavailable(String),
     Passed(String),
     Failed { command: String, tail: String },
+    /// The tests fail, but every failing test failed on the base branch too:
+    /// it was broken before this change.
+    FailedBefore { command: String, tail: String },
 }
 
 impl Checks {
@@ -38,6 +41,9 @@ impl Checks {
             return Checks::NotFound;
         }
         let command = || text.strip_prefix('`').and_then(|t| t.split_once('`')).map(|(c, _)| c.to_string()).unwrap_or_else(|| "tests".into());
+        if let Some((_, tail)) = text.split_once(BEFORE_MARK) {
+            return Checks::FailedBefore { command: command(), tail: tail.to_string() };
+        }
         if let Some((_, tail)) = text.split_once(" FAILED. Last output:\n") {
             return Checks::Failed { command: command(), tail: tail.to_string() };
         }
@@ -53,8 +59,58 @@ impl Checks {
             Checks::Unavailable(why) => format!("Checks couldn't run: {why}"),
             Checks::Passed(command) => format!("`{command}` passed."),
             Checks::Failed { command, tail } => format!("`{command}` FAILED. Last output:\n{tail}"),
+            Checks::FailedBefore { command, tail } => format!("`{command}`{BEFORE_MARK}{tail}"),
         }
     }
+}
+
+const BEFORE_MARK: &str = " fails, but every failing test failed on the base branch too (broken before this change; \
+not this agent's to fix unless the task says so). Last output:\n";
+
+/// The lines that name a failing test, normalised so the same failure on two
+/// runs compares equal (timings and messages left out).
+pub fn failure_lines(output: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    for line in output.lines() {
+        let line = line.trim();
+        let failing = line.starts_with("FAIL:")
+            || line.starts_with("ERROR:")
+            || line.starts_with("FAILED ")
+            || line.starts_with("--- FAIL:")
+            || line.starts_with('✕')
+            || line.starts_with('×')
+            || (line.starts_with("test ") && line.ends_with("FAILED"))
+            || line.starts_with("FAIL ");
+        // Summaries ("FAILED (failures=2)", "test result: FAILED") count, not name.
+        if !failing || line.starts_with("FAILED (") || line.starts_with("test result:") {
+            continue;
+        }
+        let line = line.split(" - ").next().unwrap_or(line);
+        let mut clean = String::new();
+        let mut depth = 0;
+        for c in line.chars() {
+            match c {
+                '(' if line.contains("ms)") || line.contains("s)") => depth += 1,
+                ')' if depth > 0 => depth -= 1,
+                _ if depth == 0 => clean.push(c),
+                _ => {}
+            }
+        }
+        // "FAIL\tpkg\t0.01s": the timing at the end.
+        let clean: Vec<&str> = clean.split_whitespace().filter(|w| !(w.ends_with('s') && w.trim_end_matches("ms").trim_end_matches('s').parse::<f64>().is_ok())).collect();
+        let clean = clean.join(" ");
+        if !clean.is_empty() {
+            found.insert(clean);
+        }
+    }
+    found
+}
+
+/// Failing now vs. on the base branch: only pre-existing failures when every
+/// failing test now failed before too (and there's something to compare).
+pub fn only_failed_before(now: &str, before: &str) -> bool {
+    let (now, before) = (failure_lines(now), failure_lines(before));
+    !now.is_empty() && now.is_subset(&before)
 }
 
 #[derive(Clone)]
@@ -129,7 +185,7 @@ pub fn summarize(backend: &Backend, turn: &TurnInfo) -> Result<(Summary, Usage)>
 /// Project settings when set, else the one in monaged.json (as the Run tab
 /// does), else a detected one. Python runs pytest only when it's importable,
 /// else unittest, so a missing pytest isn't counted as failing tests.
-pub fn run_checks(distro: &str, worktree: &str, command: Option<&str>) -> Checks {
+pub fn run_checks(distro: &str, worktree: &str, command: Option<&str>, base: Option<&str>) -> Checks {
     let script = format!(
         r#"cd {wt} || exit 1
 cmd={given}
@@ -150,6 +206,7 @@ elif [ -f Makefile ] && grep -qE '^test:' Makefile; then cmd='make test'
 else echo MONAGED_NO_CHECKS; exit 0; fi
 echo "MONAGED_CMD $cmd"
 out=$(timeout 600 bash -lc "$cmd" 2>&1); code=$?
+printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)' | head -n 200 | sed 's/^/MONAGED_FAILLINE /'
 echo "MONAGED_EXIT $code"
 printf '%s\n' "$out" | tail -n 30"#,
         wt = quote(worktree),
@@ -174,8 +231,42 @@ printf '%s\n' "$out" | tail -n 30"#,
         // pytest and unittest (Python 3.12+): no tests were found.
         5 if command.contains("pytest") || command.contains("unittest") => Checks::NotFound,
         124 => Checks::Failed { command, tail: "timed out after 10 minutes".into() },
-        _ => Checks::Failed { command, tail },
+        _ => {
+            // Were these tests failing before the agent started? Then they aren't its doing.
+            let now: String = out.lines().filter_map(|l| l.strip_prefix("MONAGED_FAILLINE ")).collect::<Vec<_>>().join("\n");
+            match base.and_then(|base| base_failures(distro, worktree, base, &command)) {
+                Some(before) if only_failed_before(&now, &before) => Checks::FailedBefore { command, tail },
+                _ => Checks::Failed { command, tail },
+            }
+        }
     }
+}
+
+/// The failing-test lines of the same command on the base branch (in a
+/// throwaway worktree), or None when that couldn't run or passed.
+fn base_failures(distro: &str, worktree: &str, base: &str, command: &str) -> Option<String> {
+    let script = format!(
+        r#"cd {wt} || exit 1
+tmp=$(mktemp -d) || exit 1
+if ! git worktree add --detach -q "$tmp/base" {base} >/dev/null 2>&1; then rm -rf "$tmp"; echo MONAGED_NO_BASE; exit 0; fi
+cd "$tmp/base"
+out=$(timeout 600 bash -lc {cmd} 2>&1); code=$?
+cd {wt}
+git worktree remove --force "$tmp/base" >/dev/null 2>&1
+rm -rf "$tmp"
+git worktree prune >/dev/null 2>&1
+echo "MONAGED_EXIT $code"
+printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)' | head -n 200"#,
+        wt = quote(worktree),
+        base = quote(base),
+        cmd = quote(command),
+    );
+    let out = run(distro, &script).ok()?;
+    let code: i32 = out.lines().find_map(|l| l.strip_prefix("MONAGED_EXIT ")).and_then(|c| c.trim().parse().ok())?;
+    if code == 0 {
+        return None;
+    }
+    Some(out.lines().skip_while(|l| !l.starts_with("MONAGED_EXIT")).skip(1).collect::<Vec<_>>().join("\n"))
 }
 
 // ---- Adversarial review ----------------------------------------------------
@@ -409,6 +500,10 @@ pub fn score(checks: &Checks, verdict: &str, issues: &[Issue]) -> (u8, Vec<Strin
         Checks::Failed { command, .. } => {
             cap = cap.min(2.0);
             reasons.push(format!("✕ Checks failed (`{command}`)"));
+        }
+        Checks::FailedBefore { command, .. } => {
+            cap = cap.min(4.0);
+            reasons.push(format!("~ Checks fail (`{command}`), but only tests that failed before this change too"));
         }
         Checks::Unavailable(why) => {
             cap = cap.min(4.0);

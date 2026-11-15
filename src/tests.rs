@@ -205,6 +205,7 @@ fn saved_checks_read_back_for_scoring() {
         Checks::Unavailable("no tests configured".into()),
         Checks::Passed("cargo test".into()),
         Checks::Failed { command: "npm test".into(), tail: "1 failing\n  at foo.js:3".into() },
+        Checks::FailedBefore { command: "cargo test".into(), tail: "test a ... FAILED".into() },
     ];
     for checks in all {
         let back = Checks::from_description(&checks.describe());
@@ -302,6 +303,29 @@ fn review_context_is_read_between_markers() {
 }
 
 #[test]
+fn failures_that_were_there_before_dont_count() {
+    // unittest: the same failing test on both runs, timings and counts differ.
+    let before = "FAIL: test_coupon_applies_to_the_whole_order (tests.test_orders.OrderTests.test_coupon_applies_to_the_whole_order)\nFAILED (failures=1)";
+    let now = "FAIL: test_coupon_applies_to_the_whole_order (tests.test_orders.OrderTests.test_coupon_applies_to_the_whole_order)\nFAILED (failures=1)";
+    assert!(review::only_failed_before(now, before));
+    // A new failure is the agent's.
+    let now2 = format!("{now}\nFAIL: test_history_is_newest_first (tests.test_history.HistoryTests.test_history_is_newest_first)");
+    assert!(!review::only_failed_before(&now2, before));
+    // pytest: messages after " - " and cargo/go timings are left out.
+    assert!(review::only_failed_before("FAILED tests/test_a.py::test_x - AssertionError: 1 != 2", "FAILED tests/test_a.py::test_x - AssertionError: 3 != 4"));
+    assert!(review::only_failed_before("--- FAIL: TestParse (0.01s)", "--- FAIL: TestParse (0.20s)"));
+    assert!(review::only_failed_before("test parser::tests::empty ... FAILED", "test parser::tests::empty ... FAILED\ntest other ... FAILED"));
+    // Nothing recognisable to compare: it counts as failing (the safe side).
+    assert!(!review::only_failed_before("Error: cannot find module 'x'", "Error: cannot find module 'x'"));
+    // Fixed a failure that was there before and broke nothing: fine.
+    assert!(review::only_failed_before("FAIL: a (t.T.a)", "FAIL: a (t.T.a)\nFAIL: b (t.T.b)"));
+    // Scored as at most 4, and read back from a saved review.
+    let checks = Checks::FailedBefore { command: "python3 -m unittest".into(), tail: "FAIL: a".into() };
+    assert_eq!(review::score(&checks, "works", &[]).0, 4);
+    assert_eq!(Checks::from_description(&checks.describe()).describe(), checks.describe());
+}
+
+#[test]
 fn the_quality_gate_sends_work_back_then_asks() {
     use crate::pipeline::{GateStep, MAX_FIX_ROUNDS, QualityGate};
     let mut gate = QualityGate::default();
@@ -337,6 +361,28 @@ fn the_quality_gate_sends_work_back_then_asks() {
     gate.hold("build-ui", "why".into());
     assert_eq!(QualityGate::from_json(&gate.to_json().to_string()), gate);
     assert_eq!(QualityGate::from_json("not json"), QualityGate::default());
+}
+
+#[test]
+fn the_lead_gets_its_own_tools() {
+    let args: Vec<String> = ["monaged.exe", "--mcp-relay", "--port", "4000", "--token", "t", "--agent", "7", "--lead"].iter().map(|s| s.to_string()).collect();
+    let relay = crate::coord::parse_relay_args(&args).unwrap();
+    assert!(relay.lead && relay.agent == 7);
+    let plain = crate::coord::parse_relay_args(&args[..8]).unwrap();
+    assert!(!plain.lead);
+    let names: Vec<String> = crate::lead::tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["team_status", "message_agent", "start_agent", "fix_findings", "review_agent"]);
+    assert!(names.iter().all(|n| crate::lead::is_tool(n)));
+    // The everyday tools stay apart from the lead's.
+    let base: Vec<String> = crate::coord::tool_list().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+    assert!(base.iter().all(|n| !crate::lead::is_tool(n)));
+    // The lead is a role of its own, stored and read back.
+    assert_eq!(Role::from_db(&Role::Lead.to_db()), Role::Lead);
+    assert_eq!(Role::Lead.result_block(), None);
+    let brief = crate::lead::brief("Order history", "feature/order-history", Some("Keep every order"));
+    assert!(brief.starts_with(pipeline::BRIEF_HEADER));
+    assert!(brief.contains("Keep every order") && brief.contains("team_status") && brief.contains(crate::lead::UPDATE_PREFIX));
+    assert!(crate::lead::brief("x", "b", None).contains("Nothing yet"));
 }
 
 #[test]

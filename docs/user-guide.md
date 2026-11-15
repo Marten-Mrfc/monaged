@@ -14,10 +14,21 @@ Messages follow one rule: things that *happened* appear bottom right and fade (e
 ## Projects, subprojects and agents
 
 - **A project** is one git repository inside WSL. Add one with **+** next to Projects: clone, pick a folder, or start empty. Monaged makes sure it has a commit and uses `develop` as the base branch when it exists.
-- **A subproject** is a *feature* (branch `feature/<name>`) or a *standing* concern such as security (branch `standing/<name>`). Its first agent starts by itself.
+- **A subproject** is a *feature* (branch `feature/<name>`) or a *standing* concern such as security (branch `standing/<name>`). Its first agent starts by itself. Clicking a subproject opens its **dashboard** (below).
 - **An agent** (**Ctrl N**, or **+ New agent**) gets its own worktree at `~/code/.monaged/<repo>/<subproject>/<agent>` on branch `agent/<subproject>/<agent>`, then a Claude session there. Agents work in parallel without touching each other's files or your own checkout.
 - Everything is saved in `%APPDATA%\Monaged\monaged.db`; opening an agent after a restart reopens its conversation.
 - Right-click a project, subproject or agent (or use its **⋯**) for everything you can do with it: open beside, show changes, review, open in Zed, copy path or branch, stop, restart the session, rename, archive, clean up.
+
+## The dashboard
+
+A subproject's dashboard is the one place for what you need to do there:
+
+- **The request** you started it with, and one line on where it stands. With a pipeline, its stages and **Auto mode** sit on top, with **Stop pipeline** or **Run pipeline**, **All changes** and **New agent**.
+- **Needs you**: every agent's open question (pick an option, or **Reply** with your own words), permission request, form and secret request; the pipeline's "build this?" and the plan to approve; work held below the bar (see the quality gate); a failed session to restart; and the merge, when it waits for you. You answer here; **Open** takes you to the agent when you want the whole conversation.
+- **Agents**: each one's state, score, findings and what it's doing, with Open, Changes, Review, **Fix findings** and Stop.
+- **The lead**, on the right: an agent that oversees the others. Ask it how things stand, or tell it what should happen next ("tell the API builder to use UUIDs", "start an agent on the README"); it passes it on. It doesn't write code itself, and it can't accept work below the bar for you. Monaged tells it what happens (a builder passed, was sent back or waits for you), and it answers in a sentence. Every pipeline starts one (Settings → Agents turns that off); elsewhere **Start the lead** does. On a narrow window it opens as a pane.
+
+The inbox opens the dashboard too, and the dashboard button in an agent's header goes back to it.
 
 ## Talking to an agent
 
@@ -57,6 +68,8 @@ Summaries and reviews run after every turn (Settings → Reviews turns that off)
 6. **Build**: 1–10 builders in parallel, each on its own branch.
 7. **Integrate**: an integrator merges the builders' branches into the feature branch and runs the tests.
 8. **Done**: when the branch rules and the score allow it, the feature merges into `develop` by itself.
+
+**The quality gate.** A builder or the integrator saying it's done isn't enough: Monaged reviews the work first, and it needs **4/5** (Settings → Reviews: 3, 4 or 5) to count. Below that, the findings and failing tests go back to the agent to fix, twice; then it waits for you on the dashboard with **Fix again**, **Review again**, **Changes** and **Accept anyway** (which is logged). Integration starts when every builder is through, and merging into `develop` by itself needs the same score. When reviews are off, the work waits for you instead of going through unchecked. Tests that already failed on the branch the agent started from don't count against it: when the tests fail, Monaged runs them on that branch too, and only failures that are new are the agent's.
 
 Questions from pipeline agents show as cards with options (the recommended one is marked). Any stage can be run again from the Pipeline tab.
 

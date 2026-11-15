@@ -147,17 +147,19 @@ fn role_icon(role: &Role) -> Icon {
         Role::Planner => Icon::Flow,
         Role::Builder(_) => Icon::Edit,
         Role::Integrator => Icon::Merge,
+        Role::Lead => Icon::Flag,
         Role::Free => Icon::Agent,
     }
 }
 
-fn role_label(role: &Role) -> String {
+pub(crate) fn role_label(role: &Role) -> String {
     match role {
         Role::Researcher => "Researcher".into(),
         Role::Verifier(n) => format!("Verifier {n}"),
         Role::Planner => "Planner".into(),
         Role::Builder(ws) => format!("Builder for {ws}"),
         Role::Integrator => "Integrator".into(),
+        Role::Lead => "Lead".into(),
         Role::Free => "Agent".into(),
     }
 }
@@ -170,6 +172,7 @@ fn short_role(role: &Role) -> String {
         // Builders are named after their workstream already (build-<workstream>).
         Role::Builder(_) => "build".into(),
         Role::Integrator => "integrate".into(),
+        Role::Lead => "lead".into(),
         Role::Free => String::new(),
     }
 }
@@ -190,6 +193,11 @@ impl Monaged {
     }
 
     /// The panes for the selected subproject, given the room there is.
+    /// A subproject is open without an agent in focus: its dashboard shows.
+    pub(crate) fn on_dashboard(&self) -> bool {
+        self.form.is_none() && self.sel_agent.is_none() && self.sel_sub.is_some_and(|s| self.sub_view != Some(s))
+    }
+
     pub(crate) fn columns(&self, main_width: f32) -> Vec<Column> {
         let Some(sub_id) = self.sel_sub else { return Vec::new() };
         let max = ((main_width / COLUMN_MIN).floor() as usize).clamp(1, 4);
@@ -376,16 +384,10 @@ impl Monaged {
         out
     }
 
-    fn open_inbox(&mut self, sub_id: i64, agent_id: Option<i64>, cx: &mut Context<Self>) {
+    /// Everything that waits for you can be answered on the subproject's dashboard.
+    fn open_inbox(&mut self, sub_id: i64, _agent_id: Option<i64>, cx: &mut Context<Self>) {
         self.form = None;
         self.select_sub(sub_id, cx);
-        match agent_id {
-            Some(id) => self.select_agent(id, cx),
-            None => {
-                self.inspector_open = true;
-                self.inspector_tab = InspectorTab::Pipeline;
-            }
-        }
         cx.notify();
     }
 
@@ -408,6 +410,8 @@ impl Monaged {
         let columns = match (self.form.is_none(), zen) {
             (false, _) => Vec::new(),
             (true, true) => self.sel_agent.map(Column::Agent).into_iter().collect(),
+            // The dashboard: only the lead's chat needs a message box.
+            (true, false) if self.on_dashboard() => self.sel_sub.and_then(|s| self.lead_of(s)).map(Column::Agent).into_iter().collect(),
             (true, false) => self.columns(main_w),
         };
         if let Some(sub_id) = self.sel_sub {
@@ -1126,6 +1130,9 @@ impl Monaged {
             if self.sub_view == Some(sub_id) {
                 return self.render_sub_changes(sub_id, cx);
             }
+            if self.on_dashboard() {
+                return self.render_dashboard(sub_id, main_w, cx);
+            }
             return self.render_columns(sub_id, columns, main_w, cx);
         }
         if let Some(project_id) = self.sel_project {
@@ -1399,6 +1406,14 @@ impl Monaged {
                     .tooltip(tip("Review: run the tests and a skeptical read"))
                     .on_click(cx.listener(move |this, _, _, cx| this.review_agent(id, cx)))
             })
+            .when(focused, |d| {
+                let sub_id = agent.record.subproject_id;
+                d.child(
+                    ui::icon_button(("to-dashboard", id as usize), Icon::Board)
+                        .tooltip(tip("The subproject's dashboard: everything that waits for you, the agents and the lead"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_sub(sub_id, cx))),
+                )
+            })
             .child(
                 ui::icon_button(("side-chat", id as usize), Icon::Ask)
                     .tooltip(tip_key("Side chat: ask Haiku about this agent's work (the agent doesn't see it)", crate::keys::label("side-chat")))
@@ -1513,7 +1528,7 @@ impl Monaged {
             .into_any_element()
     }
 
-    fn render_transcript(&self, agent: &AgentView, reading: f32, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_transcript(&self, agent: &AgentView, reading: f32, cx: &mut Context<Self>) -> AnyElement {
         let id = agent.record.id;
         let matches = self.find_matches(cx);
         let items: Vec<AnyElement> = agent
@@ -1654,7 +1669,7 @@ impl Monaged {
 
     /// While a turn runs: what the agent is doing and for how long (the clock
     /// redraws it every second), with the way to stop it.
-    fn render_working_line(&self, agent: &AgentView) -> Option<AnyElement> {
+    pub(crate) fn render_working_line(&self, agent: &AgentView) -> Option<AnyElement> {
         let turn = agent.turn.as_ref()?;
         let id = agent.record.id;
         let secs = turn.started.elapsed().as_secs();
@@ -1693,6 +1708,15 @@ impl Monaged {
         match item {
             Item::User(text) if text.starts_with(pipeline::BRIEF_HEADER) => pipeline_ui::render_brief(text),
             Item::User(text) if text.starts_with("[monaged-ask #") || text.contains(coord::DIGEST_HEADER) => coord_ui::render_user_message(text),
+            Item::User(text) if text.starts_with(crate::lead::UPDATE_PREFIX) => div()
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .text_size(px(12.5))
+                .text_color(rgb(theme::text_3()))
+                .child(div().flex_none().pt(px(2.)).child(icon(Icon::Flow).size(px(13.))))
+                .child(div().flex_1().min_w(px(0.)).child(text.split("\n\n").map(|part| part.trim().trim_start_matches(crate::lead::UPDATE_PREFIX).trim()).collect::<Vec<_>>().join(" · ")))
+                .into_any_element(),
             Item::User(text) => div()
                 .flex()
                 .justify_end()

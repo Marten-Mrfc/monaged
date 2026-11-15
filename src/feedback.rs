@@ -106,6 +106,8 @@ pub(crate) enum TextAction {
     SubCap(i64),
     /// A review finding you say isn't a problem; the text is why (optional).
     RuleOut { agent_id: i64, file: String, problem: String },
+    /// Your own reply to an agent (from the dashboard).
+    Reply(i64),
 }
 
 /// Automatic reconnects after the Claude process dies.
@@ -526,6 +528,7 @@ impl Monaged {
                 }
             }
             TextAction::RuleOut { agent_id, file, problem } => self.rule_out_finding(agent_id, &file, &problem, &text, cx),
+            TextAction::Reply(agent_id) => self.send_reply(agent_id, &text, cx),
         }
         cx.notify();
     }

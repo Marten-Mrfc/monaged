@@ -430,6 +430,8 @@ Sizes: S about half a day, M one or two days, L several.
 - [ ] M · **Linux builds and UI smoke tests in CI:** patch `xattr` (GPUI's HTTP client pulls in a version that doesn't build on current Linux; the demo build already patches it), then run the real UI under Xvfb against stand-ins for WSL and Claude, and check the key screens: the setup guide, a turn with its review, Settings. It would have caught 0.4's empty progress bars, collapsed fields and out-of-reach buttons. Linux runners are cheaper too.
 - [ ] M · Split the largest files along their sections (`shell.rs`, `onboarding.rs`, `uninstall.rs`, `env.rs`, `main.rs`: 1.9–2.2k lines each).
 
+**Done since this list was written:** the subproject dashboard with the lead agent, and the quality gate (builders and the integrator need 4/5; tests that failed before don't count).
+
 **4. Features for agents that work while you don't.**
 - [ ] M · **While you were away:** coming back to Monaged (or in the morning), one summary of what finished, what waits for you, what failed and what it cost, from the inbox, timeline and usage data that already exist.
 - [ ] M · **Fork an agent:** a new worktree from its branch, with a summary of the conversation as the brief, to try another approach without losing the first.

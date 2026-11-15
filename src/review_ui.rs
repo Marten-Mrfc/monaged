@@ -116,7 +116,9 @@ impl Monaged {
         }
         // Without an API key the reviews run on the Max plan, so they respect the budget too.
         let on_max = matches!(self.backend(), Some(Backend::Cli { .. }));
-        let auto = !answered && self.auto_review && self.backend().is_some() && !(on_max && self.budget_block().is_some());
+        // The lead only talks; there's nothing of its own to summarise or review.
+        let is_lead = self.agent(agent_id).is_some_and(|a| a.role() == crate::pipeline::Role::Lead);
+        let auto = !answered && !is_lead && self.auto_review && self.backend().is_some() && !(on_max && self.budget_block().is_some());
         self.refresh_changes(agent_id, auto, cx);
     }
 
@@ -258,7 +260,7 @@ impl Monaged {
                     if changes.files.is_empty() {
                         return anyhow::Ok((changes, None));
                     }
-                    let checks = review::run_checks(&distro, &worktree, test_command.as_deref());
+                    let checks = review::run_checks(&distro, &worktree, test_command.as_deref(), Some(&base));
                     // The notes and the changed files in full, so the reviewer sees what the diff leans on.
                     let changed: Vec<String> = changes.files.iter().filter(|f| f.status != "deleted").map(|f| f.path.clone()).collect();
                     let (knowledge, files, left_out) = review::read_context(&distro, &worktree, shared_notes.as_deref(), &changed);
@@ -316,6 +318,7 @@ impl Monaged {
                     }
                 }
                 let name = this.agent(agent_id).map(|a| a.record.name.clone()).unwrap_or_default();
+                this.lead_review_done(agent_id);
                 this.gate_on_review(agent_id, outcome.0, format!("{name} {}", outcome.1), cx);
                 cx.notify();
             })

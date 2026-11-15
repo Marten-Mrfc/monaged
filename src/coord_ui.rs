@@ -41,7 +41,8 @@ impl Monaged {
     pub(crate) fn mcp_servers(&self, agent_id: i64) -> Value {
         let mut servers = Vec::new();
         if let Some(bridge) = &self.bridge {
-            servers.push(coord::mcp_server_spec(bridge, agent_id));
+            let lead = self.agent(agent_id).is_some_and(|a| a.role() == Role::Lead);
+            servers.push(coord::mcp_server_spec(bridge, agent_id, lead));
         }
         servers.extend(self.project_mcp_specs(agent_id));
         Value::Array(servers)
@@ -60,7 +61,7 @@ impl Monaged {
             "ask" => return self.tool_ask(agent, &arguments, reply, cx),
             "env_list" => self.tool_env_list(agent),
             "run_with_env" => return self.tool_run_with_env(agent, &arguments, reply, cx),
-            other => ToolReply::error(format!("Unknown Monaged tool: {other}")),
+            other => self.lead_tool(agent, other, &arguments, cx).unwrap_or_else(|| ToolReply::error(format!("Unknown Monaged tool: {other}"))),
         };
         let _ = reply.send(answer);
         cx.notify();
@@ -72,7 +73,7 @@ impl Monaged {
         self.agent(agent_id).map(|a| a.record.subproject_id)
     }
 
-    fn agent_name(&self, agent_id: i64) -> String {
+    pub(crate) fn agent_name(&self, agent_id: i64) -> String {
         self.agent(agent_id).map(|a| a.record.name.clone()).unwrap_or_else(|| "an agent".into())
     }
 
@@ -393,7 +394,7 @@ impl Monaged {
     }
 
     /// Finds the agent a question is for: by name, by workstream, or "lead".
-    fn find_target(&self, sub_id: i64, to: &str) -> Option<i64> {
+    pub(crate) fn find_target(&self, sub_id: i64, to: &str) -> Option<i64> {
         let wanted = to.to_lowercase();
         let candidates: Vec<_> = self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived).collect();
         if let Some(a) = candidates.iter().find(|a| a.record.name.to_lowercase() == wanted) {
@@ -403,7 +404,7 @@ impl Monaged {
             return Some(a.record.id);
         }
         if matches!(wanted.as_str(), "lead" | "integrator" | "planner") {
-            for role in [Role::Integrator, Role::Planner] {
+            for role in [Role::Lead, Role::Integrator, Role::Planner] {
                 if let Some(a) = candidates.iter().rev().find(|a| a.role() == role) {
                     return Some(a.record.id);
                 }

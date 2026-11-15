@@ -59,7 +59,7 @@ impl Monaged {
         cx.notify();
     }
 
-    fn toggle_auto_mode(&mut self, sub_id: i64, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_auto_mode(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         if let Some(p) = self.pipelines.get_mut(&sub_id) {
             p.auto_mode = !p.auto_mode;
         }
@@ -81,8 +81,17 @@ impl Monaged {
         self.pipelines.insert(sub_id, p);
         self.save_pipeline(sub_id);
         self.mark_pipeline_started(sub_id);
-        self.spawn_agent(sub_id, Self::role_spec("research", Role::Researcher, pipeline::researcher_brief(&request), true), cx);
+        self.spawn_agent(sub_id, Self::role_spec("research", Role::Researcher, pipeline::researcher_brief(&request), false), cx);
+        // The lead oversees the run; you talk to it on the dashboard.
+        if self.lead_enabled() {
+            self.start_lead(sub_id, cx);
+        }
         cx.notify();
+    }
+
+    /// Whether pipelines start a lead (Settings → Agents).
+    pub(crate) fn lead_enabled(&self) -> bool {
+        self.store.setting("lead:auto").as_deref() != Some("0")
     }
 
     pub(crate) fn start_verification(&mut self, sub_id: i64, cx: &mut Context<Self>) {
@@ -104,7 +113,7 @@ impl Monaged {
         p.stage = Stage::Plan;
         p.note = Some("The planner is writing the plan.".into());
         self.save_pipeline(sub_id);
-        self.spawn_agent(sub_id, Self::role_spec("planner", Role::Planner, brief, true), cx);
+        self.spawn_agent(sub_id, Self::role_spec("planner", Role::Planner, brief, false), cx);
         cx.notify();
     }
 
@@ -150,7 +159,7 @@ impl Monaged {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
         let sub_slug = git::slug(&sub.name);
         let mut used: Vec<String> = Vec::new();
-        for (i, stream) in streams.iter().enumerate() {
+        for stream in &streams {
             let mut name = self.unique_agent_name(sub_id, &format!("build-{}", stream.name));
             while used.contains(&name) {
                 name = format!("{name}-x");
@@ -158,7 +167,7 @@ impl Monaged {
             used.push(name.clone());
             let branch = format!("agent/{sub_slug}/{name}");
             let brief = pipeline::builder_brief(&request, &plan, stream, &branch);
-            self.spawn_agent(sub_id, Self::role_spec(&name, Role::Builder(stream.name.clone()), brief, i == 0), cx);
+            self.spawn_agent(sub_id, Self::role_spec(&name, Role::Builder(stream.name.clone()), brief, false), cx);
         }
     }
 
@@ -184,7 +193,7 @@ impl Monaged {
         p.stage = Stage::Integrate;
         p.note = Some(format!("The integrator is merging {} builder branch(es) into {}.", branches.len(), sub.branch));
         self.save_pipeline(sub_id);
-        self.spawn_agent(sub_id, Self::role_spec("integrator", Role::Integrator, brief, true), cx);
+        self.spawn_agent(sub_id, Self::role_spec("integrator", Role::Integrator, brief, false), cx);
     }
 
     pub(crate) fn stop_pipeline(&mut self, sub_id: i64, cx: &mut Context<Self>) {
@@ -239,7 +248,8 @@ impl Monaged {
     pub(crate) fn pipeline_on_turn(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         let Some(agent) = self.agent(agent_id) else { return };
         let role = agent.role();
-        if role == Role::Free {
+        // Your own agents and the lead don't move the pipeline on.
+        if matches!(role, Role::Free | Role::Lead) {
             return;
         }
         let (sub_id, name) = (agent.record.subproject_id, agent.record.name.clone());
@@ -264,6 +274,11 @@ impl Monaged {
             } else {
                 let n = questions.len();
                 self.set_note(sub_id, format!("{name} has {n} question{} for you.", if n == 1 { "" } else { "s" }));
+                let asked = questions.iter().map(|q| format!("\"{}\" ({})", q.question, q.options.join(" / "))).collect::<Vec<_>>().join("; ");
+                self.tell_lead(
+                    sub_id,
+                    format!("{name} asks the user: {asked}. If the user already told you the answer, give it to {name} with message_agent; otherwise leave it to the user (it's on the dashboard)."),
+                );
             }
             return;
         }
@@ -306,6 +321,7 @@ impl Monaged {
                         Gate::Ask(reason) => {
                             p.note = Some(format!("The research is verified. {reason}. Do we build this?"));
                             self.save_pipeline(sub_id);
+                            self.tell_lead(sub_id, format!("Research is verified ({reason}); the user decides on the dashboard whether to build it."));
                         }
                     }
                 } else {
@@ -324,11 +340,13 @@ impl Monaged {
                     Gate::Auto(reason) => {
                         p.note = Some(format!("\"{title}\": {reason}, so building started on its own."));
                         self.save_pipeline(sub_id);
+                        self.tell_lead(sub_id, format!("The plan \"{title}\" is in and building started on its own ({reason})."));
                         self.start_build(sub_id, cx);
                     }
                     Gate::Ask(reason) => {
                         p.note = Some(format!("\"{title}\" is ready for your approval. {reason}."));
                         self.save_pipeline(sub_id);
+                        self.tell_lead(sub_id, format!("The plan \"{title}\" waits for the user's approval on the dashboard ({reason})."));
                     }
                 }
             }
@@ -405,13 +423,15 @@ impl Monaged {
                 let _ = self.store.log_event(sub_id, Some(agent_id), "gate", &format!("{name}: {score}/5, sent back to fix (round {round})"));
                 self.save_pipeline(sub_id);
                 self.send_fix(agent_id);
+                self.tell_lead(sub_id, format!("{name} scored {score}/5 (the bar is {min}/5); Monaged sent it the findings to fix, round {round} of {}.", pipeline::MAX_FIX_ROUNDS));
             }
             pipeline::GateStep::Hold(why) => {
                 p.gate.hold(&name, why.clone());
-                p.note = Some(why);
+                p.note = Some(why.clone());
                 let _ = self.store.log_event(sub_id, Some(agent_id), "gate", &format!("{name}: waits for you"));
                 self.save_pipeline(sub_id);
                 self.chime(crate::sound::Cue::NeedsYou);
+                self.tell_lead(sub_id, format!("{why} It waits for the user on the dashboard (fix again, review again or accept it anyway)."));
             }
         }
         cx.notify();
@@ -437,8 +457,8 @@ impl Monaged {
         let (name, role) = (agent.record.name.clone(), agent.role());
         let score = agent.confidence.as_ref().map(|c| c.score);
         let how = match (anyway, score) {
-            (true, Some(s)) => format!("you accepted it at {s}/5"),
-            (true, None) => "you accepted it without a score".into(),
+            (true, Some(s)) => format!("was accepted by you at {s}/5"),
+            (true, None) => "was accepted by you without a score".into(),
             (false, Some(s)) => format!("passed review at {s}/5"),
             (false, None) => "passed".into(),
         };
@@ -453,6 +473,7 @@ impl Monaged {
             self.save_pipeline(sub_id);
             self.record_pipeline_run(sub_id);
             self.chime(crate::sound::Cue::Complete);
+            self.tell_lead(sub_id, format!("The integrator {how}: {summary} Everything is on {branch}. Tell the user in a sentence."));
             if let Some(project_id) = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| s.project_id) {
                 self.refresh_branches(project_id, cx);
             }
@@ -465,13 +486,16 @@ impl Monaged {
             p.done.push(name.clone());
         }
         let finished = builders.iter().filter(|b| p.done.contains(b)).count();
-        if finished >= builders.len() {
-            p.note = Some(format!("{name} {how}. All builders passed. Integrating."));
+        let total = builders.len();
+        if finished >= total {
+            p.note = Some(format!("{name} {how}. Every builder is through. Integrating."));
             self.save_pipeline(sub_id);
+            self.tell_lead(sub_id, format!("{name} {how}. Every builder is through; the integrator is merging their branches."));
             self.start_integration(sub_id, cx);
         } else {
-            p.note = Some(format!("{name} {how}. {finished} of {} builders done.", builders.len()));
+            p.note = Some(format!("{name} {how}. {finished} of {total} builders done."));
             self.save_pipeline(sub_id);
+            self.tell_lead(sub_id, format!("{name} {how} ({finished} of {total} builders done)."));
         }
         cx.notify();
     }
@@ -736,7 +760,7 @@ impl Monaged {
             .into_any_element()
     }
 
-    fn render_decide_card(&self, p: &Pipeline, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_decide_card(&self, p: &Pipeline, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
         let research = p.research.as_ref();
         let summary = research.and_then(|r| r["summary"].as_str()).unwrap_or("(no summary)").to_string();
         let verdicts = p.verifications.iter().enumerate().filter(|(_, v)| !v.is_null()).map(|(i, v)| {
@@ -947,6 +971,61 @@ impl Monaged {
             .into_any_element()
     }
 
+    /// One question from an agent, with its options as buttons.
+    pub(crate) fn render_question_card(&self, agent_id: i64, item: usize, qi: usize, q: &Question, answered: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(agent) = self.agent(agent_id) else { return div().into_any_element() };
+        let chosen = agent.answers.get(&(item, qi)).copied();
+        let options = q.options.iter().enumerate().map(|(oi, option)| {
+            let selected = chosen == Some(oi);
+            let mut text = option.clone();
+            if q.recommended == Some(oi) {
+                text.push_str("  (recommended)");
+            }
+            div()
+                .id(SharedString::from(format!("q-{agent_id}-{item}-{qi}-{oi}")))
+                .px(px(10.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .text_size(px(13.))
+                .border_color(rgb(if selected { theme::text() } else { theme::line_strong() }))
+                .when(selected, |d| d.bg(rgb(theme::selected())))
+                .when(!answered, |d| {
+                    d.cursor_pointer().hover(|s| s.bg(rgb(theme::hover()))).on_click(cx.listener(move |this, _, _, cx| {
+                        this.answer_question(agent_id, item, qi, oi, cx)
+                    }))
+                })
+                .child(text)
+        });
+        gate_card("Question")
+            .border_color(rgb(if answered { theme::line() } else { theme::red() }))
+            .child(div().font_weight(FontWeight::MEDIUM).child(q.question.clone()))
+            .when(!q.why.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(q.why.clone())))
+            .child(div().flex().flex_wrap().gap_2().children(options))
+            .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(if answered {
+                "Answered."
+            } else {
+                "Pick an option, or type your own answer."
+            }))
+            .into_any_element()
+    }
+
+    /// The questions in an agent's last reply that still wait for an answer.
+    pub(crate) fn render_open_questions(&self, agent_id: i64, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(agent) = self.agent(agent_id) else { return Vec::new() };
+        if !crate::shell::open_question(agent) {
+            return Vec::new();
+        }
+        let Some(item) = agent.items.iter().rposition(|i| matches!(i, Item::Agent(_))) else { return Vec::new() };
+        let Item::Agent(text) = &agent.items[item] else { return Vec::new() };
+        pipeline::directives(text)
+            .into_iter()
+            .filter_map(|d| if let Directive::Question(q) = d { Some(q) } else { None })
+            .enumerate()
+            .map(|(qi, q)| self.render_question_card(agent_id, item, qi, &q, false, cx))
+            .collect()
+    }
+
     /// An agent reply containing `monaged-*` blocks: Markdown plus cards.
     pub(crate) fn render_agent_reply(&self, agent_id: i64, item: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let Some(agent) = self.agent(agent_id) else { return render_markdown(text) };
@@ -959,40 +1038,7 @@ impl Monaged {
                 Segment::Directive(Directive::Question(q)) => {
                     let qi = question_index;
                     question_index += 1;
-                    let chosen = agent.answers.get(&(item, qi)).copied();
-                    let options = q.options.iter().enumerate().map(|(oi, option)| {
-                        let selected = chosen == Some(oi);
-                        let mut text = option.clone();
-                        if q.recommended == Some(oi) {
-                            text.push_str("  (recommended)");
-                        }
-                        div()
-                            .id(SharedString::from(format!("q-{agent_id}-{item}-{qi}-{oi}")))
-                            .px(px(10.))
-                            .py(px(5.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .text_size(px(13.))
-                            .border_color(rgb(if selected { theme::text() } else { theme::line_strong() }))
-                            .when(selected, |d| d.bg(rgb(theme::selected())))
-                            .when(!answered, |d| {
-                                d.cursor_pointer().hover(|s| s.bg(rgb(theme::hover()))).on_click(cx.listener(move |this, _, _, cx| {
-                                    this.answer_question(agent_id, item, qi, oi, cx)
-                                }))
-                            })
-                            .child(text)
-                    });
-                    gate_card("Question")
-                        .border_color(rgb(if answered { theme::line() } else { theme::red() }))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(q.question.clone()))
-                        .when(!q.why.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(q.why.clone())))
-                        .child(div().flex().flex_wrap().gap_2().children(options))
-                        .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(if answered {
-                            "Answered."
-                        } else {
-                            "Pick an option, or type your own answer below."
-                        }))
-                        .into_any_element()
+                    self.render_question_card(agent_id, item, qi, &q, answered, cx)
                 }
                 Segment::Directive(Directive::Research(v)) => result_card("Research report", v["summary"].as_str()),
                 Segment::Directive(Directive::Verification(v)) => {

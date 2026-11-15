@@ -31,6 +31,8 @@ pub enum Role {
     Planner,
     Builder(String),
     Integrator,
+    /// Oversees the subproject's agents; you talk to it on the dashboard.
+    Lead,
 }
 
 impl Role {
@@ -42,6 +44,7 @@ impl Role {
             Role::Planner => "planner".into(),
             Role::Builder(workstream) => format!("builder:{workstream}"),
             Role::Integrator => "integrator".into(),
+            Role::Lead => "lead".into(),
         }
     }
 
@@ -50,6 +53,7 @@ impl Role {
             "researcher" => Role::Researcher,
             "planner" => Role::Planner,
             "integrator" => Role::Integrator,
+            "lead" => Role::Lead,
             v if v.starts_with("verifier-") => Role::Verifier(v[9..].parse().unwrap_or(1)),
             v if v.starts_with("builder:") => Role::Builder(v[8..].to_string()),
             _ => Role::Free,
@@ -63,7 +67,7 @@ impl Role {
             Role::Verifier(_) => Some("monaged-verification"),
             Role::Planner => Some("monaged-plan"),
             Role::Builder(_) | Role::Integrator => Some("monaged-done"),
-            Role::Free => None,
+            Role::Free | Role::Lead => None,
         }
     }
 }

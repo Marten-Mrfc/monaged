@@ -65,6 +65,8 @@ pub(crate) enum Command {
     ToggleSounds,
     OnePane(bool),
     ChangesBeside(bool),
+    Dashboard(i64),
+    StartLead(i64),
     Density(bool),
     Health,
     SubChanges(i64),
@@ -218,6 +220,28 @@ impl Monaged {
         out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: crate::keys::hint("settings"), command: Command::Settings });
         out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: crate::keys::hint("shortcuts"), command: Command::Shortcuts });
         out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: crate::keys::hint("zen"), command: Command::Zen });
+        if let Some(sub_id) = self.sel_sub {
+            out.push(Entry {
+                group: "App",
+                glyph: Icon::Board,
+                title: "Open the dashboard".into(),
+                detail: "This subproject: what waits for you, the agents and the lead".into(),
+                state: None,
+                hint: None,
+                command: Command::Dashboard(sub_id),
+            });
+            if self.lead_of(sub_id).is_none() {
+                out.push(Entry {
+                    group: "App",
+                    glyph: Icon::Flow,
+                    title: "Start a lead for this subproject".into(),
+                    detail: "An agent that oversees the others; you talk to it on the dashboard".into(),
+                    state: None,
+                    hint: None,
+                    command: Command::StartLead(sub_id),
+                });
+            }
+        }
         out.push(Entry {
             group: "App",
             glyph: if self.one_pane { Icon::Restore } else { Icon::Maximize },
@@ -393,6 +417,11 @@ impl Monaged {
             Command::Zen => self.toggle_zen(cx),
             Command::OnePane(on) => self.set_one_pane(on, cx),
             Command::ChangesBeside(on) => self.set_changes_beside(on, cx),
+            Command::Dashboard(sub_id) => self.select_sub(sub_id, cx),
+            Command::StartLead(sub_id) => {
+                self.select_sub(sub_id, cx);
+                self.start_lead(sub_id, cx);
+            }
             Command::ToggleSounds => {
                 self.change_sounds(|s| s.on = !s.on, cx);
                 let on = self.sound.settings.on;

@@ -106,6 +106,14 @@ impl Monaged {
         let version = info["agentInfo"]["version"].as_str().unwrap_or_default().to_string();
         let mut col = div().flex().flex_col().gap(px(14.));
         col = col.child(
+            ui::switch("toggle-lead", "Every pipeline gets a lead: an agent that oversees the others, which you talk to on the subproject's dashboard", self.lead_enabled())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let on = this.lead_enabled();
+                    let _ = this.store.set_setting("lead:auto", if on { "0" } else { "1" });
+                    cx.notify();
+                })),
+        );
+        col = col.child(
             div()
                 .flex()
                 .flex_col()
