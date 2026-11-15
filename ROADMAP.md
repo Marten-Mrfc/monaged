@@ -413,6 +413,19 @@ What the research said (Material Design's sound guidelines, Google's earcon guid
 - [x] **The 403 when publishing, explained:** GitHub won't let the Actions token create the release tag at a commit whose workflow files differ from main's. 0.5.0's first attempt hit it because the CI change landed on main a minute after the release commit; probably 0.3.0's too. docs/releasing.md says what to do.
 - [ ] Options not taken (yet): a self-hosted runner on your own PC (warm and fast, free, only while it's on), `rust-lld` as the linker (seconds per link; the icon resource needs checking), checks on Linux through Wine (cheaper runners, fragile).
 
+### Release 0.6.0: the dashboard, the lead and the quality gate (done 2026-11-15)
+Asked for: one agent at a time and a close button that works; Fix findings next to Review; reviews that know enough context not to flag what isn't wrong; a page per subproject where everything that needs you can be done, with a main agent overseeing the others; and no more integrating and merging work that scored 1–2.
+
+- [x] **Panes:** closing one sticks until you open that agent again; one agent at a time (pane header, Ctrl K); the Changes column beside an agent can be turned off.
+- [x] **Reviews:** Fix findings; ruling a finding out (optional reason, re-scored, told to the project's next reviews); the reviewer gets the follow-up messages, CLAUDE.md and shared notes, the agent's report as a claim, the changed files in full and the ruled-out findings; failing tests that failed on the base branch too don't count against the agent.
+- [x] **The quality gate:** builders and the integrator are reviewed when they say they're done and need 4/5 (3–5 in Settings); below it the findings go back twice, then the work waits for you (Fix again, Review again, Accept anyway). Auto-merge into develop needs the same score; without reviews the work waits for you.
+- [x] **The dashboard:** clicking a subproject opens it; the request and stages, everything that needs you answerable in place, every agent with its state, score and controls; the inbox opens it.
+- [x] **The lead:** one agent per pipeline that oversees the others, with its own MCP tools (team status, message or start an agent, review, fix findings) and updates from Monaged; it doesn't write code or accept work below the bar.
+
+**Tested:** the gate, the rule-out re-scoring, the fix message, the review prompt's context and the base-branch comparison as unit tests; the whole flow (dashboard, a pipeline, a builder held below the bar after two fix rounds, accepting it, integration and the merge into develop) in the real UI against stand-ins for WSL and Claude.
+
+**Not tested yet:** a real lead on Claude (does it use its tools well and keep its replies short), and how much its updates cost over a long pipeline.
+
 ### What's next (proposed order, 2026-11-15)
 Sizes: S about half a day, M one or two days, L several.
 
@@ -429,8 +442,6 @@ Sizes: S about half a day, M one or two days, L several.
 **3. A safety net.**
 - [ ] M · **Linux builds and UI smoke tests in CI:** patch `xattr` (GPUI's HTTP client pulls in a version that doesn't build on current Linux; the demo build already patches it), then run the real UI under Xvfb against stand-ins for WSL and Claude, and check the key screens: the setup guide, a turn with its review, Settings. It would have caught 0.4's empty progress bars, collapsed fields and out-of-reach buttons. Linux runners are cheaper too.
 - [ ] M · Split the largest files along their sections (`shell.rs`, `onboarding.rs`, `uninstall.rs`, `env.rs`, `main.rs`: 1.9–2.2k lines each).
-
-**Done since this list was written:** the subproject dashboard with the lead agent, and the quality gate (builders and the integrator need 4/5; tests that failed before don't count).
 
 **4. Features for agents that work while you don't.**
 - [ ] M · **While you were away:** coming back to Monaged (or in the morning), one summary of what finished, what waits for you, what failed and what it cost, from the inbox, timeline and usage data that already exist.
