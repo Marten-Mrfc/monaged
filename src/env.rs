@@ -1910,8 +1910,12 @@ mod tests {
         assert!(!looks_secret("PORT", "3000"));
     }
 
+    /// The masks are global: tests that set them take turns (they run in parallel).
+    static MASKS_IN_USE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn encoded_values_are_masked_too() {
+        let _turn = MASKS_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
         let secret = "sk_live_123456789";
         set_masks(vec![(Secret(secret.into()), "STRIPE_KEY".into())]);
         for k in 0..3 {
@@ -1928,6 +1932,7 @@ mod tests {
 
     #[test]
     fn masking_replaces_values_and_names_them() {
+        let _turn = MASKS_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
         set_masks(vec![(Secret("sk_live_123456".into()), "STRIPE_KEY".into()), (Secret("short".into()), "TINY".into())]);
         let (out, found) = mask_names("key=sk_live_123456 and short");
         assert_eq!(out, "key=[secret:STRIPE_KEY] and short");
