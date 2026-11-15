@@ -13,7 +13,7 @@ use crate::markdown::{self, Block, Inline, Style};
 use crate::review::{self, TurnInfo};
 use crate::{Form, Monaged, dots, secrets, theme, tone_color, ui};
 
-const SETTINGS_SECTIONS: [(&str, Icon); 14] = [
+const SETTINGS_SECTIONS: [(&str, Icon); 15] = [
     ("Appearance", Icon::Eye),
     ("Agents", Icon::Agent),
     ("Message box", Icon::Send),
@@ -27,6 +27,7 @@ const SETTINGS_SECTIONS: [(&str, Icon); 14] = [
     ("Notifications", Icon::Alert),
     ("Sounds", Icon::Sound),
     ("General", Icon::Sliders),
+    ("Connect Claude", Icon::Ask),
     ("Updates", Icon::ArrowDown),
 ];
 
@@ -42,6 +43,15 @@ impl Monaged {
                 cx.notify();
             });
         }
+    }
+
+    /// Settings at a section, without a window at hand (the scroll applies at the next layout).
+    pub(crate) fn open_settings_page(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.open_settings(cx);
+        if let Some(i) = SETTINGS_SECTIONS.iter().position(|(n, _)| *n == name) {
+            self.settings_scroll.scroll_to_top_of_item(i + 1);
+        }
+        cx.notify();
     }
 
     /// The API key when set; otherwise the Claude CLI (Max plan) if allowed.
@@ -687,6 +697,13 @@ impl Monaged {
                         .child(column(section("Notifications", None).child(self.render_notification_settings(cx))))
                         .child(column(section("Sounds", Some("A few short sounds for moments you might miss because you're looking elsewhere.")).child(self.render_sound_settings(cx))))
                         .child(column(section("General", Some("Density, where Monaged opens, and where it keeps its data.")).child(self.render_general_settings(cx))))
+                        .child(column(
+                            section(
+                                "Connect Claude",
+                                Some("Let Claude see what happens in Monaged: export a project to read or paste into a chat, or connect Claude Desktop or Claude Code so it can look for itself (an MCP server). Secrets are masked either way."),
+                            )
+                            .child(self.render_connect_settings(cx)),
+                        ))
                         .child(column(section("Updates", None).child(self.render_update_settings(cx)))),
             )
             .into_any_element()
@@ -1081,4 +1098,72 @@ fn status_label(status: &str) -> AnyElement {
         .child(div().size(px(6.)).rounded_full().bg(rgb(if attention { theme::red() } else { theme::text_3() })))
         .child(text.to_uppercase())
         .into_any_element()
+}
+
+impl Monaged {
+    /// Settings → Connect Claude.
+    pub(crate) fn render_connect_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.debug_on();
+        let actions = self.debug_actions();
+        let project = self.sel_project.and_then(|id| self.projects.iter().find(|p| p.id == id)).map(|p| (p.id, p.name.clone()));
+        let hint = |text: &'static str| div().text_size(px(12.5)).text_color(rgb(theme::text_3())).child(text);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(ui::label("Export for analysis"))
+            .child(hint("A Markdown report (to read, or to paste or upload into any chat with Claude) and a zip with every conversation, the pipeline data, git's view, Monaged's log and a screenshot. It goes to your Downloads folder."))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .children(project.map(|(id, name)| {
+                        ui::button("export-project", ui::Kind::Primary, Some(Icon::ArrowDown), format!("Export {name}"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.export(crate::export::Scope::Project(id), cx)))
+                    }))
+                    .child(
+                        ui::button("export-all", ui::Kind::Secondary, Some(Icon::ArrowDown), "Export everything")
+                            .on_click(cx.listener(|this, _, _, cx| this.export(crate::export::Scope::Everything, cx))),
+                    ),
+            )
+            .child(div().h(px(4.)))
+            .child(ui::label("Let Claude look (MCP)"))
+            .child(
+                ui::switch("toggle-debug", "Let Claude Desktop or Claude Code read Monaged: projects, agents, conversations, reviews, the log and screenshots", on)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_debug(!on, cx))),
+            )
+            .when(on, |d| {
+                d.child(
+                    ui::switch("toggle-debug-actions", "Let Claude act too: send agents messages, stop them, run reviews", actions)
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_debug_actions(!actions, cx))),
+                )
+            })
+            .child(hint("Agents run as you, so they could read this too; leave actions off unless you're debugging with Claude. Monaged writes the connection details to its data folder only while this is on."))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .child(
+                        ui::button("connect-desktop", ui::Kind::Secondary, Some(Icon::Ask), "Add to Claude Desktop")
+                            .tooltip(crate::shell::tip("Adds Monaged to Claude Desktop's MCP servers (its config keeps everything else); restart Claude Desktop after"))
+                            .on_click(cx.listener(|this, _, _, cx| this.connect_claude_desktop(cx))),
+                    )
+                    .child(
+                        ui::button("connect-code-wsl", ui::Kind::Secondary, Some(Icon::Terminal), "Add to Claude Code in WSL")
+                            .tooltip(crate::shell::tip("Runs `claude mcp add` in WSL, so `claude` in a WSL terminal can look at Monaged"))
+                            .on_click(cx.listener(|this, _, _, cx| this.connect_claude_code_wsl(cx))),
+                    )
+                    .child(
+                        ui::button("connect-code-copy", ui::Kind::Secondary, Some(Icon::Copy), "Copy the command for Claude Code on Windows")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(crate::debug_mcp::claude_code_windows_command()));
+                                this.toast(Tone::Info, "Copied: paste it into a terminal where `claude` runs.", cx);
+                            })),
+                    ),
+            )
+            .child(hint("Then ask Claude things like \"what is Monaged doing?\", \"why is build-api stuck?\" or \"show me the Order history dashboard\". It has: status, projects, subproject, agent, changes, inbox, log, screenshot, show and export."))
+            .into_any_element()
+    }
 }

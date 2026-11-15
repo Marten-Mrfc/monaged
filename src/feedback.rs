@@ -143,6 +143,11 @@ impl Monaged {
         self.push_toast(tone, text, Some(key), false, action, cx);
     }
 
+    /// Settles a progress toast with a button.
+    pub(crate) fn settle_action(&mut self, key: &'static str, tone: Tone, text: impl Into<String>, label: &'static str, action: ToastAction, cx: &mut Context<Self>) {
+        self.push_toast(tone, text.into(), Some(key), false, Some((label, action)), cx);
+    }
+
     /// Shows an error with a copy button.
     pub(crate) fn toast_error(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         let text = text.into();

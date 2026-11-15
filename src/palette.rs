@@ -66,6 +66,7 @@ pub(crate) enum Command {
     OnePane(bool),
     ChangesBeside(bool),
     Dashboard(i64),
+    Export(crate::export::Scope),
     StartLead(i64),
     Density(bool),
     Health,
@@ -220,6 +221,26 @@ impl Monaged {
         out.push(Entry { group: "App", glyph: Icon::Sliders, title: "Settings".into(), detail: String::new(), state: None, hint: crate::keys::hint("settings"), command: Command::Settings });
         out.push(Entry { group: "App", glyph: Icon::Keyboard, title: "Keyboard shortcuts".into(), detail: String::new(), state: None, hint: crate::keys::hint("shortcuts"), command: Command::Shortcuts });
         out.push(Entry { group: "App", glyph: Icon::Eye, title: if self.zen { "Leave zen mode".into() } else { "Zen mode".into() }, detail: "One conversation, nothing else".into(), state: None, hint: crate::keys::hint("zen"), command: Command::Zen });
+        if let Some(project) = self.sel_project.and_then(|id| self.projects.iter().find(|p| p.id == id)) {
+            out.push(Entry {
+                group: "App",
+                glyph: Icon::ArrowDown,
+                title: format!("Export {} for analysis", project.name),
+                detail: "A report to read or paste into a chat, and a zip with every conversation, the log and a screenshot (secrets masked)".into(),
+                state: None,
+                hint: None,
+                command: Command::Export(crate::export::Scope::Project(project.id)),
+            });
+        }
+        out.push(Entry {
+            group: "App",
+            glyph: Icon::ArrowDown,
+            title: "Export everything for analysis".into(),
+            detail: "Every project: a report and a zip, secrets masked".into(),
+            state: None,
+            hint: None,
+            command: Command::Export(crate::export::Scope::Everything),
+        });
         if let Some(sub_id) = self.sel_sub {
             out.push(Entry {
                 group: "App",
@@ -418,6 +439,7 @@ impl Monaged {
             Command::OnePane(on) => self.set_one_pane(on, cx),
             Command::ChangesBeside(on) => self.set_changes_beside(on, cx),
             Command::Dashboard(sub_id) => self.select_sub(sub_id, cx),
+            Command::Export(scope) => self.export(scope, cx),
             Command::StartLead(sub_id) => {
                 self.select_sub(sub_id, cx);
                 self.start_lead(sub_id, cx);

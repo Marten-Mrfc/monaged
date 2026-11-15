@@ -19,9 +19,11 @@ mod checkpoints;
 mod coord;
 mod coord_ui;
 mod dashboard;
+mod debug_mcp;
 mod diff;
 mod distro;
 mod env;
+mod export;
 mod extras;
 mod dots;
 mod feedback;
@@ -100,7 +102,7 @@ actions!(
     [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext, FocusTree, ToggleSideChat, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen]
 );
 
-enum Conn {
+pub(crate) enum Conn {
     Starting,
     Handshaking,
     Ready,
@@ -263,6 +265,8 @@ struct Monaged {
     /// Panes you closed: an agent that's working or needs you doesn't get one
     /// back by itself until you open it again.
     dismissed: HashSet<i64>,
+    /// An export is being written.
+    exporting: bool,
     /// Subprojects whose lead is being created.
     starting_lead: HashSet<i64>,
     /// Agents the lead asked a review of.
@@ -531,6 +535,7 @@ impl Monaged {
             collapsed: HashSet::new(),
             pinned: Vec::new(),
             dismissed: HashSet::new(),
+            exporting: false,
             starting_lead: HashSet::new(),
             lead_reviews: HashSet::new(),
             one_pane: false,
@@ -638,6 +643,8 @@ impl Monaged {
         this.sound = sound::Player::new(sound::Settings::load(&this.store));
         this.one_pane = this.store.setting("ui:panes").as_deref() == Some("one");
         this.changes_beside = this.store.setting("ui:changes_beside").as_deref() != Some("0");
+        // Claude can reach this run's bridge only while Connect Claude is on.
+        this.publish_debug();
         // A fresh PC gets the setup guide first; it connects when it's done.
         if this.setup_needed(std::env::args().any(|a| a == "--setup")) {
             this.setup.pending = true;
@@ -1741,6 +1748,14 @@ fn main() {
     if let Some(relay) = coord::parse_relay_args(&args) {
         if let Err(err) = coord::run_relay(relay) {
             eprintln!("monaged relay: {err:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // Started by Claude Desktop or Claude Code: Claude looking at Monaged (Settings → Connect Claude).
+    if debug_mcp::is_debug_args(&args) {
+        if let Err(err) = debug_mcp::run_relay() {
+            eprintln!("monaged debug server: {err:#}");
             std::process::exit(1);
         }
         return;

@@ -37,6 +37,7 @@ pub(crate) struct MenuState {
 #[derive(Clone)]
 pub(crate) enum MenuAction {
     OpenProject(i64),
+    Export(i64),
     NewSub(i64),
     ToggleCollapse(i64),
     OpenZed(String),
@@ -130,6 +131,7 @@ impl Monaged {
                     item("Open overview", Icon::Folder, MenuAction::OpenProject(pid)),
                     item("New subproject", Icon::Plus, MenuAction::NewSub(pid)),
                     item("Project settings", Icon::Sliders, MenuAction::ProjectSettings(pid)),
+                    item("Export for analysis", Icon::ArrowDown, MenuAction::Export(pid)),
                     Entry::Separator,
                     item("Open in Zed", Icon::External, MenuAction::OpenZed(project.path.clone())),
                     item("Copy path", Icon::Copy, MenuAction::Copy(project.path.clone(), "path")),
@@ -268,6 +270,7 @@ impl Monaged {
             MenuAction::SubChanges(sid) => self.open_sub_changes(sid, cx),
             MenuAction::SubCap(sid) => self.ask_sub_cap(sid, window, cx),
             MenuAction::ProjectSettings(pid) => self.open_project_settings(pid, window, cx),
+            MenuAction::Export(pid) => self.export(crate::export::Scope::Project(pid), cx),
             MenuAction::SideChat(aid) => {
                 self.open_agent(aid, cx);
                 self.toggle_side_chat(aid, window, cx);

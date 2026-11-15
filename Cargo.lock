@@ -3396,9 +3396,14 @@ name = "monaged"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "crc32fast",
+ "flate2",
  "futures",
+ "getrandom 0.3.4",
  "gpui",
  "keyring",
+ "png 0.18.1",
  "pulldown-cmark",
  "rusqlite",
  "serde_json",

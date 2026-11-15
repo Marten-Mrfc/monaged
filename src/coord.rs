@@ -172,80 +172,100 @@ pub struct ToolRequest {
     pub tool: String,
     pub arguments: Value,
     pub reply: mpsc::Sender<ToolReply>,
+    /// From `monaged.exe --mcp-debug` (Claude looking at Monaged), with the
+    /// debug token; agents' requests can never be this.
+    pub debug: bool,
 }
 
 pub struct ToolReply {
     pub text: String,
     pub is_error: bool,
+    /// A PNG, base64 (screenshots for the debug server).
+    pub image: Option<String>,
 }
 
 impl ToolReply {
     pub fn ok(text: impl Into<String>) -> Self {
-        Self { text: text.into(), is_error: false }
+        Self { text: text.into(), is_error: false, image: None }
     }
     pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), is_error: true }
+        Self { text: text.into(), is_error: true, image: None }
     }
 }
 
 pub struct Bridge {
     pub port: u16,
+    /// What agents' relays send.
     pub token: String,
+    /// What the debug relay sends (kept in a file only while debugging is on).
+    pub debug_token: String,
 }
+
+/// The most a request may hold; tool arguments are small.
+const MAX_REQUEST: u64 = 2 * 1024 * 1024;
 
 /// Listens on a random localhost port; each connection is one tool call.
 pub fn start_bridge() -> Result<(Bridge, UnboundedReceiver<ToolRequest>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("couldn't open the local coordination port")?;
     let port = listener.local_addr()?.port();
-    let token = random_token();
+    let (token, debug_token) = (random_token()?, random_token()?);
     let (tx, rx) = unbounded();
-    let expected = token.clone();
+    let expected = (token.clone(), debug_token.clone());
     thread::Builder::new().name("monaged-bridge".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
             let (tx, expected) = (tx.clone(), expected.clone());
             let _ = thread::Builder::new().name("monaged-tool".into()).spawn(move || {
-                let _ = serve(stream, &tx, &expected);
+                let _ = serve(stream, &tx, &expected.0, &expected.1);
             });
         }
     })?;
-    Ok((Bridge { port, token }, rx))
+    Ok((Bridge { port, token, debug_token }, rx))
 }
 
-fn serve(stream: TcpStream, tx: &futures::channel::mpsc::UnboundedSender<ToolRequest>, token: &str) -> Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+/// Compares without leaking where the first difference is.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn serve(stream: TcpStream, tx: &futures::channel::mpsc::UnboundedSender<ToolRequest>, token: &str, debug_token: &str) -> Result<()> {
+    use std::io::Read as _;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let mut reader = BufReader::new(stream.try_clone()?.take(MAX_REQUEST));
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let request: Value = serde_json::from_str(&line)?;
-    let reply = if request["token"].as_str() != Some(token) {
+    let debug = request["debug"].as_bool().unwrap_or(false);
+    let given = request["token"].as_str().unwrap_or_default();
+    let reply = if !same(given, if debug { debug_token } else { token }) {
         ToolReply::error("bad token")
     } else {
         let (reply_tx, reply_rx) = mpsc::channel();
         tx.unbounded_send(ToolRequest {
-            agent: request["agent"].as_i64().unwrap_or(0),
+            agent: if debug { 0 } else { request["agent"].as_i64().unwrap_or(0) },
             tool: request["tool"].as_str().unwrap_or_default().to_string(),
             arguments: request["arguments"].clone(),
             reply: reply_tx,
+            debug,
         })?;
         reply_rx.recv_timeout(ASK_TIMEOUT).unwrap_or_else(|_| {
-            ToolReply::ok("No answer in time. Continue with your best assumption and post it on the board with board_post.")
+            if debug {
+                ToolReply::error("Monaged didn't answer in time.")
+            } else {
+                ToolReply::ok("No answer in time. Continue with your best assumption and post it on the board with board_post.")
+            }
         })
     };
     let mut stream = stream;
-    writeln!(stream, "{}", json!({ "text": reply.text, "is_error": reply.is_error }))?;
+    writeln!(stream, "{}", json!({ "text": reply.text, "is_error": reply.is_error, "image": reply.image }))?;
     stream.flush()?;
     Ok(())
 }
 
-fn random_token() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    (0..2)
-        .map(|i| {
-            let mut hasher = RandomState::new().build_hasher();
-            hasher.write_u64(i ^ std::process::id() as u64);
-            format!("{:016x}", hasher.finish())
-        })
-        .collect()
+/// 256 bits from the operating system's random source, as hex.
+fn random_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no random source: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The MCP server entry for ACP's `session/new` / `session/load`.

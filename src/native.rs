@@ -254,6 +254,114 @@ mod imp {
             Ok(code)
         }
     }
+
+    /// The user's Downloads folder (wherever they moved it).
+    pub fn downloads_dir() -> Option<std::path::PathBuf> {
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+        // SAFETY: the returned string is copied, then freed with CoTaskMemFree as documented.
+        unsafe {
+            let path = SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None).ok()?;
+            let text = path.to_string().ok();
+            CoTaskMemFree(Some(path.0 as *const _));
+            text.map(std::path::PathBuf::from)
+        }
+    }
+
+    /// Monaged's biggest visible window, drawn into a bitmap (PrintWindow with
+    /// full content, so GPU-drawn content is included): (width, height, RGBA).
+    pub fn capture_own_window() -> Result<(u32, u32, Vec<u8>)> {
+        use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+        use windows::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+        };
+        use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClientRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible};
+        use windows::core::BOOL;
+
+        struct Found {
+            pid: u32,
+            best: Option<(HWND, i64)>,
+        }
+        unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> BOOL {
+            // SAFETY: `data` is the &mut Found passed to EnumWindows below, alive for the call.
+            let found = unsafe { &mut *(data.0 as *mut Found) };
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid == found.pid && unsafe { IsWindowVisible(hwnd) }.as_bool() && !unsafe { IsIconic(hwnd) }.as_bool() {
+                let mut rect = RECT::default();
+                if unsafe { GetClientRect(hwnd, &mut rect) }.is_ok() {
+                    let area = i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top);
+                    if found.best.is_none_or(|(_, a)| area > a) {
+                        found.best = Some((hwnd, area));
+                    }
+                }
+            }
+            BOOL(1)
+        }
+        let mut found = Found { pid: std::process::id(), best: None };
+        // SAFETY: the callback only reads window properties and writes `found`, which outlives the call.
+        unsafe {
+            let _ = EnumWindows(Some(each), LPARAM(&mut found as *mut Found as isize));
+        }
+        let Some((hwnd, _)) = found.best else { bail!("Monaged's window isn't open (or it's minimized)") };
+        // SAFETY: every GDI object made here is selected out and deleted before returning.
+        unsafe {
+            let mut rect = RECT::default();
+            GetClientRect(hwnd, &mut rect)?;
+            let (width, height) = ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1));
+            let screen = GetDC(None);
+            let dc = CreateCompatibleDC(Some(screen));
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height, // top-down rows
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0);
+            let result = (|| -> Result<Vec<u8>> {
+                let bitmap = bitmap.map_err(|e| anyhow::anyhow!("couldn't make a bitmap: {}", e.message()))?;
+                let old = SelectObject(dc, bitmap.into());
+                // PW_CLIENTONLY | PW_RENDERFULLCONTENT
+                let ok = PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(1 | 2)).as_bool();
+                SelectObject(dc, old);
+                let pixels = if ok && !bits.is_null() {
+                    let len = (width as usize) * (height as usize) * 4;
+                    let bgra = std::slice::from_raw_parts(bits as *const u8, len);
+                    let mut rgba = Vec::with_capacity(len);
+                    for px in bgra.chunks_exact(4) {
+                        rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                    }
+                    Some(rgba)
+                } else {
+                    None
+                };
+                let _ = DeleteObject(bitmap.into());
+                pixels.ok_or_else(|| anyhow::anyhow!("Windows couldn't draw the window"))
+            })();
+            let _ = DeleteDC(dc);
+            ReleaseDC(None, screen);
+            Ok((width as u32, height as u32, result?))
+        }
+    }
+
+    /// Opens Explorer with the file selected.
+    pub fn reveal_in_explorer(path: &Path) -> Result<()> {
+        use std::os::windows::process::CommandExt;
+        let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        std::process::Command::new(Path::new(&windows_dir).join("explorer.exe"))
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("couldn't open Explorer: {e}"))
+    }
 }
 
 #[cfg(not(windows))]
@@ -293,6 +401,18 @@ mod imp {
     }
     pub fn run_elevated(_: &Path, _: &str) -> Result<u32> {
         bail!("running as administrator works on Windows only")
+    }
+
+    pub fn downloads_dir() -> Option<std::path::PathBuf> {
+        std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join("Downloads"))
+    }
+
+    pub fn capture_own_window() -> Result<(u32, u32, Vec<u8>)> {
+        bail!("screenshots are only taken on Windows")
+    }
+
+    pub fn reveal_in_explorer(_: &Path) -> Result<()> {
+        Ok(())
     }
 }
 

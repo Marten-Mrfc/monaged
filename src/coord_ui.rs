@@ -49,7 +49,10 @@ impl Monaged {
     }
 
     pub(crate) fn on_tool_request(&mut self, request: ToolRequest, cx: &mut Context<Self>) {
-        let ToolRequest { agent, tool, arguments, reply } = request;
+        let ToolRequest { agent, tool, arguments, reply, debug } = request;
+        if debug {
+            return self.on_debug_request(&tool, &arguments, reply, cx);
+        }
         if self.agent(agent).is_none() {
             let _ = reply.send(ToolReply::error("Monaged doesn't know this agent any more."));
             return;

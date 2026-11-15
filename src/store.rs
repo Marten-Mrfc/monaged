@@ -783,6 +783,13 @@ impl Store {
         self.conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).ok()
     }
 
+    /// Every setting, by key.
+    pub fn all_settings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn delete_setting(&self, key: &str) -> Result<()> {
         self.conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
         Ok(())
