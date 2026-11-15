@@ -336,6 +336,19 @@ One rule for where a message goes:
 - [ ] Next: run `run_with_env` commands in their own sandbox too (bubblewrap, with an optional no-network mode and per-secret allowed hosts); gitleaks before pushes when installed; Windows Hello before revealing or copying.
 - [x] **The database protects itself:** every start makes a backup (VACUUM INTO, last five kept), checks the file, and if it's damaged sets it aside and starts from the newest good backup (and says so). The window position is only saved when it changes, never while minimized.
 
+### Git sign-in and a fuller Git tab (done 2026-11-15)
+- [x] **Accounts** (Settings → Git accounts): GitHub, GitLab (Enterprise and self-hosted too) and any other host. Sign in in the browser (OAuth device flow: a code to approve on the host's site; GitLab's expiring tokens renew themselves), with a token (opens the token page with the scopes ticked), with a username and app password for other hosts, or by importing what the GitHub CLI, the GitLab CLI or Git Credential Manager already has. Every token is checked with the host's API (who you are, your email, its scopes).
+- [x] **No Git Credential Manager needed:** tokens live in Windows Credential Manager under Monaged's name, and `monaged.exe --git-credential` is git's helper in WSL for each host with an account (through WSL interop, window open or not). It's set up again by itself when monaged.exe moves (updates, dev builds). A token git finds rejected shows up in Settings.
+- [x] **Or with it:** Git Credential Manager is found wherever Git for Windows or its own installer put it, and one switch makes it the helper for hosts without an account (or turns it off).
+- [x] **Several accounts per host:** a default, and a project can sign in as another (`credential.<url>.username` in its git config), switched from the Git tab.
+- [x] **Without gh and glab:** pull/merge requests, their status and CI go through the REST API with the account; the CLIs get the account's token when they're used.
+- [x] **Safety:** tokens never touch the database, a file in WSL or a command line; they're masked like environment secrets, and merges and pushes that contain one are refused.
+- [x] **SSH keys in WSL:** list, create (ed25519), add to GitHub or GitLab through the API, test per host, trust a host's key.
+- [x] **Commit as an account:** its name and email become git's identity in WSL.
+- [x] **Git tab:** commit only the files you tick, amend the last commit, take back a commit that isn't pushed, pull with a merge when a branch moved on both sides, and an Origin row with who it signs in as, a connection test, and HTTPS ⇄ SSH.
+- [x] Clone checks, push errors and the health check point to Settings → Git accounts.
+- [ ] Not exercised live yet (written and type-checked off Windows): the browser sign-in against a real OAuth app, the helper through WSL interop, imports from gh/glab/GCM.
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.

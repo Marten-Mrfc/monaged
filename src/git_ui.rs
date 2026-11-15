@@ -6,9 +6,14 @@
 //!   forward only) and push;
 //! - conflicts from a merge: keep one side per file and merge, or hand them
 //!   to an agent;
-//! - history: the graph of the subproject's branches; a commit opens its diff.
+//! - history: the graph of the subproject's branches; a commit opens its diff;
+//! - committing only the files you tick, amending, and taking back the last
+//!   commit while it isn't pushed;
+//! - pulling a branch that moved on both sides (a merge, never a rebase);
+//! - how origin signs in: the account (see `accounts_ui`), a connection test,
+//!   and switching between HTTPS and SSH.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, Entity, SharedString, div, prelude::*, px, rgb};
@@ -38,6 +43,14 @@ pub(crate) struct GitPanel {
     pub busy: Option<String>,
     /// Conflict choices: path -> side.
     pub choices: HashMap<String, Side>,
+    /// Files ticked for the next commit (none ticked: everything).
+    pub selected: HashSet<String>,
+    /// Add to the last commit instead of making a new one.
+    pub amend: bool,
+    /// The newest commit: (sha, subject, pushed).
+    pub last: Option<(String, String, bool)>,
+    /// The account origin signs in as: `Some(None)` is the host's default.
+    pub login: Option<Option<String>>,
 }
 
 /// A commit opened in the main area.
@@ -75,7 +88,23 @@ impl Monaged {
             _ => GitTarget::Project,
         };
         let message = cx.new(|cx| TextInput::new("Commit message", cx));
-        self.git_panels.insert(sub_id, GitPanel { target, status: None, stashes: 0, message, graph: None, remote: Vec::new(), busy: None, choices: HashMap::new() });
+        self.git_panels.insert(
+            sub_id,
+            GitPanel {
+                target,
+                status: None,
+                stashes: 0,
+                message,
+                graph: None,
+                remote: Vec::new(),
+                busy: None,
+                choices: HashMap::new(),
+                selected: HashSet::new(),
+                amend: false,
+                last: None,
+                login: None,
+            },
+        );
         self.refresh_git(sub_id, cx);
     }
 
@@ -92,6 +121,7 @@ impl Monaged {
             self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived && a.record.branch != sub.branch).map(|a| a.record.branch.clone()).collect();
         let mut graph_refs = vec![sub.branch.clone()];
         graph_refs.extend(agent_branches);
+        let https_host = self.origin_https_host(project_id);
         let distro = self.config.distro.clone();
         cx.spawn(async move |view, cx| {
             let result = cx
@@ -100,16 +130,24 @@ impl Monaged {
                     let stashes = git_ops::stash_count(&distro, &dir).unwrap_or(0);
                     let remote = git_ops::remote_counts(&distro, &repo, &branches).unwrap_or_default();
                     let graph = git_ops::graph(&distro, &repo, &graph_refs, 60).ok();
-                    (status, stashes, branches.into_iter().zip(remote).collect::<Vec<_>>(), graph)
+                    let last = git_ops::last_commit(&distro, &dir).ok().flatten();
+                    let login = https_host.map(|host| crate::git_auth::project_login(&distro, &repo, &host));
+                    (status, stashes, branches.into_iter().zip(remote).collect::<Vec<_>>(), graph, last, login)
                 })
                 .await;
             view.update(cx, |this, cx| {
                 if let Some(panel) = this.git_panels.get_mut(&sub_id) {
-                    let (status, stashes, remote, graph) = result;
+                    let (status, stashes, remote, graph, last, login) = result;
+                    // Ticks for files that are no longer changed go away.
+                    if let Ok(status) = &status {
+                        panel.selected.retain(|path| status.files.iter().any(|f| &f.path == path));
+                    }
                     panel.status = Some(status);
                     panel.stashes = stashes;
                     panel.remote = remote;
                     panel.graph = graph;
+                    panel.last = last;
+                    panel.login = login;
                 }
                 cx.notify();
             })
@@ -128,7 +166,7 @@ impl Monaged {
     }
 
     /// Runs a git job in the background, shows it as busy, then refreshes.
-    fn git_job(&mut self, sub_id: i64, label: &str, job: impl FnOnce(String) -> anyhow::Result<String> + Send + 'static, cx: &mut Context<Self>) {
+    pub(crate) fn git_job(&mut self, sub_id: i64, label: &str, job: impl FnOnce(String) -> anyhow::Result<String> + Send + 'static, cx: &mut Context<Self>) {
         let Some(panel) = self.git_panels.get_mut(&sub_id) else { return };
         if panel.busy.is_some() {
             return;
@@ -160,6 +198,18 @@ impl Monaged {
     fn git_commit(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let Some(panel) = self.git_panels.get(&sub_id) else { return };
         let message = panel.message.read(cx).text().trim().to_string();
+        let paths: Vec<String> = panel.selected.iter().cloned().collect();
+        if panel.amend {
+            let Some(dir) = self.git_dir(sub_id, panel.target) else { return };
+            let input = panel.message.clone();
+            self.git_job(sub_id, "Amending…", move |distro| git_ops::amend(&distro, &dir, &message, &paths).map(|sha| format!("Amended the last commit ({sha})")), cx);
+            input.update(cx, |input, cx| input.clear(cx));
+            if let Some(panel) = self.git_panels.get_mut(&sub_id) {
+                panel.amend = false;
+                panel.selected.clear();
+            }
+            return;
+        }
         if message.is_empty() {
             self.toast(Tone::Warn, "Write a commit message first (or let Haiku suggest one).", cx);
             return;
@@ -172,8 +222,31 @@ impl Monaged {
         };
         let summary = message.lines().next().unwrap_or_default().to_string();
         let _ = self.store.log_event(sub_id, agent, "commit", &format!("Committed: {summary}"));
-        self.git_job(sub_id, "Committing…", move |distro| git_ops::commit(&distro, &dir, &message, &[]).map(|sha| format!("Committed {sha}")), cx);
+        self.git_job(sub_id, "Committing…", move |distro| git_ops::commit(&distro, &dir, &message, &paths).map(|sha| format!("Committed {sha}")), cx);
         input.update(cx, |input, cx| input.clear(cx));
+        if let Some(panel) = self.git_panels.get_mut(&sub_id) {
+            panel.selected.clear();
+        }
+    }
+
+    /// Takes back the last commit (not pushed yet); its changes stay.
+    fn git_undo_commit(&mut self, sub_id: i64, cx: &mut Context<Self>) {
+        let Some(panel) = self.git_panels.get(&sub_id) else { return };
+        let Some(dir) = self.git_dir(sub_id, panel.target) else { return };
+        let input = panel.message.clone();
+        let subject = panel.last.as_ref().map(|(_, s, _)| s.clone()).unwrap_or_default();
+        // The message comes back so you can commit again with it.
+        input.update(cx, |input, cx| input.set_text(subject, cx));
+        self.git_job(sub_id, "Undoing the commit…", move |distro| git_ops::undo_commit(&distro, &dir).map(|s| format!("Took back \"{s}\"; its changes are uncommitted again.")), cx);
+    }
+
+    fn toggle_git_file(&mut self, sub_id: i64, path: String, cx: &mut Context<Self>) {
+        if let Some(panel) = self.git_panels.get_mut(&sub_id)
+            && !panel.selected.remove(&path)
+        {
+            panel.selected.insert(path);
+        }
+        cx.notify();
     }
 
     /// Haiku reads the uncommitted diff and writes a commit message.
@@ -485,6 +558,8 @@ impl Monaged {
                         .child(ui::meta(format!("{} uncommitted file{}", files.len(), if files.len() == 1 { "" } else { "s" })))
                         .child(div().flex().flex_col().gap(px(1.)).children(files.iter().take(40).enumerate().map(|(i, f)| {
                             let file = f.clone();
+                            let ticked = panel.selected.contains(&f.path);
+                            let path = f.path.clone();
                             div()
                                 .id(("git-file", i))
                                 .flex()
@@ -492,6 +567,21 @@ impl Monaged {
                                 .gap(px(8.))
                                 .h(px(24.))
                                 .group("git-file")
+                                .cursor_pointer()
+                                .tooltip(tip("Tick files to commit only those"))
+                                .on_click(cx.listener(move |this, _, _, cx| this.toggle_git_file(sub_id, path.clone(), cx)))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .size(px(13.))
+                                        .rounded(px(3.))
+                                        .border_1()
+                                        .border_color(rgb(if ticked { theme::text_2() } else { theme::line_strong() }))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .children(ticked.then(|| icon_sized(Icon::Check, 10.).text_color(rgb(theme::text())))),
+                                )
                                 .child(div().w(px(52.)).flex_none().font_family(theme::MONO).text_size(px(10.5)).text_color(rgb(if f.label() == "conflict" { theme::red_text() } else { theme::text_3() })).child(f.label()))
                                 .child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(11.5)).child(f.path.clone()))
                                 .child(
@@ -503,6 +593,7 @@ impl Monaged {
                                         .tooltip(tip("Discard this file's changes"))
                                         .child(icon_sized(Icon::Trash, 13.).text_color(rgb(theme::text_3())))
                                         .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
                                             this.ask_confirm(crate::feedback::ConfirmAction::Discard(sub_id, file.clone()), window, cx)
                                         })),
                                 )
@@ -515,7 +606,14 @@ impl Monaged {
                                 .gap(px(6.))
                                 .child(match &busy {
                                     Some(label) => ui::busy_button("git-commit", Kind::Primary, label.clone()).into_any_element(),
-                                    None => ui::button("git-commit", Kind::Primary, Some(Icon::Commit), "Commit all").on_click(cx.listener(move |this, _, _, cx| this.git_commit(sub_id, cx))).into_any_element(),
+                                    None => ui::button("git-commit", Kind::Primary, Some(Icon::Commit), match (panel.amend, panel.selected.len()) {
+                                        (true, 0) => "Amend last commit".to_string(),
+                                        (true, n) => format!("Amend with {n} file{}", if n == 1 { "" } else { "s" }),
+                                        (false, 0) => "Commit all".to_string(),
+                                        (false, n) => format!("Commit {n} file{}", if n == 1 { "" } else { "s" }),
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| this.git_commit(sub_id, cx)))
+                                    .into_any_element(),
                                 })
                                 .when(self.store.setting("git:suggest").is_none_or(|v| v == "1"), |d| {
                                     d.child(ui::button("git-suggest", Kind::Secondary, None, "Suggest message").on_click(cx.listener(move |this, _, _, cx| this.suggest_commit_message(sub_id, cx))))
@@ -524,7 +622,35 @@ impl Monaged {
                                     let Some(dir) = this.git_panels.get(&sub_id).and_then(|p| this.git_dir(sub_id, p.target)) else { return };
                                     this.git_job(sub_id, "Stashing…", move |distro| git_ops::stash(&distro, &dir).map(|_| "Stashed your changes".to_string()), cx);
                                 }))),
-                        );
+                        )
+                        .when(matches!(&panel.last, Some((_, _, false))), |d| {
+                            let amend = panel.amend;
+                            d.child(ui::switch("git-amend", "Add to the last commit instead (it isn't pushed yet)", amend).on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(p) = this.git_panels.get_mut(&sub_id) {
+                                    p.amend = !amend;
+                                }
+                                cx.notify();
+                            })))
+                        });
+                }
+                if let Some((sha, subject, pushed)) = &panel.last {
+                    section = section.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .min_h(px(24.))
+                            .child(icon_sized(Icon::Commit, 12.).text_color(rgb(theme::text_4())))
+                            .child(div().flex_none().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::text_3())).child(sha.clone()))
+                            .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.)).text_color(rgb(theme::text_2())).child(subject.clone()))
+                            .when(!*pushed, |d| {
+                                d.child(
+                                    ui::button("git-undo-commit", Kind::Ghost, None, "Undo")
+                                        .tooltip(tip("Take back this commit; its changes become uncommitted again"))
+                                        .on_click(cx.listener(move |this, _, _, cx| this.git_undo_commit(sub_id, cx))),
+                                )
+                            }),
+                    );
                 }
                 if panel.stashes > 0 {
                     section = section.child(
@@ -561,6 +687,7 @@ impl Monaged {
                     let r = r.clone();
                     this.git_job(sub_id, "Fetching…", move |distro| git_ops::fetch(&distro, &r).map(|_| String::new()), cx);
                 }))))
+                .child(self.render_origin_signin(sub_id, project_id, &repo, panel, cx))
                 .children(panel.remote.iter().enumerate().map(|(i, (branch, counts))| {
                     let (b, r) = (branch.clone(), repo.clone());
                     let is_sub = *branch == sub.branch;
@@ -580,6 +707,17 @@ impl Monaged {
                                 let (b, r) = (b.clone(), r.clone());
                                 this.git_job(sub_id, "Pulling…", move |distro| git_ops::pull_ff(&distro, &r, &b).map(|sha| format!("{b} is now at {sha}")), cx);
                             })))
+                        })
+                        .when(matches!(counts, Some((ahead, behind)) if *ahead > 0 && *behind > 0), |d| {
+                            let (b, r) = (branch.clone(), repo.clone());
+                            d.child(
+                                ui::button(("git-pull-merge", i), Kind::Secondary, None, "Pull (merge)")
+                                    .tooltip(tip("Both sides moved: merge origin's commits into this branch. Nothing gets rewritten; a conflict changes nothing."))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let (b, r) = (b.clone(), r.clone());
+                                        this.git_job(sub_id, "Merging origin…", move |distro| git_ops::pull_merge(&distro, &r, &b).map(|sha| format!("Merged origin/{b} into {b} ({sha})")), cx);
+                                    })),
+                            )
                         })
                         .when(is_sub && (counts.is_none() || matches!(counts, Some((ahead, _)) if *ahead > 0)), |d| {
                             d.child(ui::button(("git-push", i), Kind::Secondary, Some(Icon::Push), "Push").on_click(cx.listener(move |this, _, _, cx| this.push_sub(sub_id, false, cx))))

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, SharedString, div, prelude::*, px, rgb};
 
 use crate::agent::Tone;
 use crate::git::{self, BranchState, Cleanup, MergeOutcome};
@@ -435,8 +435,9 @@ impl Monaged {
                     Ok(Some(url)) => (Tone::Info, format!("Opened: {url}")),
                     Ok(None) => (Tone::Info, format!("Pushed {} to origin.", sub.branch)),
                     Err(err) => {
-                        let hint = if format!("{err:#}").contains("could not read") || format!("{err:#}").contains("Authentication") {
-                            " Turn on \"Use my Windows Git credentials\" in Settings."
+                        let text = format!("{err:#}");
+                        let hint = if crate::git_auth::looks_like_auth_failure(&text) {
+                            " Sign in under Settings → Git accounts (or test the account there)."
                         } else {
                             ""
                         };
@@ -526,39 +527,6 @@ impl Monaged {
                     text.push_str(&format!(" Problems: {}", failed.join("; ")));
                 }
                 this.set_merge_message(sub_id, if failed.is_empty() { Tone::Info } else { Tone::Warn }, text);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub(crate) fn enable_windows_credentials(&mut self, cx: &mut Context<Self>) {
-        let distro = self.config.distro.clone();
-        cx.spawn(async move |view, cx| {
-            let d = distro.clone();
-            let result = cx.background_spawn(async move { git::use_windows_credentials(&d) }).await;
-            view.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.creds_ok = Some(true);
-                        this.toast(Tone::Info, "Done: git in WSL now uses your Windows logins (Git Credential Manager).", cx);
-                    }
-                    Err(err) => this.toast_error(format!("{err:#}"), cx),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub(crate) fn check_credentials(&mut self, cx: &mut Context<Self>) {
-        let distro = self.config.distro.clone();
-        cx.spawn(async move |view, cx| {
-            let ok = cx.background_spawn(async move { git::uses_windows_credentials(&distro) }).await;
-            view.update(cx, |this, cx| {
-                this.creds_ok = Some(ok);
                 cx.notify();
             })
             .ok();
@@ -669,7 +637,10 @@ impl Monaged {
                 r.host,
                 r.slug,
                 match r.provider {
-                    Some(p) => format!(" · {}s via {}", p.request_name(), if p == hosting::Provider::GitHub { "gh" } else { "glab" }),
+                    Some(p) => match self.git_auth.accounts.iter().find(|a| a.host == crate::git_auth::normalize_host(&r.host) && a.default) {
+                        Some(a) => format!(" · {}s as {}", p.request_name(), a.login),
+                        None => format!(" · {}s via {}", p.request_name(), if p == hosting::Provider::GitHub { "gh" } else { "glab" }),
+                    },
                     None => " · push only".into(),
                 }
             ),
@@ -856,26 +827,5 @@ impl Monaged {
             col = col.child(div().px(px(16.)).py(px(12.)).text_size(px(12.5)).text_color(rgb(tone_color(*tone))).child(text.clone()));
         }
         col.into_any_element()
-    }
-
-    pub(crate) fn render_credentials_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let status = match self.creds_ok {
-            Some(true) => "On: git in WSL uses your Windows logins (Git Credential Manager).",
-            Some(false) => "Off: git in WSL has no credentials, so pushing to GitLab or GitHub and cloning private repos will fail.",
-            None => "Checking…",
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Git credentials in WSL"))
-            .child(div().text_size(px(13.)).text_color(rgb(theme::text_3())).child(status))
-            .when(self.creds_ok == Some(false), |d| {
-                d.child(div().flex().child(
-                    ui::button("use-gcm", Kind::Secondary, Some(Icon::Key), "Use my Windows Git credentials in WSL")
-                        .on_click(cx.listener(|this, _, _, cx| this.enable_windows_credentials(cx))),
-                ))
-            })
-            .into_any_element()
     }
 }

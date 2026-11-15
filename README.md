@@ -35,7 +35,8 @@ Options: `--distro Ubuntu`, and `--agent <path to claude-agent-acp in WSL>`.
 - **Spending cap:** right-click a subproject → Set a spending cap; its agents pause when they reach it.
 - **Environment** (Project settings): variables per environment (Development, Test…), encrypted with Windows DPAPI. The Run tab and project MCP servers (`${NAME}`) get them as environment variables; agents only get names, and run commands with them through `run_with_env` after you approve (output masked). Secret values are masked everywhere Monaged shows text, flagged in diffs, and block merges and pushes.
 - **Questions:** when an agent asks something, a form appears in its conversation; it waits for your answer.
-- **The inspector** has Pipeline, Board, Merge, Git, Run and Timeline tabs. The Git tab commits, syncs, resolves conflicts and shows the history.
+- **The inspector** has Pipeline, Board, Merge, Git, Run and Timeline tabs. The Git tab commits (all files or the ones you tick, or amends), takes back a commit that isn't pushed, syncs (pull, or a merge when both sides moved), resolves conflicts and shows the history. Its Origin section says who the project signs in as, switches accounts, tests the connection, and flips origin between HTTPS and SSH.
+- **Git accounts** (Settings → Git accounts): sign in to GitHub, GitLab (also Enterprise and self-hosted) or any other host. In the browser (you approve a code on the host's site), with a token (the button opens the token page with the right permissions ticked), or by importing a login the GitHub CLI, the GitLab CLI or Git Credential Manager already has. Monaged checks it with the host's API, keeps the token in Windows Credential Manager, and becomes git's credential helper in WSL for that host (`monaged.exe --git-credential`), so Git Credential Manager isn't needed. If you do want it for other hosts, Monaged finds it and sets it up. Several accounts per host: one is the default, a project can sign in as another. Pull and merge requests and CI status then go through the REST API, so `gh` and `glab` are optional. Tokens are masked like secrets and block pushes. SSH keys in WSL: create one, add it to your account in one click, test, trust a host.
 - **Installing:** run `scripts/release.ps1` to build `dist/Monaged-Setup-<version>.exe`; running that installs Monaged for you (no admin). With `-Publish` it also makes the GitHub release that installed copies update from.
 - **Messages:** things that happened appear bottom right and fade (errors stay); things that are true right now (offline, not logged in, paused) sit in a bar at the top until fixed.
 - **Themes** (Settings → Appearance): Carbon, Graphite, Clay, Paper, or follow Windows.
@@ -71,7 +72,8 @@ Options: `--distro Ubuntu`, and `--agent <path to claude-agent-acp in WSL>`.
 11. **Settings** (sidebar footer):
    - paste your Anthropic API key so the Haiku work is paid from your API credit; it's stored in Windows Credential Manager;
    - without a key, Monaged can use your Max plan through the Claude CLI instead;
-   - shows the Haiku spend so far.
+   - shows the Haiku spend so far;
+   - Git accounts: your sign-ins for GitHub, GitLab and other hosts, Git Credential Manager (optional) and SSH keys.
 
 Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a form).
 
@@ -79,7 +81,8 @@ Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a 
 
 - Adapter in Ubuntu: `~/.local/share/claude-agent-acp/0.107.0`, with `current` symlinked to it. It bundles the Claude CLI.
 - Log in once: `wsl -d Ubuntu -- bash -lc "~/.local/share/claude-agent-acp/current/claude"`, then `/login`.
-- Git identity inside WSL: copied from Windows (Settings → "Copy my Windows git identity into WSL").
+- Git identity inside WSL: copied from Windows (Settings → "Copy my Windows git identity into WSL"), or from an account (Settings → Git accounts → Commit as this account).
+- Git logins: Settings → Git accounts. Browser sign-in needs an OAuth app's client ID (no secret): build with `MONAGED_GITHUB_CLIENT_ID` / `MONAGED_GITLAB_CLIENT_ID` set to bake them in, or paste one per host in Settings (GitHub: tick "Enable Device Flow"; GitLab: a non-confidential app with the `api`, `read_user` and `write_repository` scopes). Tokens work without any of that.
 - pytest is **not** installed in WSL, so Python projects' tests can't run there (`sudo apt install python3-pytest` fixes that).
 - Start Monaged normally (Start menu, Explorer or `cargo run`). A copy started from inside a sandboxed tool shell may not write to the real `%APPDATA%\Monaged\monaged.db`.
 
@@ -98,7 +101,9 @@ Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a 
 | `src/timeline.rs` | The Timeline tab |
 | `src/pipeline_edit.rs` | Editing the plan, running a stage or builder again |
 | `src/queue_ui.rs` | The merge queue with CI status |
-| `src/git_ops.rs`, `src/git_ui.rs` | Git: status, commit, stash, sync, conflicts, history; the Git tab and its settings |
+| `src/git_ops.rs`, `src/git_ui.rs` | Git: status, commit (selected files, amend, undo), stash, sync (fast-forward or merge), conflicts, history; the Git tab and its settings |
+| `src/git_auth.rs` | Signing git in: accounts, tokens in Credential Manager, the browser sign-in (OAuth device flow, with renewal), importing gh/glab/GCM logins, `monaged.exe --git-credential` as git's helper, Git Credential Manager setup, SSH keys, per-project accounts (unit-tested parts) |
+| `src/accounts_ui.rs` | Settings → Git accounts, and the Git tab's "signs in with" row |
 | `src/syntax.rs` | Syntax colors for code blocks and diffs (a small tokenizer per language family) |
 | `src/checkpoints.rs` | Checkpoints per turn (git objects under `refs/monaged/`), rollback with undo, the turn-by-turn replay |
 | `src/project_ui.rs` | Project settings: MCP servers, knowledge files, run and test commands |
@@ -126,7 +131,7 @@ Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a 
 | `src/usage_ui.rs` | Recording turn costs, the meter, pausing and resuming, model switching, plan estimates, and the usage and model settings |
 | `src/coord_ui.rs` | The board, claims, the librarian, routing `ask` between agents, board digests, and the Board tab |
 | `src/merge_ui.rs` | Branch chain and rules, merging, promotions, push, merge/pull requests, cleanup, auto-merge |
-| `src/hosting.rs` | GitHub/GitLab remote parsing and the `gh`/`glab` calls (unit-tested parsing) |
+| `src/hosting.rs` | GitHub/GitLab remote parsing; pull/merge requests and CI through the REST API with your account, or the `gh`/`glab` CLIs (unit-tested parsing) |
 | `src/pipeline.rs` | Roles, stages, briefs, `monaged-*` block parsing, and the gate rules (unit-tested) |
 | `src/pipeline_ui.rs` | Running the pipeline after each turn, gate, plan and question cards, the pipeline strip |
 | `src/review_ui.rs` | The Changes tab, the summary and confidence flows, Markdown rendering, Settings |
@@ -134,7 +139,7 @@ Keys: **Enter** sends (or submits a form), **Esc** stops the agent (or closes a 
 | `src/llm.rs` | Claude Haiku 5.5 calls: raw HTTP with your API key, or `claude -p --json-schema` on the Max plan |
 | `src/diff.rs` | Collects and parses `git diff` for an agent's worktree |
 | `src/markdown.rs` | Turns Markdown into blocks (via pulldown-cmark) |
-| `src/secrets.rs` | API key storage in Windows Credential Manager |
+| `src/secrets.rs` | Anthropic API key storage in Windows Credential Manager |
 | `src/tests.rs` | Unit tests for diff parsing, Markdown, scoring, gates, branch rules, coordination and usage (`cargo test`) |
 | `src/acp.rs` | One `claude-agent-acp` process through `wsl.exe`, newline-delimited JSON-RPC |
 | `src/git.rs` | Repos, branches and worktrees inside WSL |

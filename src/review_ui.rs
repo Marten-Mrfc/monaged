@@ -13,7 +13,7 @@ use crate::markdown::{self, Block, Inline, Style};
 use crate::review::{self, TurnInfo};
 use crate::{Form, Monaged, dots, secrets, theme, tone_color, ui};
 
-const SETTINGS_SECTIONS: [(&str, Icon); 12] = [
+const SETTINGS_SECTIONS: [(&str, Icon); 13] = [
     ("Appearance", Icon::Eye),
     ("Agents", Icon::Agent),
     ("Message box", Icon::Send),
@@ -23,6 +23,7 @@ const SETTINGS_SECTIONS: [(&str, Icon); 12] = [
     ("API key", Icon::Key),
     ("Reviews", Icon::Shield),
     ("Git", Icon::Branch),
+    ("Git accounts", Icon::User),
     ("Notifications", Icon::Alert),
     ("General", Icon::Sliders),
     ("Updates", Icon::ArrowDown),
@@ -545,15 +546,21 @@ impl Monaged {
                                 .child(ui::mono(format!("Haiku so far: ${api_spend:.4} from API credit · ${max_spend:.4} worth of Max usage"))),
                         ))
                         .child(column(
-                            section("Git", Some("Builders commit their work and Monaged pushes branches, so git inside WSL needs your identity and, for GitHub or GitLab, your logins."))
+                            section("Git", Some("Builders commit their work and Monaged pushes branches, so git inside WSL needs your identity."))
                                 .child(self.render_git_settings(cx))
-                                .child(self.render_credentials_section(cx))
                                 .child(
                                     div().flex().child(
                                         ui::button("settings-copy-identity", ui::Kind::Secondary, Some(Icon::User), "Copy my Windows git identity into WSL")
                                             .on_click(cx.listener(|this, _, _, cx| this.copy_git_identity(cx))),
                                     ),
                                 ),
+                        ))
+                        .child(column(
+                            section(
+                                "Git accounts",
+                                Some("Sign in once and git in WSL can clone, pull and push (Monaged's and yours in a terminal), and Monaged opens pull and merge requests without gh or glab. Tokens stay in Windows Credential Manager; Git Credential Manager is optional."),
+                            )
+                            .child(self.render_git_accounts(cx)),
                         ))
                         .child(column(section("Notifications", None).child(self.render_notification_settings(cx))))
                         .child(column(section("General", Some("Density, where Monaged opens, and where it keeps its data.")).child(self.render_general_settings(cx))))

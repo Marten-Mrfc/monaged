@@ -21,7 +21,7 @@ pub(crate) enum HealthFix {
     Reconnect,
     CopyLogin,
     CopyIdentity,
-    EnableGcm,
+    GitAccounts,
     Settings,
 }
 
@@ -67,7 +67,8 @@ a={agent}; a="${{a/#\~/$HOME}}"
 if [ -x "$a" ]; then echo "adapter: $(readlink -f "$a" | sed 's#.*/claude-agent-acp/\([^/]*\)/.*#\1#')"; else echo "adapter: missing"; fi
 echo "gitname: $(git config --global user.name)"
 echo "gitemail: $(git config --global user.email)"
-echo "gcm: $(git config --global credential.helper)"
+echo "gcm: $(git config --global --get-all credential.helper | tail -n 1)"
+echo "monaged: $(git config --global --get-regexp '^credential\..*\.helper$' 2>/dev/null | grep -c -- '--git-credential')"
 echo "disk: $(df -h --output=avail,pcent "$HOME" | tail -1)"
 total=0
 for d in {roots}; do d="${{d/#\~/$HOME}}"; [ -d "$d" ] && total=$((total + $(du -sk "$d" 2>/dev/null | cut -f1))); done
@@ -186,15 +187,19 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                     HealthItem { title: "Git identity", state: Check::Ok, detail: "Set (name and email).".into(), fix: None }
                 });
                 let gcm = get("gcm").contains("git-credential-manager");
+                let monaged = get("monaged").parse::<usize>().unwrap_or(0);
+                let accounts = self.git_auth.accounts.len();
+                let ok = monaged > 0 || gcm;
                 items.push(HealthItem {
                     title: "Git logins",
-                    state: if gcm { Check::Ok } else { Check::Warn },
-                    detail: if gcm {
-                        "Git in WSL uses Windows' Git Credential Manager for push and clone.".into()
-                    } else {
-                        "Git in WSL has its own logins; pushes may ask for a password.".into()
+                    state: if ok { Check::Ok } else { Check::Warn },
+                    detail: match (monaged > 0, gcm) {
+                        (true, true) => format!("{accounts} Monaged account(s) sign git in to {monaged} host(s); Git Credential Manager covers the rest."),
+                        (true, false) => format!("{accounts} Monaged account(s) sign git in to {monaged} host(s)."),
+                        (false, true) => "Git in WSL uses Windows' Git Credential Manager for push and clone.".into(),
+                        (false, false) => "Git in WSL can't sign in anywhere, so pushes and private clones fail.".into(),
                     },
-                    fix: (!gcm).then_some(("Use Windows' logins", HealthFix::EnableGcm)),
+                    fix: (!ok).then_some(("Sign in", HealthFix::GitAccounts)),
                 });
                 let disk = get("disk");
                 let pct: u32 = disk.split_whitespace().nth(1).and_then(|p| p.trim_end_matches('%').parse().ok()).unwrap_or(0);
@@ -223,15 +228,17 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
             detail: if *zed { "The zed command works, so Open in Zed does too.".into() } else { "The zed command isn't on PATH; Open in Zed won't work.".into() },
             fix: None,
         });
+        let api_accounts = self.git_auth.accounts.iter().filter(|a| a.provider.is_some()).count();
         items.push(HealthItem {
             title: "GitHub and GitLab",
-            state: if *gh || *glab { Check::Ok } else { Check::Warn },
+            state: if *gh || *glab || api_accounts > 0 { Check::Ok } else { Check::Warn },
             detail: format!(
-                "GitHub CLI {} · GitLab CLI {}",
+                "{}GitHub CLI {} · GitLab CLI {}",
+                if api_accounts > 0 { format!("{api_accounts} account(s) for pull and merge requests · ") } else { String::new() },
                 if *gh { "logged in" } else { "not logged in" },
                 if *glab { "logged in" } else { "not logged in" }
             ),
-            fix: None,
+            fix: (!*gh && !*glab && api_accounts == 0).then_some(("Sign in", HealthFix::GitAccounts)),
         });
         items
     }
@@ -244,7 +251,7 @@ echo "mem: $(free -m | awk '/Mem:/ {{print $2" "$7}}')"
                 self.toast(Tone::Info, "Copied. Paste it in a terminal, then type /login.", cx);
             }
             HealthFix::CopyIdentity => self.copy_git_identity(cx),
-            HealthFix::EnableGcm => self.enable_windows_credentials(cx),
+            HealthFix::GitAccounts => self.open_settings(cx),
             HealthFix::Settings => self.open_settings(cx),
         }
     }

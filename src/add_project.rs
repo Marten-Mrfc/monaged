@@ -81,7 +81,7 @@ impl Fix {
             Fix::UseExisting(_) => "Use that folder".into(),
             Fix::RemoveEmpty(_) => "Remove the empty folder".into(),
             Fix::CloneIntoWsl(_) => "Clone it into ~/code instead".into(),
-            Fix::GitSettings => "Open Settings → Git".into(),
+            Fix::GitSettings => "Sign in (Settings → Git accounts)".into(),
             Fix::Retry => "Try again".into(),
         }
     }
@@ -268,10 +268,11 @@ fn check(distro: &str, plan: &Plan) -> Vec<Note> {
                     "cmd=\"$(git config --get core.sshCommand)\"\n\
                      echo \"SSH:$(timeout 12 ${{cmd:-ssh}} -o BatchMode=yes -o ConnectTimeout=8 -T {target} 2>&1 | tr '\\n' ' ')\"\n\
                      ls ~/.ssh/id_* >/dev/null 2>&1 && echo KEY:yes\n\
-                     echo \"HELPER:$(git config --get credential.helper)\"\n",
-                    target = quote(&format!("{user}@{host}"))
+                     echo \"HELPER:$(git config --get-urlmatch credential.helper {https})\"\n",
+                    target = quote(&format!("{user}@{host}")),
+                    https = quote(&format!("https://{host}/")),
                 )),
-                Remote::Https { .. } => script.push_str("echo \"HELPER:$(git config --get credential.helper)\"\n"),
+                Remote::Https { host } => script.push_str(&format!("echo \"HELPER:$(git config --get-urlmatch credential.helper {})\"\n", quote(&format!("https://{host}/")))),
                 Remote::Local(path) => script.push_str(&format!("p={}\n[ -d \"$p/.git\" ] || [ -f \"$p/HEAD\" ] && echo LOCAL:repo || echo LOCAL:missing\n", shell_path(path))),
             }
             let out = crate::wsl::run(distro, &script).unwrap_or_default();
@@ -283,7 +284,13 @@ fn check(distro: &str, plan: &Plan) -> Vec<Note> {
                     let has_key = get("KEY:").is_some();
                     let helper = get("HELPER:").unwrap_or_default();
                     let https = https_for(&plan.url);
-                    let via = if helper.contains("manager") { "Git Credential Manager" } else { "your saved git login" };
+                    let via = if helper.contains("--git-credential") {
+                        "your Monaged account"
+                    } else if helper.contains("manager") {
+                        "Git Credential Manager"
+                    } else {
+                        "your saved git login"
+                    };
                     if lower.contains("successfully authenticated") || lower.contains("welcome to") || lower.contains("logged in as") || lower.starts_with("hi ") {
                         notes.push(Note { tone: NoteTone::Good, text: format!("WSL can sign in to {host} over SSH."), fixes: Vec::new() });
                     } else if lower.contains("host key verification failed") {
@@ -309,7 +316,9 @@ fn check(distro: &str, plan: &Plan) -> Vec<Note> {
                 }
                 Remote::Https { host } => {
                     let helper = get("HELPER:").unwrap_or_default();
-                    if helper.contains("manager") {
+                    if helper.contains("--git-credential") {
+                        notes.push(Note { tone: NoteTone::Good, text: format!("Signs in to {host} with your Monaged account (Settings → Git accounts)."), fixes: Vec::new() });
+                    } else if helper.contains("manager") {
                         notes.push(Note {
                             tone: NoteTone::Good,
                             text: format!("Signs in to {host} with Git Credential Manager; a Windows sign-in window may appear the first time."),
@@ -320,7 +329,7 @@ fn check(distro: &str, plan: &Plan) -> Vec<Note> {
                     } else {
                         notes.push(Note {
                             tone: NoteTone::Warn,
-                            text: "Git in WSL has no saved logins, so a private repo won't clone. Settings → Git connects your Windows logins.".into(),
+                            text: format!("Git in WSL has no login for {host}, so a private repo won't clone. Sign in under Settings → Git accounts."),
                             fixes: vec![Fix::GitSettings],
                         });
                     }
@@ -471,11 +480,15 @@ pub(crate) fn explain(output: &str, plan: &Plan) -> Failure {
             vec![Fix::TrustHost(host.clone())],
         )
     } else if lower.contains("permission denied (publickey") {
-        (format!("No SSH key that {host} accepts"), "WSL has no SSH key registered with this host. The HTTPS address signs in with Git Credential Manager instead.".into(), Vec::new())
+        (
+            format!("No SSH key that {host} accepts"),
+            "WSL has no SSH key registered with this host. Settings → Git accounts can make one and add it to your account, or the HTTPS address signs in with your account instead.".into(),
+            vec![Fix::GitSettings],
+        )
     } else if lower.contains("could not read username") || lower.contains("authentication failed") || lower.contains("terminal prompts disabled") {
         (
             format!("Couldn't sign in to {host}"),
-            "Git in WSL had no login for this host. Settings → Git connects your Windows logins (Git Credential Manager).".into(),
+            "Git in WSL had no login for this host, or the host turned it down. Sign in under Settings → Git accounts (in the browser or with a token), then try again.".into(),
             vec![Fix::GitSettings],
         )
     } else if lower.contains("repository not found") || lower.contains("not found") || lower.contains("does not appear to be a git repository") || lower.contains("does not exist") {
@@ -779,7 +792,7 @@ impl Monaged {
                 })
                 .detach();
             }
-            Fix::GitSettings => self.open_settings_at("Git", window, cx),
+            Fix::GitSettings => self.open_settings_at("Git accounts", window, cx),
             Fix::Retry => self.submit_add_project(cx),
         }
         cx.notify();

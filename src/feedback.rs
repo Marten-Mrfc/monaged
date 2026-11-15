@@ -72,6 +72,8 @@ pub(crate) enum ConfirmAction {
     /// (agent, your message number): restore the files to before it.
     Rollback(i64, i64),
     RerunBuilder(i64, String),
+    /// Sign out of a git account ("host/login").
+    SignOutGit(String),
 }
 
 pub(crate) struct Confirm {
@@ -314,6 +316,12 @@ impl Monaged {
                     true,
                 )
             }
+            ConfirmAction::SignOutGit(key) => (
+                format!("Sign out of {key}?"),
+                "Its token is deleted from Windows Credential Manager, and git in WSL stops signing in with it (Git Credential Manager takes over for that host if it's on). Projects that sign in as this account fall back to the host's default account.".into(),
+                "Sign out".into(),
+                true,
+            ),
             ConfirmAction::RemoveApiKey => (
                 "Remove the API key?".into(),
                 "It's deleted from Windows Credential Manager. Summaries and reviews then use the Max plan, if that's allowed in Settings, or stop.".into(),
@@ -390,6 +398,7 @@ impl Monaged {
                 self.toast(Tone::Info, "Pipeline stopped. The agents are still there.", cx);
             }
             ConfirmAction::RemoveApiKey => self.remove_api_key(cx),
+            ConfirmAction::SignOutGit(key) => self.sign_out_git(key, cx),
             ConfirmAction::CleanupWorktrees(sub_id) => self.cleanup_worktrees(sub_id, cx),
             ConfirmAction::Promote(project_id, from, to) => self.promote_confirmed(project_id, from, to, cx),
             ConfirmAction::Rerun(sub_id, stage) => self.rerun_stage(sub_id, stage, cx),
