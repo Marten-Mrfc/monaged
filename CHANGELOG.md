@@ -14,11 +14,17 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 - **Merges know about origin**: Monaged fetches first, catches the target up when origin moved on, and stops (instead of making a branch that can't be pushed) when the target went its own way both here and on origin.
 - **Fetching is on by default** (every 15 minutes), and open requests and running CI are re-checked about once a minute while you're in the project.
-- With known conflicts, "Resolve conflicts with an agent" comes first in the Merge tab.
+- **The Merge tab, redone**: one line says where the work stands, one button does the next thing (merge, or resolve conflicts), and the other actions are a list that says what each would act on ("6 new commits", "1 to push", "as a draft"). The pull or merge request shows its CI and why the host is waiting; the rules sit under **How it merges**.
+- **Rules and the merge method open a menu** with every choice explained, instead of changing each time you click.
+- **Branches against origin**: the project view says under each branch whether it's in sync, or how many commits there are to push or pull, and pushes or pulls it in one click. The Git tab says "5 to push" instead of "↑5 ↓0" and can push any branch that's ahead (it could only push the feature branch).
+- The project view's refresh button fetches from origin; the Git tab says how often fetching happens.
+- The merge queue folds subprojects with nothing new into one line.
 
 ### Fixed
 
 - The merge queue counted a feature as ready at 3/5; it now uses the quality bar.
+- The Git tab showed origin's address as "…", and branch labels in its history ran over the times; `origin/x` next to `x` is one label now.
+- Long lines in a subproject's Recent list were cut off without an ellipsis.
 
 ## [0.7.0] - 2026-11-15
 

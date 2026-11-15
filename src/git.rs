@@ -110,11 +110,17 @@ pub struct BranchState {
     /// branch -> path of the worktree it is checked out in.
     pub checked_out: Vec<(String, String)>,
     pub remote_url: Option<String>,
+    /// Branches origin has (as of the last fetch), without the `origin/`.
+    pub on_origin: Vec<String>,
 }
 
 impl BranchState {
     pub fn has(&self, branch: &str) -> bool {
         self.branches.iter().any(|b| b == branch)
+    }
+
+    pub fn on_origin(&self, branch: &str) -> bool {
+        self.on_origin.iter().any(|b| b == branch)
     }
 }
 
@@ -125,7 +131,8 @@ pub fn branch_state(distro: &str, repo: &str) -> Result<BranchState> {
             "cd {repo} || exit 1\n\
              echo MONAGED_BRANCHES; git for-each-ref --format='%(refname:short)' refs/heads\n\
              echo MONAGED_WORKTREES; git worktree list --porcelain | awk '/^worktree /{{p=substr($0,10)}} $1==\"branch\"{{sub(\"refs/heads/\",\"\",$2); print $2\"\\t\"p}}'\n\
-             echo MONAGED_REMOTE; git remote get-url origin 2>/dev/null || true",
+             echo MONAGED_REMOTE; git remote get-url origin 2>/dev/null || true\n\
+             echo MONAGED_ORIGIN; git for-each-ref --format='%(refname:lstrip=3)' refs/remotes/origin",
             repo = quote(repo)
         ),
     )?;
@@ -133,7 +140,7 @@ pub fn branch_state(distro: &str, repo: &str) -> Result<BranchState> {
     let mut section = "";
     for line in out.lines() {
         match line.trim() {
-            "MONAGED_BRANCHES" | "MONAGED_WORKTREES" | "MONAGED_REMOTE" => section = line.trim(),
+            "MONAGED_BRANCHES" | "MONAGED_WORKTREES" | "MONAGED_REMOTE" | "MONAGED_ORIGIN" => section = line.trim(),
             "" => {}
             value => match section {
                 "MONAGED_BRANCHES" => state.branches.push(value.to_string()),
@@ -143,6 +150,7 @@ pub fn branch_state(distro: &str, repo: &str) -> Result<BranchState> {
                     }
                 }
                 "MONAGED_REMOTE" => state.remote_url = Some(value.to_string()),
+                "MONAGED_ORIGIN" if value != "HEAD" => state.on_origin.push(value.to_string()),
                 _ => {}
             },
         }

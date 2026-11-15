@@ -14,7 +14,7 @@
 //!   and switching between HTTPS and SSH.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{AnyElement, Context, Entity, SharedString, div, prelude::*, px, rgb};
 
@@ -486,25 +486,12 @@ impl Monaged {
         if minutes == 0 {
             return;
         }
-        let projects: Vec<(i64, String)> = self.projects.iter().map(|p| (p.id, p.path.clone())).collect();
-        for (id, path) in projects {
+        let projects: Vec<i64> = self.projects.iter().map(|p| p.id).collect();
+        for id in projects {
             if self.fetched.get(&id).is_some_and(|at| at.elapsed() < Duration::from_secs(minutes * 60)) {
                 continue;
             }
-            self.fetched.insert(id, Instant::now());
-            let distro = self.config.distro.clone();
-            cx.spawn(async move |view, cx| {
-                let _ = cx.background_spawn(async move { git_ops::fetch(&distro, &path) }).await;
-                view.update(cx, |this, cx| {
-                    let subs: Vec<i64> = this.git_panels.keys().copied().collect();
-                    for sub in subs {
-                        this.refresh_git(sub, cx);
-                    }
-                    this.refresh_branches(id, cx);
-                })
-                .ok();
-            })
-            .detach();
+            self.fetch_project(id, true, cx);
         }
     }
 
@@ -687,32 +674,39 @@ impl Monaged {
         if !has_origin {
             sync = sync.child(ui::meta("This project has no origin remote."));
         } else {
-            let r = repo.clone();
+            let autofetch: u64 = self.store.setting("git:autofetch").and_then(|v| v.parse().ok()).unwrap_or(AUTOFETCH_DEFAULT);
+            let loading = self.branch_info.get(&project_id).is_some_and(|i| i.loading);
             sync = sync
-                .child(div().flex().items_center().gap(px(8.)).child(div().flex_1().child(ui::meta(match self.fetched.get(&project_id) {
-                    Some(at) => format!("Fetched {} ago", humanize(at.elapsed())),
-                    None => "Not fetched in this session".to_string(),
-                })))
-                .child(ui::button("git-fetch", Kind::Secondary, Some(Icon::Refresh), "Fetch").on_click(cx.listener(move |this, _, _, cx| {
-                    this.fetched.insert(project_id, Instant::now());
-                    let r = r.clone();
-                    this.git_job(sub_id, "Fetching…", move |distro| git_ops::fetch(&distro, &r).map(|_| String::new()), cx);
-                }))))
-                .child(self.render_origin_signin(sub_id, project_id, &repo, panel, cx))
-                .children(panel.remote.iter().enumerate().map(|(i, (branch, counts))| {
-                    let (b, r) = (branch.clone(), repo.clone());
-                    let is_sub = *branch == sub.branch;
+                .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .h(px(26.))
+                        .child(div().flex_1().min_w(px(0.)).child(ui::meta(match (self.fetched.get(&project_id), autofetch) {
+                            (Some(at), 0) => format!("Fetched {} ago", humanize(at.elapsed())),
+                            (Some(at), m) => format!("Fetched {} ago · every {m} min", humanize(at.elapsed())),
+                            (None, _) => "Not fetched yet".to_string(),
+                        })))
+                        .child(if loading {
+                            ui::busy_button("git-fetch", Kind::Secondary, "Fetching").into_any_element()
+                        } else {
+                            ui::button("git-fetch", Kind::Secondary, Some(Icon::Refresh), "Fetch")
+                                .on_click(cx.listener(move |this, _, _, cx| this.fetch_project(project_id, false, cx)))
+                                .into_any_element()
+                        }),
+                )
+                .child(self.render_origin_signin(sub_id, project_id, &repo, panel, cx))
+                .children(panel.remote.iter().enumerate().map(|(i, (branch, counts))| {
+                    let (b, r) = (branch.clone(), repo.clone());
+                    let is_sub = *branch == sub.branch;
+                    let can_push = matches!(counts, None | Some((1.., 0)));
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .h(px(28.))
                         .child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(11.5)).child(branch.clone()))
-                        .child(ui::mono(match counts {
-                            None => "not on origin".to_string(),
-                            Some((0, 0)) => "in sync".to_string(),
-                            Some((a, b)) => format!("↑{a} ↓{b}"),
-                        }))
+                        .child(ui::mono(crate::merge_ui::sync_words(*counts)))
                         .when(matches!(counts, Some((0, behind)) if *behind > 0), |d| {
                             d.child(ui::button(("git-pull", i), Kind::Secondary, None, "Pull").on_click(cx.listener(move |this, _, _, cx| {
                                 let (b, r) = (b.clone(), r.clone());
@@ -730,8 +724,15 @@ impl Monaged {
                                     })),
                             )
                         })
-                        .when(is_sub && (counts.is_none() || matches!(counts, Some((ahead, _)) if *ahead > 0)), |d| {
-                            d.child(ui::button(("git-push", i), Kind::Secondary, Some(Icon::Push), "Push").on_click(cx.listener(move |this, _, _, cx| this.push_sub(sub_id, false, cx))))
+                        .when(can_push, |d| {
+                            let b = branch.clone();
+                            d.child(ui::button(("git-push", i), Kind::Secondary, Some(Icon::Push), "Push").on_click(cx.listener(move |this, _, _, cx| {
+                                if is_sub {
+                                    this.push_sub(sub_id, false, cx)
+                                } else {
+                                    this.push_named_branch(project_id, b.clone(), cx)
+                                }
+                            })))
                         })
                 }));
         }
@@ -818,21 +819,77 @@ fn render_graph_line(i: usize, line: &GraphLine, project_id: i64, cx: &mut Conte
             div()
                 .flex_1()
                 .min_w(px(0.))
+                .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .children(refs.iter().take(2).map(|r| {
-                    div().flex_none().max_w(px(110.)).truncate().px(px(4.)).rounded(px(3.)).border_1().border_color(rgb(theme::line_strong())).font_family(theme::MONO).text_size(px(10.)).text_color(rgb(theme::text_2())).child(r.clone())
+                .children(short_refs(&refs).into_iter().take(2).map(|r| {
+                    div()
+                        .flex_shrink()
+                        .min_w(px(24.))
+                        .max_w(px(120.))
+                        .truncate()
+                        .px(px(4.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(rgb(theme::line_strong()))
+                        .font_family(theme::MONO)
+                        .text_size(px(10.))
+                        .text_color(rgb(theme::text_2()))
+                        .child(r)
                 }))
-                .child(div().min_w(px(0.)).truncate().text_size(px(12.)).text_color(rgb(theme::text_2())).child(subject)),
+                .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.)).text_color(rgb(theme::text_2())).child(subject)),
         )
-        .child(div().flex_none().text_size(px(10.5)).text_color(rgb(theme::text_4())).child(when.replace(" ago", "")))
+        .child(div().flex_none().pl(px(4.)).text_size(px(10.5)).text_color(rgb(theme::text_4())).child(short_when(&when)))
         .tooltip(crate::session_ui::tip_static(format!("{author} · {when} · click for the diff")))
         .on_click(cx.listener(move |this, _, _, cx| this.open_commit(project_id, sha.clone(), cx)))
         .into_any_element()
 }
 
-fn humanize(d: Duration) -> String {
+/// A commit's branch labels, short: `origin/x` next to `x` is one label
+/// ("x", in sync), `HEAD -> x` is "x", and tags lose their prefix.
+pub(crate) fn short_refs(refs: &[String]) -> Vec<String> {
+    let names: Vec<String> = refs
+        .iter()
+        .map(|r| r.trim().trim_start_matches("HEAD -> ").trim_start_matches("tag: ").to_string())
+        .filter(|r| !r.is_empty() && r != "HEAD" && r != "origin/HEAD")
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for name in &names {
+        let local = name.strip_prefix("origin/");
+        match local {
+            // Origin's copy of a branch that's here too: the local label says it.
+            Some(local) if names.iter().any(|n| n == local) => {}
+            _ if out.contains(name) => {}
+            _ => out.push(name.clone()),
+        }
+    }
+    out
+}
+
+/// "6 hours ago" → "6h", "3 minutes ago" → "3m", "2 days ago" → "2d".
+pub(crate) fn short_when(when: &str) -> String {
+    let when = when.trim().trim_end_matches(" ago");
+    let mut parts = when.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some(n), Some(unit)) if n.chars().all(|c| c.is_ascii_digit()) => {
+            let u = match unit.trim_end_matches('s') {
+                "second" => "s",
+                "minute" => "m",
+                "hour" => "h",
+                "day" => "d",
+                "week" => "w",
+                "month" => "mo",
+                "year" => "y",
+                _ => return when.to_string(),
+            };
+            format!("{n}{u}")
+        }
+        _ => when.to_string(),
+    }
+}
+
+pub(crate) fn humanize(d: Duration) -> String {
     let s = d.as_secs();
     match s {
         0..=59 => format!("{s}s"),

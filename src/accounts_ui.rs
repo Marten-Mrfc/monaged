@@ -1041,7 +1041,7 @@ impl Monaged {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(div().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::text_3())).child(url.clone()))
+            .child(div().flex().child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::text_3())).child(url.clone())))
             .child(
                 div()
                     .flex()

@@ -158,6 +158,42 @@ impl Monaged {
         rows.sort_by_key(|(r, _, id)| (*r, *id));
         let ready = rows.iter().filter(|(r, _, _)| *r == Readiness::Ready).count();
         let has_remote = self.remote(project_id).is_some();
+        let target = self.chain(project_id).first().cloned().unwrap_or_default();
+        // Subprojects with nothing to merge fold into one quiet line under the list.
+        let quiet: Vec<(i64, String)> = rows
+            .iter()
+            .filter(|(r, _, _)| *r == Readiness::Merged)
+            .filter_map(|(_, _, id)| self.subprojects.iter().find(|s| s.id == *id).map(|s| (s.id, s.name.clone())))
+            .collect();
+        rows.retain(|(r, _, _)| *r != Readiness::Merged);
+        let empty_note = match (self.subprojects.iter().any(|s| s.project_id == project_id), quiet.is_empty()) {
+            (false, _) => Some("No subprojects yet.".to_string()),
+            (true, false) if rows.is_empty() => Some(format!("Nothing waits to merge into {target}.")),
+            _ => None,
+        };
+        let footer = (!quiet.is_empty()).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(14.))
+                .min_h(px(36.))
+                .when(!rows.is_empty() || empty_note.is_some(), |d| d.border_t_1().border_color(rgb(theme::line())))
+                .text_size(px(12.))
+                .text_color(rgb(theme::text_3()))
+                .child(div().flex_none().child(format!("Nothing new for {target}:")))
+                .children(quiet.iter().enumerate().map(|(i, (sub_id, name))| {
+                    let sub_id = *sub_id;
+                    div()
+                        .id(("queue-quiet", sub_id as usize))
+                        .flex_none()
+                        .cursor_pointer()
+                        .text_color(rgb(theme::text_2()))
+                        .hover(|s| s.text_color(rgb(theme::text())))
+                        .child(if i + 1 < quiet.len() { format!("{name},") } else { name.clone() })
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_sub(sub_id, cx)))
+                }))
+        });
         let list = div()
             .flex()
             .flex_col()
@@ -165,7 +201,7 @@ impl Monaged {
             .border_1()
             .border_color(rgb(theme::line()))
             .overflow_hidden()
-            .when(rows.is_empty(), |d| d.child(div().p(px(16.)).text_color(rgb(theme::text_3())).child("No subprojects yet.")))
+            .children(empty_note.map(|note| div().px(px(14.)).min_h(px(44.)).flex().items_center().text_size(px(13.)).text_color(rgb(theme::text_3())).child(note)))
             .children(rows.iter().enumerate().map(|(i, (readiness, text, sub_id))| {
                 let sub_id = *sub_id;
                 let sub = self.subprojects.iter().find(|s| s.id == sub_id);
@@ -251,11 +287,12 @@ impl Monaged {
                             .text_color(rgb(theme::text_2()))
                             .cursor_pointer()
                             .hover(|s| s.text_color(rgb(theme::text())))
-                            .child(format!("#{} {}", r.number, r.state))
+                            .child(format!("#{} {}", r.number, if r.draft && r.is_open() { "draft" } else { r.state.as_str() }))
                             .on_click(cx.listener(move |_, _, _, cx| crate::ui::open_web(cx, &url)))
                     }))
                     .children(action)
-            }));
+            }))
+            .children(footer);
         div()
             .flex()
             .flex_col()

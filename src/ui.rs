@@ -161,6 +161,69 @@ pub fn disabled_button(id: impl Into<ElementId>, kind: Kind, glyph: Option<Icon>
     el.child(text.into())
 }
 
+/// A setting shown as quiet mono text that opens a menu of its choices
+/// (the caller opens it): the chevron says there's more than one.
+pub fn menu_chip(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(22.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .pl(px(7.))
+        .pr(px(5.))
+        .rounded(px(4.))
+        .border_1()
+        .border_color(rgb(theme::line_strong()))
+        .font_family(theme::MONO)
+        .text_size(px(11.))
+        .text_color(rgb(theme::text_2()))
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text())))
+        .active(|s| s.bg(rgb(theme::selected())))
+        .child(text.into())
+        .child(icon_sized(Icon::ChevronDown, 10.).text_color(rgb(theme::text_3())))
+}
+
+/// Cuts text to one line with an ellipsis, measured at the width it ends
+/// up with. GPUI's `truncate()` keeps the first width it was measured at,
+/// so text in a column or a shrinking row can show just "…" or get cut
+/// without one; a one-line clamp is measured again when the width changes.
+pub fn one_line<E: Styled>(el: E) -> E {
+    el.min_w(px(0.)).overflow_hidden().line_clamp(1).text_ellipsis()
+}
+
+/// One action in a list of actions: icon, what it does, and a short note on
+/// the right (what it would act on). Quieter than a button; the caller
+/// attaches the click handler.
+pub fn action_row(id: impl Into<ElementId>, glyph: Icon, text: impl Into<SharedString>, note: Option<String>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(dense(30., 26.)))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .text_size(px(13.))
+        .text_color(rgb(theme::text()))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(theme::hover())))
+        .active(|s| s.bg(rgb(theme::selected())))
+        .child(icon_sized(glyph, 14.).flex_none().text_color(rgb(theme::text_3())))
+        .child(div().flex_none().child(text.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .justify_end()
+                .children(note.map(|n| div().min_w(px(0.)).truncate().text_size(px(12.)).text_color(rgb(theme::text_3())).child(n))),
+        )
+}
+
 /// A 28 px square icon button for toolbars and rows.
 pub fn icon_button(id: impl Into<ElementId>, glyph: Icon) -> Stateful<Div> {
     div()

@@ -627,3 +627,26 @@ fn usage_budget_and_estimates() {
     assert_eq!(pretty_model("claude-haiku-4-5-20251001"), "Haiku 4.5");
     assert_eq!(pretty_model("claude-fable-5-2"), "Fable 5.2");
 }
+
+#[test]
+fn git_labels_read_short() {
+    use crate::git_ui::{short_refs, short_when};
+    use crate::merge_ui::{commits_word, sync_words};
+    // A branch against origin, in words.
+    assert_eq!(sync_words(None), "not on origin");
+    assert_eq!(sync_words(Some((0, 0))), "in sync");
+    assert_eq!(sync_words(Some((5, 0))), "5 to push");
+    assert_eq!(sync_words(Some((0, 2))), "2 to pull");
+    assert_eq!(sync_words(Some((1, 3))), "1 to push · 3 to pull");
+    assert_eq!(commits_word(1), "1 commit");
+    assert_eq!(commits_word(6), "6 commits");
+    // History labels: origin's copy folds into the local branch; HEAD and tags tidy up.
+    let refs = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(short_refs(&refs(&["feature/x", "origin/feature/x", "agent/x"])), vec!["feature/x", "agent/x"]);
+    assert_eq!(short_refs(&refs(&["origin/main"])), vec!["origin/main"]);
+    assert_eq!(short_refs(&refs(&["HEAD -> main", "origin/main", "origin/HEAD", "tag: v1.0"])), vec!["main", "v1.0"]);
+    assert_eq!(short_when("6 hours ago"), "6h");
+    assert_eq!(short_when("1 minute ago"), "1m");
+    assert_eq!(short_when("3 months ago"), "3mo");
+    assert_eq!(short_when("2 years, 3 months ago"), "2 years, 3 months");
+}

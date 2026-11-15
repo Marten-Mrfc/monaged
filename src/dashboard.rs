@@ -227,10 +227,7 @@ impl Monaged {
                                         .child(div().flex_none().w(px(64.)).font_family(theme::MONO).text_size(px(11.5)).text_color(rgb(theme::text_3())).child(ago(e.at)))
                                         .child(icon(glyph).size(px(13.)).flex_none().text_color(rgb(if attention { theme::red_text() } else { theme::text_3() })))
                                         .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w(px(0.))
-                                                .truncate()
+                                            ui::one_line(div().flex_1())
                                                 .text_color(rgb(if attention { theme::red_text() } else { theme::text_2() }))
                                                 .child(text.replace('\n', " ")),
                                         )

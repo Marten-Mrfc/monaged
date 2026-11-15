@@ -25,6 +25,10 @@ pub(crate) enum MenuTarget {
     Agent(i64),
     /// One of an agent's settings: (agent, index into its config options).
     Config(i64, usize),
+    /// When merges into a branch happen: (project, index into its branch chain).
+    MergeRule(i64, usize),
+    /// How merges reach their branch in a project.
+    MergeMethod(i64),
 }
 
 pub(crate) struct MenuState {
@@ -66,6 +70,8 @@ pub(crate) enum MenuAction {
     SubCap(i64),
     ProjectSettings(i64),
     SideChat(i64),
+    SetRule(i64, String, crate::merge_ui::Policy),
+    SetMethod(i64, crate::merge_ui::Method),
 }
 
 pub(crate) enum Entry {
@@ -217,6 +223,63 @@ impl Monaged {
                 }));
                 out
             }
+            MenuTarget::MergeRule(pid, index) => {
+                use crate::merge_ui::Policy;
+                let Some(target) = self.chain(pid).get(index).cloned() else { return Vec::new() };
+                let current = self.policy(pid, &target);
+                let min = self.min_score();
+                let choice = |label: &str, detail: String, policy: Policy| Entry::Item {
+                    label: label.into(),
+                    glyph: (current == policy).then_some(Icon::Check),
+                    hint: None,
+                    detail: Some(detail),
+                    danger: false,
+                    enabled: true,
+                    action: MenuAction::SetRule(pid, target.clone(), policy),
+                };
+                vec![
+                    Entry::Heading(format!("Merging into {target}")),
+                    choice("Automatically", format!("when confidence is {min}/5 or more"), Policy::Auto),
+                    choice("Ask me", "you press Merge".into(), Policy::Ask),
+                    choice("Confirm twice", "you press Merge, then confirm".into(), Policy::Confirm),
+                ]
+            }
+            MenuTarget::MergeMethod(pid) => {
+                use crate::merge_ui::Method;
+                let current = self.method(pid);
+                let remote = self.remote(pid);
+                let has_origin = self.branch_info.get(&pid).is_some_and(|i| i.state.remote_url.is_some());
+                let provider = remote.as_ref().and_then(|r| r.provider);
+                let name = provider.map(|p| p.request_name()).unwrap_or("pull request");
+                let choice = |label: String, detail: String, method: Method, enabled: bool| Entry::Item {
+                    label,
+                    glyph: (current == method).then_some(Icon::Check),
+                    hint: None,
+                    detail: Some(detail),
+                    danger: false,
+                    enabled,
+                    action: MenuAction::SetMethod(pid, method),
+                };
+                vec![
+                    Entry::Heading("How merges reach a branch".into()),
+                    choice(
+                        "Here, then push".into(),
+                        if has_origin { "merge in WSL, then push to origin".into() } else { "needs an origin remote".into() },
+                        Method::Push,
+                        has_origin,
+                    ),
+                    choice("Here only".into(), "merge in WSL; you push when you want".into(), Method::Local, true),
+                    choice(
+                        format!("Through {name}s"),
+                        match (&remote, provider) {
+                            (Some(r), Some(_)) => format!("{} merges once reviews and checks pass", r.host),
+                            _ => "needs origin on GitHub or GitLab".into(),
+                        },
+                        Method::Request,
+                        provider.is_some(),
+                    ),
+                ]
+            }
         }
     }
 
@@ -272,6 +335,8 @@ impl Monaged {
             }
             MenuAction::Restart(aid) => self.retry_session(aid, cx),
             MenuAction::SetConfig(aid, option, value) => self.set_config(aid, &option, &value, cx),
+            MenuAction::SetRule(pid, target, policy) => self.set_policy(pid, &target, policy, cx),
+            MenuAction::SetMethod(pid, method) => self.set_method(pid, method, cx),
             MenuAction::Rename(aid) => self.start_rename(aid, window, cx),
             MenuAction::Archive(aid) => self.archive_agent(aid, cx),
             MenuAction::Restore(aid) => self.restore_agent(aid, cx),
@@ -341,7 +406,7 @@ impl Monaged {
     pub(crate) fn render_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let entries = self.menu_entries(menu.target);
-        let width = if matches!(menu.target, MenuTarget::Config(..)) { WIDE_MENU_WIDTH } else { MENU_WIDTH };
+        let width = if matches!(menu.target, MenuTarget::Config(..) | MenuTarget::MergeRule(..) | MenuTarget::MergeMethod(..)) { WIDE_MENU_WIDTH } else { MENU_WIDTH };
         let height: f32 = 8. + entries.iter().map(|e| if matches!(e, Entry::Separator) { SEPARATOR_HEIGHT } else { ITEM_HEIGHT }).sum::<f32>();
         let viewport = window.viewport_size();
         let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
