@@ -117,7 +117,7 @@ impl Monaged {
     pub(crate) fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.take().is_some() {
             window.focus(&self.focus);
-            self.focus_request = self.sel_agent;
+            self.focus_request = self.focus_target();
             cx.notify();
         }
     }

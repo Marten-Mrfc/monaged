@@ -437,6 +437,33 @@ fn the_bridge_knows_callers_by_their_token() {
 }
 
 #[test]
+fn only_the_stages_own_agents_move_a_pipeline() {
+    use crate::pipeline::{Pipeline, Role, Stage};
+    let mut p = Pipeline::new(1, "x".into(), false);
+    // Runs from before members were kept: anyone at the right stage counts.
+    assert!(p.expects(5, &Role::Researcher));
+    p.members = vec![5, 6, 7];
+    p.stage = Stage::Build;
+    assert!(p.expects(6, &Role::Builder("api".into())));
+    // A builder from an earlier run, or the planner asked "why?" during Build.
+    assert!(!p.expects(99, &Role::Builder("api".into())));
+    assert!(!p.expects(5, &Role::Planner));
+    assert!(!p.expects(7, &Role::Integrator));
+    p.stage = Stage::Approve;
+    assert!(p.expects(5, &Role::Planner), "a reply to the planner during Approve re-plans");
+    assert!(!p.expects(5, &Role::Lead) && !p.expects(5, &Role::Free));
+    // Renaming keeps the gate.
+    p.done = vec!["build-api".into()];
+    p.gate.submit("build-ui");
+    p.gate.hold("build-db", "why".into());
+    p.rename("build-ui", "ui");
+    p.rename("build-api", "api");
+    assert_eq!(p.done, vec!["api".to_string()]);
+    assert_eq!(p.gate.pending, vec!["ui".to_string()]);
+    assert!(p.gate.held_reason("build-db").is_some());
+}
+
+#[test]
 fn coordination_paths_overlap() {
     use crate::coord::{glob_match, normalize_path, overlaps};
     assert_eq!(normalize_path(r"./src\api/"), "src/api");

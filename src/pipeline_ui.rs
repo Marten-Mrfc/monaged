@@ -120,11 +120,16 @@ impl Monaged {
     /// Checks that builders can commit, then starts one builder per workstream.
     pub(crate) fn start_build(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let Some(project) = self.project_of(sub_id).cloned() else { return };
+        // A second click while git is being checked doesn't start a second set.
+        if !self.starting_build.insert(sub_id) {
+            return;
+        }
         self.set_note(sub_id, "Checking that builders can commit…");
         cx.notify();
         cx.spawn(async move |view, cx| {
             let ok = cx.background_spawn(async move { git::identity_ok(&project.distro, &project.path) }).await.unwrap_or(false);
             view.update(cx, |this, cx| {
+                this.starting_build.remove(&sub_id);
                 this.identity_missing = !ok;
                 if ok {
                     this.launch_builders(sub_id, cx);
@@ -146,6 +151,9 @@ impl Monaged {
 
     fn launch_builders(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
+        if p.stage != Stage::Approve {
+            return;
+        }
         let Some(plan) = p.plan.clone() else { return };
         let mut streams = pipeline::workstreams(&plan);
         if streams.is_empty() {
@@ -173,8 +181,13 @@ impl Monaged {
 
     /// The builder doing each workstream now: the newest one (a rerun replaces the old).
     pub(crate) fn current_builders(&self, sub_id: i64) -> Vec<&crate::agent::AgentView> {
+        let members = self.pipelines.get(&sub_id).map(|p| p.members.clone()).unwrap_or_default();
         let mut latest: Vec<&crate::agent::AgentView> = Vec::new();
-        for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived) {
+        for agent in self
+            .agents
+            .iter()
+            .filter(|a| a.record.subproject_id == sub_id && !a.record.archived && (members.is_empty() || members.contains(&a.record.id)))
+        {
             let Role::Builder(stream) = agent.role() else { continue };
             match latest.iter_mut().find(|b| b.role() == Role::Builder(stream.clone())) {
                 Some(slot) if slot.record.id < agent.record.id => *slot = agent,
@@ -188,10 +201,27 @@ impl Monaged {
     pub(crate) fn start_integration(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let branches: Vec<String> = self.current_builders(sub_id).iter().map(|a| a.record.branch.clone()).collect();
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
+        // The integrator works on the feature branch itself, which only one
+        // worktree can have: an existing integrator gets the new brief.
+        let existing = self
+            .agents
+            .iter()
+            .rev()
+            .find(|a| a.record.subproject_id == sub_id && !a.record.archived && a.role() == Role::Integrator)
+            .map(|a| (a.record.id, a.record.name.clone()));
         let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
         let brief = pipeline::integrator_brief(&p.request, &p.plan.clone().unwrap_or_default(), &branches, &sub.branch);
         p.stage = Stage::Integrate;
         p.note = Some(format!("The integrator is merging {} builder branch(es) into {}.", branches.len(), sub.branch));
+        if let Some((id, name)) = existing {
+            if !p.members.contains(&id) {
+                p.members.push(id);
+            }
+            p.gate.clear(&name);
+            self.save_pipeline(sub_id);
+            self.send_prompt(id, brief);
+            return;
+        }
         self.save_pipeline(sub_id);
         self.spawn_agent(sub_id, Self::role_spec("integrator", Role::Integrator, brief, false), cx);
     }
@@ -258,6 +288,13 @@ impl Monaged {
         if matches!(p.stage, Stage::Stopped | Stage::Done) {
             return;
         }
+        // Agents from an earlier run don't move this one.
+        if !(p.members.is_empty() || p.members.contains(&agent_id)) {
+            return;
+        }
+        // Only the stage's own agents deliver results (or get reminded to);
+        // a planner asked "why?" during Build doesn't re-plan.
+        let expected = p.expects(agent_id, &role);
         let auto = p.auto_mode;
 
         let questions: Vec<Question> = found.iter().filter_map(|d| if let Directive::Question(q) = d { Some(q.clone()) } else { None }).collect();
@@ -280,6 +317,9 @@ impl Monaged {
                     format!("{name} asks the user: {asked}. If the user already told you the answer, give it to {name} with message_agent; otherwise leave it to the user (it's on the dashboard)."),
                 );
             }
+            return;
+        }
+        if !expected {
             return;
         }
         if let Some((kind, error)) = found.iter().find_map(|d| if let Directive::Invalid { kind, error } = d { Some((kind.clone(), error.clone())) } else { None }) {
@@ -381,10 +421,27 @@ impl Monaged {
             cx.notify();
             return;
         }
+        // Done again means reviewed again, even if it passed before.
+        p.done.retain(|n| *n != name);
         p.gate.submit(&name);
         p.note = Some(format!("{name} says it's done. Reviewing it: it needs {min}/5 to go on."));
         self.save_pipeline(sub_id);
         self.review_fresh(agent_id, cx);
+    }
+
+    /// Reviews the gate was waiting for when Monaged closed (they ran in the old run).
+    pub(crate) fn resume_gates(&mut self, cx: &mut Context<Self>) {
+        let waiting: Vec<i64> = self
+            .pipelines
+            .iter()
+            .filter(|(_, p)| !matches!(p.stage, Stage::Done | Stage::Stopped))
+            .flat_map(|(sub_id, p)| {
+                p.gate.pending.iter().filter_map(|name| self.agents.iter().find(|a| a.record.subproject_id == *sub_id && a.record.name == *name).map(|a| a.record.id)).collect::<Vec<_>>()
+            })
+            .collect();
+        for agent_id in waiting {
+            self.review_fresh(agent_id, cx);
+        }
     }
 
     /// Reviews now, or right after the review that's running (which may be of older work).
@@ -439,7 +496,15 @@ impl Monaged {
 
     /// Sends the review's findings back, asking for the result block again.
     fn send_fix(&mut self, agent_id: i64) {
-        let Some(c) = self.agent(agent_id).and_then(|a| a.confidence.clone()) else { return };
+        let Some(c) = self.agent(agent_id).and_then(|a| a.confidence.clone()) else {
+            // No score to point at (reviews off, or it couldn't be reviewed).
+            let why = self.agent(agent_id).and_then(|a| a.review_error.clone()).unwrap_or_else(|| "it couldn't be reviewed".into());
+            self.send_prompt(
+                agent_id,
+                format!("Monaged couldn't score your work ({why}). Check it yourself: run the tests, finish what's missing, then end with your ```monaged-done``` block again so it's reviewed again."),
+            );
+            return;
+        };
         let findings = review::fix_prompt(&c).unwrap_or_else(|| {
             format!(
                 "Monaged's review scored your work {}/5, which isn't enough to integrate it. What it said:\n{}\n\nFinish what's missing.",
@@ -487,7 +552,8 @@ impl Monaged {
         }
         let finished = builders.iter().filter(|b| p.done.contains(b)).count();
         let total = builders.len();
-        if finished >= total {
+        let building = p.stage == Stage::Build;
+        if finished >= total && building {
             p.note = Some(format!("{name} {how}. Every builder is through. Integrating."));
             self.save_pipeline(sub_id);
             self.tell_lead(sub_id, format!("{name} {how}. Every builder is through; the integrator is merging their branches."));

@@ -146,8 +146,9 @@ impl Monaged {
     /// The integrator's score, else the lowest builder score, else the lowest of any agent.
     pub(crate) fn sub_confidence(&self, sub_id: i64) -> Option<(u8, String)> {
         let agents: Vec<_> = self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived).collect();
-        if let Some(c) = agents.iter().find(|a| a.role() == Role::Integrator).and_then(|a| a.confidence.as_ref()) {
-            return Some((c.score, "integrator".into()));
+        // With an integrator, only its score covers what gets merged.
+        if let Some(integrator) = agents.iter().rev().find(|a| a.role() == Role::Integrator) {
+            return integrator.confidence.as_ref().map(|c| (c.score, "integrator".into()));
         }
         let lowest = |filter: &dyn Fn(&Role) -> bool, label: &str| {
             agents
@@ -280,6 +281,13 @@ impl Monaged {
         }
         if self.policy(project_id, &target) != Policy::Auto {
             self.set_merge_message(sub_id, Tone::Info, format!("Ready to merge into {target}. This project asks you first."));
+            return;
+        }
+        // The score has to be of what's there now.
+        let integrator = self.agents.iter().rev().find(|a| a.record.subproject_id == sub_id && !a.record.archived && a.role() == Role::Integrator);
+        if integrator.is_some_and(|a| a.reviewing || a.review_stale || a.is_working()) {
+            self.set_merge_message(sub_id, Tone::Info, "Waiting for the integrator's latest work to be reviewed before merging.");
+            cx.notify();
             return;
         }
         match self.sub_confidence(sub_id) {
@@ -500,10 +508,16 @@ impl Monaged {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
         let Some(project) = self.projects.iter().find(|p| p.id == sub.project_id).cloned() else { return };
         let working = self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived && a.is_working()).count();
+        // While a pipeline runs, its agents and the lead stay: their branches
+        // still have to be integrated, and the lead is how you talk to it.
+        let running = self.pipelines.get(&sub_id).filter(|p| !matches!(p.stage, crate::pipeline::Stage::Done | crate::pipeline::Stage::Stopped));
+        let keep = |a: &crate::agent::AgentView| {
+            a.role() == Role::Lead || running.is_some_and(|p| p.members.contains(&a.record.id) || (p.members.is_empty() && a.role() != Role::Free))
+        };
         let targets: Vec<(i64, String, String)> = self
             .agents
             .iter()
-            .filter(|a| a.record.subproject_id == sub_id && !a.record.archived && !a.is_working())
+            .filter(|a| a.record.subproject_id == sub_id && !a.record.archived && !a.is_working() && !keep(a))
             .map(|a| (a.record.id, a.record.worktree.clone(), a.record.branch.clone()))
             .collect();
         self.set_merge_message(sub_id, Tone::Info, "Cleaning up worktrees…");

@@ -83,6 +83,12 @@ impl Monaged {
     /// A turn ended: move the pipeline on, send anything queued, refresh the
     /// diff, then (if enabled) summarise and review.
     pub(crate) fn after_turn(&mut self, agent_id: i64, cx: &mut Context<Self>) {
+        // What it did since its last review isn't covered by that score.
+        if let Some(agent) = self.agent_mut(agent_id)
+            && agent.confidence.is_some()
+        {
+            agent.review_stale = true;
+        }
         // A turn that only answered another agent's question isn't pipeline work.
         let answered = self.resolve_asks(agent_id);
         let other_result = self.agent(agent_id).is_some_and(|a| {
@@ -92,6 +98,7 @@ impl Monaged {
             self.pipeline_on_turn(agent_id, cx);
         }
         self.take_checkpoint(agent_id, cx);
+        self.take_lead_updates(agent_id);
         self.flush_queued_prompt(agent_id);
         self.notify_finished(agent_id);
         // A free agent you weren't watching is done, and doesn't need you (that
@@ -236,8 +243,15 @@ impl Monaged {
 
     /// Re-reads the diff, runs the project's checks, then asks Haiku for a skeptical review.
     pub(crate) fn review_agent(&mut self, agent_id: i64, cx: &mut Context<Self>) {
-        let Some(backend) = self.backend() else { return self.no_backend(agent_id, cx) };
-        let Some((distro, worktree, base)) = self.agent_context(agent_id) else { return };
+        let name = self.agent(agent_id).map(|a| a.record.name.clone()).unwrap_or_default();
+        // A review that can't start still answers the quality gate, so it never waits for nothing.
+        let Some(backend) = self.backend() else {
+            self.no_backend(agent_id, cx);
+            return self.gate_on_review(agent_id, None, format!("{name} can't be reviewed: reviews are off (no API key, and the Max plan fallback is off). Turn them on in Settings, or accept it as it is."), cx);
+        };
+        let Some((distro, worktree, base)) = self.agent_context(agent_id) else {
+            return self.gate_on_review(agent_id, None, format!("{name} can't be reviewed: its subproject or worktree is gone."), cx);
+        };
         // The test command from Project settings → Run, when there is one.
         let test_command = self
             .agent(agent_id)
@@ -312,7 +326,10 @@ impl Monaged {
                             agent.changes_truncated = changes.truncated;
                             agent.changes_secrets = changes.secrets;
                             match reviewed {
-                                Some((confidence, _)) => agent.confidence = Some(confidence),
+                                Some((confidence, _)) => {
+                                    agent.confidence = Some(confidence);
+                                    agent.review_stale = false;
+                                }
                                 None => agent.review_error = Some("Nothing to review yet: this worktree has no changes.".into()),
                             }
                         }
@@ -387,10 +404,8 @@ impl Monaged {
             settled.drain(..excess);
             let _ = self.store.set_setting(&format!("review:settled:{project_id}"), &review::settled_to_json(&settled).to_string());
         }
-        // A better score may be what an auto-merge was waiting for.
-        if let Some(sub_id) = self.agent(agent_id).map(|a| a.record.subproject_id) {
-            self.maybe_auto_merge(sub_id, cx);
-        }
+        // No auto-merge on a score you changed by hand: the reasons say
+        // "review again to confirm", and the next review decides.
         cx.notify();
     }
 

@@ -403,7 +403,8 @@ impl Monaged {
         if let Some(a) = candidates.iter().find(|a| a.record.name.to_lowercase() == wanted) {
             return Some(a.record.id);
         }
-        if let Some(a) = candidates.iter().find(|a| matches!(a.role(), Role::Builder(ws) if ws == crate::git::slug(to))) {
+        // The newest builder for a workstream is the one doing it now.
+        if let Some(a) = candidates.iter().rev().find(|a| matches!(a.role(), Role::Builder(ws) if ws == crate::git::slug(to))) {
             return Some(a.record.id);
         }
         if matches!(wanted.as_str(), "lead" | "integrator" | "planner") {

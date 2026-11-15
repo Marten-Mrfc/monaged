@@ -13,7 +13,7 @@ use crate::ui::{self, Kind, State};
 use crate::{Monaged, review, theme};
 
 /// Below this the lead's chat isn't shown beside the dashboard (it opens as a pane).
-const CHAT_MIN_MAIN: f32 = 980.;
+pub(crate) const CHAT_MIN_MAIN: f32 = 980.;
 
 fn section_title(text: &str, count: Option<usize>) -> AnyElement {
     div()
@@ -284,8 +284,8 @@ impl Monaged {
                     .items_center()
                     .gap(px(10.))
                     .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child("Paused by the budget: its next message waits."))
-                    .child(ui::button(("dash-resume", id as usize), Kind::Secondary, None, "Send anyway").on_click(cx.listener(|this, _, _, cx| {
-                        this.resume_paused(true);
+                    .child(ui::button(("dash-resume", id as usize), Kind::Secondary, None, "Send anyway").on_click(cx.listener(move |this, _, _, cx| {
+                        this.resume_agent(id);
                         cx.notify();
                     })))
                     .into_any_element(),

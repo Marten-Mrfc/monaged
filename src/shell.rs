@@ -193,6 +193,12 @@ impl Monaged {
     }
 
     /// The panes for the selected subproject, given the room there is.
+    /// Whose message box gets the cursor back: the open agent's, or on the
+    /// dashboard the lead's (when its chat is on screen).
+    pub(crate) fn focus_target(&self) -> Option<i64> {
+        self.sel_agent.or_else(|| (self.on_dashboard() && self.dashboard_chat).then(|| self.sel_sub.and_then(|s| self.lead_of(s))).flatten())
+    }
+
     /// A subproject is open without an agent in focus: its dashboard shows.
     pub(crate) fn on_dashboard(&self) -> bool {
         self.form.is_none() && self.sel_agent.is_none() && self.sel_sub.is_some_and(|s| self.sub_view != Some(s))
@@ -410,8 +416,26 @@ impl Monaged {
         let columns = match (self.form.is_none(), zen) {
             (false, _) => Vec::new(),
             (true, true) => self.sel_agent.map(Column::Agent).into_iter().collect(),
-            // The dashboard: only the lead's chat needs a message box.
-            (true, false) if self.on_dashboard() => self.sel_sub.and_then(|s| self.lead_of(s)).map(Column::Agent).into_iter().collect(),
+            // The dashboard: only the lead's chat needs a message box, and only
+            // when there's room to show it.
+            (true, false) if self.on_dashboard() => {
+                self.dashboard_chat = main_w >= crate::dashboard::CHAT_MIN_MAIN;
+                let lead = self.sel_sub.and_then(|s| self.lead_of(s));
+                if self.dashboard_chat {
+                    lead.map(Column::Agent).into_iter().collect()
+                } else {
+                    // A box that isn't drawn mustn't keep the keyboard.
+                    if let Some(lead) = lead {
+                        if self.focus_request == Some(lead) {
+                            self.focus_request = None;
+                        }
+                        if self.inputs.get(&lead).is_some_and(|i| i.focus_handle(cx).is_focused(window)) {
+                            window.focus(&self.focus);
+                        }
+                    }
+                    Vec::new()
+                }
+            }
             (true, false) => self.columns(main_w),
         };
         if let Some(sub_id) = self.sel_sub {

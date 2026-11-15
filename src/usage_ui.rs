@@ -254,6 +254,19 @@ impl Monaged {
         }
     }
 
+    /// One paused agent's message goes out now, past the budget (you asked).
+    pub(crate) fn resume_agent(&mut self, agent_id: i64) {
+        let Some(agent) = self.agent_mut(agent_id) else { return };
+        if !agent.paused {
+            return;
+        }
+        agent.paused = false;
+        agent.notice(Tone::Info, "Resumed by you (over budget).");
+        self.bypass_budget = true;
+        self.flush_queued_prompt(agent_id);
+        self.bypass_budget = false;
+    }
+
     pub(crate) fn set_budget(&mut self, share_pct: Option<u32>, ceiling_pct: Option<u32>, cx: &mut Context<Self>) {
         if let Some(pct) = share_pct {
             self.budget.share_pct = pct;

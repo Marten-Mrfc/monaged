@@ -312,7 +312,7 @@ impl Monaged {
     /// Esc in the sidebar: back to what you were doing.
     pub(crate) fn leave_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tree_cursor = None;
-        self.focus_request = self.sel_agent;
+        self.focus_request = self.focus_target();
         window.focus(&self.focus);
         cx.notify();
     }

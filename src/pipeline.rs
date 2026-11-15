@@ -142,6 +142,41 @@ pub struct Pipeline {
     pub note: Option<String>,
     /// Work that says it's done but hasn't passed review yet.
     pub gate: QualityGate,
+    /// The agents this run started (ids). Only they move it on; an agent
+    /// from an earlier run, or one asked something out of turn, doesn't.
+    /// Empty for runs from before this was kept: then anyone counts.
+    pub members: Vec<i64>,
+}
+
+impl Pipeline {
+    /// Whether this agent's result belongs to the stage the run is in.
+    pub fn expects(&self, agent_id: i64, role: &Role) -> bool {
+        let member = self.members.is_empty() || self.members.contains(&agent_id);
+        let stage = match role {
+            Role::Researcher => self.stage == Stage::Research,
+            Role::Verifier(_) => self.stage == Stage::Verify,
+            // Replying to the planner during Approve gives a new plan.
+            Role::Planner => matches!(self.stage, Stage::Plan | Stage::Approve),
+            Role::Builder(_) => self.stage == Stage::Build,
+            Role::Integrator => self.stage == Stage::Integrate,
+            Role::Free | Role::Lead => false,
+        };
+        member && stage
+    }
+
+    /// An agent was renamed: its name changes everywhere the run keeps it.
+    pub fn rename(&mut self, old: &str, new: &str) {
+        let swap = |n: &mut String| {
+            if n == old {
+                *n = new.to_string();
+            }
+        };
+        self.done.iter_mut().for_each(swap);
+        self.gate.pending.iter_mut().for_each(swap);
+        self.gate.fixing.iter_mut().for_each(swap);
+        self.gate.held.iter_mut().for_each(|(n, _)| swap(n));
+        self.gate.rounds.iter_mut().for_each(|(n, _)| swap(n));
+    }
 }
 
 /// The lowest confidence score that integrates or merges without asking you.
@@ -274,6 +309,7 @@ impl Pipeline {
             done: Vec::new(),
             note: None,
             gate: QualityGate::default(),
+            members: Vec::new(),
         }
     }
 

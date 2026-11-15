@@ -1031,8 +1031,16 @@ impl Monaged {
         }
         match self.store.rename_agent(agent_id, &name) {
             Ok(()) => {
+                let old = self.agent(agent_id).map(|a| (a.record.name.clone(), a.record.subproject_id));
                 if let Some(agent) = self.agent_mut(agent_id) {
                     agent.record.name = name.clone();
+                }
+                // The pipeline keeps track of builders by name.
+                if let Some((old, sub_id)) = old
+                    && let Some(p) = self.pipelines.get_mut(&sub_id)
+                {
+                    p.rename(&old, &name);
+                    self.save_pipeline(sub_id);
                 }
                 self.toast(Tone::Info, format!("Renamed to {name}"), cx);
             }

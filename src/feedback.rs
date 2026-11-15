@@ -405,7 +405,7 @@ impl Monaged {
     pub(crate) fn close_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm = None;
         window.focus(&self.focus);
-        self.focus_request = self.sel_agent;
+        self.focus_request = self.focus_target();
         cx.notify();
     }
 
@@ -508,7 +508,7 @@ impl Monaged {
     pub(crate) fn close_text_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.text_prompt = None;
         window.focus(&self.focus);
-        self.focus_request = self.sel_agent;
+        self.focus_request = self.focus_target();
         cx.notify();
     }
 
@@ -516,7 +516,7 @@ impl Monaged {
         let Some(prompt) = self.text_prompt.take() else { return };
         let text = prompt.input.read(cx).text().trim().to_string();
         window.focus(&self.focus);
-        self.focus_request = self.sel_agent;
+        self.focus_request = self.focus_target();
         if text.is_empty() && !matches!(prompt.action, TextAction::SubCap(_) | TextAction::RuleOut { .. }) {
             cx.notify();
             return;

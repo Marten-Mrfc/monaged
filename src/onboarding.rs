@@ -1340,6 +1340,8 @@ impl Monaged {
             return;
         }
         self.check_sandbox(cx);
+        // Reviews the quality gate was waiting for when Monaged closed.
+        self.resume_gates(cx);
         // Accounts, git's helper setup in WSL (repaired if Monaged moved), SSH keys.
         self.refresh_git_auth(true, cx);
         let distro = self.config.distro.clone();

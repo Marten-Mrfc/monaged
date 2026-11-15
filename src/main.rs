@@ -267,6 +267,12 @@ struct Monaged {
     dismissed: HashSet<i64>,
     /// An export is being written.
     exporting: bool,
+    /// The dashboard has room for the lead's chat (set as it's laid out).
+    dashboard_chat: bool,
+    /// Updates for a lead that's busy: sent with its next message.
+    lead_updates: HashMap<i64, Vec<String>>,
+    /// Subprojects whose builders are about to start (git is being checked).
+    starting_build: HashSet<i64>,
     /// Subprojects whose lead is being created.
     starting_lead: HashSet<i64>,
     /// Agents the lead asked a review of.
@@ -537,6 +543,9 @@ impl Monaged {
             dismissed: HashSet::new(),
             exporting: false,
             starting_lead: HashSet::new(),
+            starting_build: HashSet::new(),
+            dashboard_chat: true,
+            lead_updates: HashMap::new(),
             lead_reviews: HashSet::new(),
             one_pane: false,
             changes_beside: true,
@@ -1264,6 +1273,8 @@ impl Monaged {
         let worktree = git::worktree_path(&project.path, &sub_slug, &name);
         let branch = if spec.on_feature_branch { sub.branch.clone() } else { format!("agent/{sub_slug}/{name}") };
         let role = spec.role.to_db();
+        let is_lead = spec.role == Role::Lead;
+        let pipeline_role = !matches!(spec.role, Role::Free | Role::Lead);
         self.creating_agent = Some(sub_id);
         cx.notify();
         cx.spawn(async move |view, cx| {
@@ -1272,10 +1283,17 @@ impl Monaged {
             let added = cx.background_spawn(async move { git::add_worktree(&distro, &repo, &wt, &br, &from) }).await;
             view.update(cx, |this, cx| {
                 this.creating_agent = None;
-                this.starting_lead.remove(&sub_id);
+                if is_lead {
+                    this.starting_lead.remove(&sub_id);
+                }
                 match added.and_then(|_| this.store.add_agent(sub_id, &name, &branch, &worktree, &role)) {
                     Ok(record) => {
                         let id = record.id;
+                        // Pipeline agents belong to the run that started them.
+                        if pipeline_role && let Some(p) = this.pipelines.get_mut(&sub_id) {
+                            p.members.push(id);
+                            this.save_pipeline(sub_id);
+                        }
                         let mut agent = AgentView::new(record);
                         agent.queued_prompt = spec.brief;
                         this.agents.push(agent);
@@ -1492,7 +1510,7 @@ impl Monaged {
             return;
         }
         if self.commit_view.take().is_some() || self.replay.take().is_some() {
-            self.focus_request = self.sel_agent;
+            self.focus_request = self.focus_target();
             cx.notify();
             return;
         }
@@ -1501,7 +1519,7 @@ impl Monaged {
             return;
         }
         if self.form.take().is_some() {
-            self.focus_request = self.sel_agent;
+            self.focus_request = self.focus_target();
             window.focus(&self.focus);
             cx.notify();
             return;

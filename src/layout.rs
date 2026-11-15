@@ -327,7 +327,7 @@ impl Monaged {
             self.zen = false;
         }
         if self.zen {
-            self.focus_request = self.sel_agent;
+            self.focus_request = self.focus_target();
         }
         cx.notify();
     }

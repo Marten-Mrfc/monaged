@@ -173,7 +173,26 @@ impl Monaged {
         if self.budget_block().is_some() || self.sub_cap_block(sub_id).is_some() {
             return;
         }
-        self.send_prompt(lead, format!("{UPDATE_PREFIX} {}", text.into()));
+        let text = text.into();
+        // While it works, updates wait and go out together after its turn,
+        // after anything you typed (so your words stay yours).
+        if self.agent(lead).is_some_and(|a| a.is_working()) {
+            self.lead_updates.entry(lead).or_default().push(text);
+            return;
+        }
+        self.send_prompt(lead, format!("{UPDATE_PREFIX} {text}"));
+    }
+
+    /// The lead's turn ended: its waiting updates join its next message.
+    pub(crate) fn take_lead_updates(&mut self, agent_id: i64) {
+        let Some(updates) = self.lead_updates.remove(&agent_id).filter(|u| !u.is_empty()) else { return };
+        let text = format!("{UPDATE_PREFIX} {}", updates.join("\n\n"));
+        if let Some(agent) = self.agent_mut(agent_id) {
+            agent.queued_prompt = Some(match agent.queued_prompt.take() {
+                Some(typed) => format!("{typed}\n\n{text}"),
+                None => text,
+            });
+        }
     }
 
     /// What `team_status` returns.

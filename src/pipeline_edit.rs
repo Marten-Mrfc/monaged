@@ -231,7 +231,7 @@ impl Monaged {
             .collect();
         if let Some(p) = self.pipelines.get_mut(&sub_id) {
             p.stage = Stage::Build;
-            p.done.retain(|n| !n.starts_with(&format!("build-{}", stream.name)));
+            p.done.retain(|n| !replaced.contains(n));
             for old in &replaced {
                 p.gate.clear(old);
             }
