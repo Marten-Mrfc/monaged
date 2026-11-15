@@ -2,8 +2,9 @@
 //! same exe, named Monaged-Setup-<version>.exe) copies itself to
 //! %LOCALAPPDATA%\Programs\Monaged, adds Start menu shortcuts (one of them to
 //! uninstall) and lists itself under Settings → Apps for your user only
-//! (HKCU). Projects and settings live in %APPDATA%\Monaged and are never
-//! touched by installing, updating or uninstalling.
+//! (HKCU). Projects and settings live in %APPDATA%\Monaged: installing and
+//! updating never touch them, and uninstalling removes them only when you
+//! tick them (see `uninstall.rs`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -183,7 +184,7 @@ pub fn install(desktop_shortcut: bool) -> Result<PathBuf> {
     }
     std::fs::create_dir_all(start_menu()).ok();
     shortcut(&start_menu().join("Monaged.lnk"), &dst, "", "Run Claude agents on your projects")?;
-    shortcut(&start_menu().join("Uninstall Monaged.lnk"), &dst, "--uninstall", "Remove Monaged (your projects and settings stay)")?;
+    shortcut(&start_menu().join("Uninstall Monaged.lnk"), &dst, "--uninstall", "Remove Monaged, choosing what goes with it")?;
     if desktop_shortcut {
         shortcut(&desktop().join("Monaged.lnk"), &dst, "", "Run Claude agents on your projects")?;
     }
@@ -192,18 +193,68 @@ pub fn install(desktop_shortcut: bool) -> Result<PathBuf> {
     Ok(dst)
 }
 
-/// Removes the shortcuts and, once this process ends, the program folder.
-pub fn uninstall() -> Result<()> {
-    for link in [start_menu().join("Monaged.lnk"), start_menu().join("Uninstall Monaged.lnk"), desktop().join("Monaged.lnk")] {
-        let _ = std::fs::remove_file(link);
+/// The shortcuts `install` makes, whether or not they're there.
+pub fn shortcut_paths() -> [PathBuf; 3] {
+    [start_menu().join("Monaged.lnk"), start_menu().join("Uninstall Monaged.lnk"), desktop().join("Monaged.lnk")]
+}
+
+/// Settings → Apps lists Monaged (for this user).
+pub fn listed() -> bool {
+    reg(&["query", UNINSTALL_KEY]).is_ok()
+}
+
+/// What updates and the setup guide leave behind: the update download in
+/// %TEMP% and the Ubuntu download and WSL install log in %LOCALAPPDATA%\Monaged.
+fn leftovers() -> Vec<PathBuf> {
+    let mut list = vec![std::env::temp_dir().join("monaged-update")];
+    if let Some(local) = crate::uninstall::local_root() {
+        list.push(local.join("downloads"));
+        list.push(local.join("wsl-install.log"));
     }
-    let _ = reg(&["delete", UNINSTALL_KEY, "/f"]);
+    list
+}
+
+/// Removes the shortcuts, the Settings → Apps entry, the start-after-restart
+/// entry and setup leftovers now, and the program folder once this process
+/// ends. Says what it removed.
+pub fn remove_program() -> Result<String> {
+    let mut removed: Vec<String> = Vec::new();
+    let links = shortcut_paths().into_iter().filter(|link| link.exists() && std::fs::remove_file(link).is_ok()).count();
+    if links > 0 {
+        removed.push(format!("{links} shortcut{}", if links == 1 { "" } else { "s" }));
+    }
+    if listed() && reg(&["delete", UNINSTALL_KEY, "/f"]).is_ok() {
+        removed.push("the entry in Settings → Apps".into());
+    }
     crate::onboarding::reopen_after_restart(false);
-    // The folder can only go once this window (running from it) closes: try
-    // every second or so for five minutes. ping waits where `timeout` can't
-    // (it needs a console's input).
-    let dir = install_dir().display().to_string();
-    let line = format!("/C for /l %i in (1,1,300) do (ping -n 2 127.0.0.1 >nul & rmdir /s /q \"{dir}\" 2>nul & if not exist \"{dir}\" exit)");
+    let mut cleared = 0;
+    for path in leftovers() {
+        let gone = if path.is_dir() { std::fs::remove_dir_all(&path).is_ok() } else { path.is_file() && std::fs::remove_file(&path).is_ok() };
+        cleared += usize::from(gone);
+    }
+    if cleared > 0 {
+        removed.push("leftover downloads and logs".into());
+    }
+    // %LOCALAPPDATA%\Monaged itself, if nothing else is in it now.
+    if let Some(local) = crate::uninstall::local_root() {
+        let _ = std::fs::remove_dir(local);
+    }
+    let dir = install_dir();
+    let mut text = if removed.is_empty() { String::new() } else { format!("Removed {}.", crate::uninstall::and_list(&removed)) };
+    if dir.exists() {
+        anyhow::ensure!(crate::uninstall::program_folder_ok(&dir), "{} doesn't look like Monaged's program folder, so it was left alone", dir.display());
+        schedule_removal(&dir)?;
+        text = format!("{text} The program folder goes as soon as the uninstaller closes.").trim().to_string();
+    }
+    Ok(if text.is_empty() { "Nothing was left to remove.".into() } else { text })
+}
+
+/// The program folder can only go once this window (running from it)
+/// closes: a hidden cmd.exe tries every second or so for half an hour. ping
+/// waits where `timeout` can't (it needs a console's input).
+fn schedule_removal(dir: &Path) -> Result<()> {
+    let dir = dir.display().to_string();
+    let line = format!("/C for /l %i in (1,1,1800) do (ping -n 2 127.0.0.1 >nul & rmdir /s /q \"{dir}\" 2>nul & if not exist \"{dir}\" exit)");
     let mut command = Command::new("cmd.exe");
     // Not from inside the folder it deletes.
     command.current_dir(std::env::temp_dir());
@@ -222,44 +273,38 @@ pub fn uninstall() -> Result<()> {
 
 // ---- The setup window ---------------------------------------------------------------------
 
+/// Which small window `monaged.exe` opens instead of the main one.
 #[derive(Clone, Copy, PartialEq)]
 pub enum SetupMode {
     Install,
+    /// `--uninstall`: see `uninstall::UninstallView`.
     Uninstall,
 }
 
 enum SetupState {
     Ready,
     Working,
-    Done(Option<PathBuf>),
+    Done(PathBuf),
     Failed(String),
 }
 
+/// The install window (the setup file, or `--install`).
 pub struct SetupView {
-    mode: SetupMode,
     desktop: bool,
     state: SetupState,
 }
 
 impl SetupView {
-    pub fn new(mode: SetupMode) -> Self {
-        Self { mode, desktop: false, state: SetupState::Ready }
+    pub fn new() -> Self {
+        Self { desktop: false, state: SetupState::Ready }
     }
 
     fn run(&mut self, cx: &mut Context<Self>) {
         self.state = SetupState::Working;
-        let (mode, desktop) = (self.mode, self.desktop);
+        let desktop = self.desktop;
         cx.notify();
         cx.spawn(async move |view, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    match mode {
-                        SetupMode::Install => install(desktop).map(Some),
-                        SetupMode::Uninstall => uninstall().map(|_| None),
-                    }
-                })
-                .await;
-            let removed = matches!(mode, SetupMode::Uninstall) && result.is_ok();
+            let result = cx.background_spawn(async move { install(desktop) }).await;
             view.update(cx, |this, cx| {
                 this.state = match result {
                     Ok(path) => SetupState::Done(path),
@@ -268,11 +313,6 @@ impl SetupView {
                 cx.notify();
             })
             .ok();
-            // The program folder can only be removed once this window is gone.
-            if removed {
-                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
-                cx.update(|cx| cx.quit()).ok();
-            }
         })
         .detach();
     }
@@ -281,52 +321,39 @@ impl SetupView {
 impl Render for SetupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let version = env!("CARGO_PKG_VERSION");
-        let (title, body) = match self.mode {
-            SetupMode::Install => (
-                format!("Install Monaged {version}"),
-                format!(
-                    "Monaged goes into {} (just for you, no admin needed) with Start menu shortcuts. When it opens, a setup guide checks WSL, Ubuntu and the Claude agent and installs what's missing, asking first. Your projects and settings in %APPDATA%\\Monaged stay as they are.",
-                    install_dir().display()
-                ),
-            ),
-            SetupMode::Uninstall => (
-                "Uninstall Monaged".to_string(),
-                "Removes the program and its shortcuts. Your projects, settings and agent worktrees stay, so installing again picks up where you were.".to_string(),
-            ),
-        };
+        let title = format!("Install Monaged {version}");
+        let body = format!(
+            "Monaged goes into {} (just for you, no admin needed) with Start menu shortcuts. When it opens, a setup guide checks WSL, Ubuntu and the Claude agent and installs what's missing, asking first. Your projects and settings in %APPDATA%\\Monaged stay as they are.",
+            install_dir().display()
+        );
         let actions = match &self.state {
-            SetupState::Ready => div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .when(self.mode == SetupMode::Install, |d| {
-                    let on = self.desktop;
-                    d.child(ui::switch("setup-desktop", "Desktop shortcut", on).on_click(cx.listener(move |this, _, _, cx| {
+            SetupState::Ready => {
+                let on = self.desktop;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::switch("setup-desktop", "Desktop shortcut", on).on_click(cx.listener(move |this, _, _, cx| {
                         this.desktop = !on;
                         cx.notify();
                     })))
-                })
-                .child(div().flex_1())
-                .child(ui::button("setup-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|_, _, _, cx| cx.quit())))
-                .child(
-                    ui::button("setup-go", if self.mode == SetupMode::Install { Kind::Primary } else { Kind::Danger }, None, if self.mode == SetupMode::Install { "Install" } else { "Uninstall" })
-                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
-                ),
-            SetupState::Working => div().flex().child(div().flex_1()).child(ui::busy_button("setup-busy", Kind::Primary, if self.mode == SetupMode::Install { "Installing…" } else { "Removing…" })),
+                    .child(div().flex_1())
+                    .child(ui::button("setup-cancel", Kind::Ghost, None, "Cancel").on_click(cx.listener(|_, _, _, cx| cx.quit())))
+                    .child(ui::button("setup-go", Kind::Primary, None, "Install").on_click(cx.listener(|this, _, _, cx| this.run(cx))))
+            }
+            SetupState::Working => div().flex().child(div().flex_1()).child(ui::busy_button("setup-busy", Kind::Primary, "Installing…")),
             SetupState::Done(path) => {
                 let path = path.clone();
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child(if self.mode == SetupMode::Install { "Installed. Monaged's setup guide takes it from here." } else { "Removed. This window closes by itself." }))
+                    .child(div().flex_1().text_size(px(13.)).text_color(rgb(theme::text_2())).child("Installed. Monaged's setup guide takes it from here."))
                     .child(ui::button("setup-close", Kind::Ghost, None, "Close").on_click(cx.listener(|_, _, _, cx| cx.quit())))
-                    .children(path.map(|p| {
-                        ui::button("setup-open", Kind::Primary, Some(Icon::Play), "Open Monaged").on_click(cx.listener(move |_, _, _, cx| {
-                            let _ = Command::new(&p).spawn();
-                            cx.quit();
-                        }))
-                    }))
+                    .child(ui::button("setup-open", Kind::Primary, Some(Icon::Play), "Open Monaged").on_click(cx.listener(move |_, _, _, cx| {
+                        let _ = Command::new(&path).spawn();
+                        cx.quit();
+                    })))
             }
             SetupState::Failed(err) => div()
                 .flex()

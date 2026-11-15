@@ -3,6 +3,7 @@
 //! in their own git worktrees, all over one Agent Client Protocol connection.
 //!
 //! Usage: monaged [--distro Ubuntu] [--agent <path to claude-agent-acp in WSL>] [--setup]
+//!        monaged --uninstall [--all] [--quiet]
 
 // Release builds are a windowed app (no console window next to Monaged); logs
 // go to %APPDATA%\Monaged\monaged.log instead. Debug builds keep the console.
@@ -67,6 +68,7 @@ mod theme;
 mod timeline;
 mod update;
 mod ui;
+mod uninstall;
 mod usage;
 mod usage_ui;
 mod wsl;
@@ -1713,7 +1715,7 @@ fn main() {
         }
         return;
     }
-    // The setup file (or --install / --uninstall) shows the small setup window instead.
+    // The setup file (or --install / --uninstall) shows a small setup window instead.
     let setup = if args.iter().any(|a| a == "--uninstall") {
         Some(install::SetupMode::Uninstall)
     } else if args.iter().any(|a| a == "--install") || install::is_setup_exe() {
@@ -1721,19 +1723,37 @@ fn main() {
     } else {
         None
     };
+    let everything = args.iter().any(|a| a == "--all");
+    // `--uninstall --quiet [--all]`: removes without a window, for scripts.
+    if setup == Some(install::SetupMode::Uninstall) && args.iter().any(|a| a == "--quiet") {
+        std::process::exit(uninstall::run_quiet(everything));
+    }
     if let Some(mode) = setup {
         Application::new().with_assets(icons::Assets).run(move |cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(580.), px(330.)), cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions { title: Some("Monaged setup".into()), ..Default::default() }),
-                    is_resizable: false,
-                    ..Default::default()
-                },
-                |_, cx| cx.new(|_| install::SetupView::new(mode)),
-            )
-            .expect("failed to open the setup window");
+            // Closing the window ends the process: the uninstalled program's
+            // folder can only go once it has.
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            let uninstalling = mode == install::SetupMode::Uninstall;
+            let (width, height, title) = if uninstalling { (640., 640., "Uninstall Monaged") } else { (580., 330., "Monaged setup") };
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(height)), cx))),
+                titlebar: Some(TitlebarOptions { title: Some(title.into()), ..Default::default() }),
+                // The uninstall checklist scrolls; a small screen can make the window smaller.
+                is_resizable: uninstalling,
+                window_min_size: uninstalling.then(|| size(px(520.), px(420.))),
+                ..Default::default()
+            };
+            if uninstalling {
+                cx.open_window(options, |window, cx| cx.new(|cx| uninstall::UninstallView::new(everything, window, cx)))
+                    .expect("failed to open the uninstall window");
+            } else {
+                cx.open_window(options, |_, cx| cx.new(|_| install::SetupView::new())).expect("failed to open the setup window");
+            }
             cx.activate(true);
         });
         return;

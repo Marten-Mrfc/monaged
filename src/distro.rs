@@ -223,7 +223,7 @@ fn download(image: &Image, to: &Path, send: &(dyn Fn(Event) + Sync)) -> Result<(
 }
 
 /// Runs wsl.exe with a time limit; (succeeded, what it printed).
-fn wsl_run(args: &[&str], limit: Duration) -> Result<(bool, String)> {
+pub(crate) fn wsl_run(args: &[&str], limit: Duration) -> Result<(bool, String)> {
     let mut child = quiet("wsl.exe")
         .args(args)
         .stdin(Stdio::null())
