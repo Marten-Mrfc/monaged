@@ -407,6 +407,12 @@ What the research said (Material Design's sound guidelines, Google's earcon guid
 
 **Not tested on a real PC yet:** hearing them through PlaySound on Windows (the WAVs were checked as files), and whether the levels sit well next to other apps.
 
+### Faster CI (done 2026-11-15)
+- [x] **The cache survived nothing:** its key and fallback both held Cargo.lock's hash, which every version bump changes, so the first CI run after each release (13 minutes of building instead of about 1) and every release itself (6.5 minutes of release-mode tests) started from nothing. Now Swatinem/rust-cache, per profile, falls back to the newest cache and prunes old output.
+- [x] **One run per commit** (the same commit on a branch and main), **no CI job for release commits** (the Release workflow tests them), and **one build per CI run** instead of two.
+- [x] **The 403 when publishing, explained:** GitHub won't let the Actions token create the release tag at a commit whose workflow files differ from main's. 0.5.0's first attempt hit it because the CI change landed on main a minute after the release commit; probably 0.3.0's too. docs/releasing.md says what to do.
+- [ ] Options not taken (yet): a self-hosted runner on your own PC (warm and fast, free, only while it's on), `rust-lld` as the linker (seconds per link; the icon resource needs checking), checks on Linux through Wine (cheaper runners, fragile).
+
 ### Next ideas
 - Fork an agent: a new worktree from its branch, with a summary of the conversation as the brief.
 - A morning summary: what finished overnight, what waits for you, what it cost.
