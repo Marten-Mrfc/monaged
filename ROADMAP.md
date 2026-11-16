@@ -426,6 +426,35 @@ Asked for: one agent at a time and a close button that works; Fix findings next 
 
 **Not tested yet:** a real lead on Claude (does it use its tools well and keep its replies short), and how much its updates cost over a long pipeline.
 
+### Release 0.8.0: git workflow, readable conversations, the dock, the sidebar (done 2026-11-16)
+Released with the rounds below.
+
+### Sidebar (done 2026-11-16)
+Asked for: pick an element and upgrade it fully, with design and UX research.
+
+- [x] Research: Slack's two tiers (bold for new, red for needs you, a stable order), Claude Code's session sidebar and its most-reported issues (dots that keep pulsing), NN/g on navigation.
+- [x] New replies in bold with a white dot until you open them (only answers to what you asked); a working agent shows its time; counts on subprojects; a folded project sums up what's inside; tooltips; labels step aside for ⋯.
+- [ ] Not done: new replies don't survive a restart (the "while you were away" card covers it); the "needs you" count wasn't seen in the demo.
+
+### The conversation (done 2026-11-16)
+- [x] Research: tool calls grouped under a summary, live progress with a way to stop, what each turn changed, detail levels.
+- [x] Steps fold into one line ("Read 4 files, searched twice and ran a command · 7 steps"); turn footers with steps, files changed and Copy reply; the live line names the running step; repeated notices once; a setting to show every step.
+- [ ] Next: each step's duration, the turn's cost, the same folding in the lead's box.
+
+### Formatting and the dock (done 2026-11-16)
+Asked for: style what has no styling (raw `{}` sections), and a much better right dock, researched.
+
+- [x] Tables, task lists, strikethrough, code blocks with a language and Copy; tool inputs field by field (commands, diffs, highlighted files); your messages formatted when they use Markdown.
+- [x] The dock: five tabs with badges, Alt 1–5, a hide button; the board inside Pipeline; worktree menus that follow the agent you open; Activity without per-turn noise.
+- [ ] GPUI breaks lines before "(", ")" and "/" ("3" / "/5"); fixing it means patching GPUI.
+
+### Git workflow and its UI (done 2026-11-15)
+Asked for: improve the whole git workflow (merging, fetching, PRs and MRs), then its UI.
+
+- [x] Merges fetch and catch up with origin first and push after (or merge through pull/merge requests, drafts below the bar); Update from develop; richer request descriptions; fetching every 15 minutes.
+- [x] A Merge tab with one next step, menus for the rules and the method, each branch against origin with push/pull in one click.
+- [ ] Not tested against real GitHub/GitLab: merging a request, marking it ready, and reading whether it can merge.
+
 ### Release 0.7.0: Claude can look, audits, quality of life (done 2026-11-15)
 Released with the two rounds below.
 
