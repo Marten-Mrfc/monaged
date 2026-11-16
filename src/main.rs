@@ -403,6 +403,8 @@ struct Monaged {
     expanded_steps: HashSet<(i64, usize)>,
     /// Agents that answered something you asked while you weren't looking.
     unseen: HashSet<i64>,
+    /// Text boxes for "something else" answers: (agent, reply item, question).
+    answer_inputs: HashMap<(i64, usize, usize), Entity<TextInput>>,
     next_toast: u64,
     /// Toasts raised while handling a message (no `cx` there); shown right after.
     queued_toasts: Vec<(Tone, String, Option<(&'static str, feedback::ToastAction)>)>,
@@ -605,6 +607,7 @@ impl Monaged {
             expanded_tools: HashSet::new(),
             expanded_steps: HashSet::new(),
             unseen: HashSet::new(),
+            answer_inputs: HashMap::new(),
             ci: HashMap::new(),
             run_states: HashMap::new(),
             run_targets: HashMap::new(),
@@ -1445,6 +1448,10 @@ impl Monaged {
         }
         if self.comment_focused(window, cx) {
             self.save_comment(cx);
+            return;
+        }
+        if let Some((agent_id, item)) = self.focused_answer_box(window, cx) {
+            self.send_answers(agent_id, item, cx);
             return;
         }
         // Project settings → Environment: Enter goes name → value → saved.

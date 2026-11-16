@@ -4,6 +4,10 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Changed
+
+- **Questions, redesigned**: an agent's questions come as one card instead of a card each, numbered, with a short topic, why each matters and its options as a list (what each option means, the recommended one marked; checkboxes when several can apply). Every question has **Something else…** with a box for your own words. Nothing is sent on a click any more: **Send** (or Enter in a box) sends every answer at once, **Use the recommended answers** fills in the rest, and the card shows how many are answered. Once sent, the card says what you answered, and the answers message is one quiet line. Agents are asked for this richer format (topic, option descriptions, several choices, up to four questions); the old one still works.
+
 ### Fixed
 
 - **A subproject's dashboard drew its sections on top of each other on wide screens**: once the column reached its full width, the request card, the "Needs you" cards and the agent cards were laid out shorter than their text, so the next section started over them. The column now has an exact width, like the agent cards.

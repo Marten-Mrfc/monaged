@@ -305,6 +305,15 @@ pub enum Item {
     AgentImage(std::sync::Arc<gpui::Image>),
 }
 
+/// Your pick on one question.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pick {
+    /// One option (or several, on a question that allows it).
+    Options(Vec<usize>),
+    /// "Something else": the words are in the question's text box.
+    Other,
+}
+
 pub struct Turn {
     pub started: Instant,
     pub first_words: Option<Duration>,
@@ -358,8 +367,8 @@ pub struct AgentView {
     // Pipeline (Phase 3).
     /// A message to send as soon as the session is open (e.g. the role brief).
     pub queued_prompt: Option<String>,
-    /// Chosen options for open question cards: (item index, question index) -> option.
-    pub answers: HashMap<(usize, usize), usize>,
+    /// What you picked on open questions so far: (item index, question index) -> pick.
+    pub answers: HashMap<(usize, usize), Pick>,
     /// Already reminded once to deliver its result block.
     pub nudged: bool,
     // Usage (Phase 6).

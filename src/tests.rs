@@ -93,7 +93,7 @@ fn splits_reply_into_text_and_directives() {
     match &directives[0] {
         Directive::Question(q) => {
             assert_eq!(q.question, "Which DB?");
-            assert_eq!(q.options, ["Postgres", "SQLite"]);
+            assert_eq!(q.labels(), ["Postgres", "SQLite"]);
             assert_eq!(q.recommended, Some(1));
         }
         other => panic!("expected a question, got {other:?}"),
@@ -723,4 +723,25 @@ fn only_your_questions_make_a_reply_new() {
     assert!(from_monaged("Monaged's review of your changes found the problems below."));
     assert!(from_monaged("Monaged's review scored your work 2/5"));
     assert!(from_monaged(&format!("Thanks\n\n---\n{}\n- #3 contract", crate::coord::DIGEST_HEADER)));
+}
+
+#[test]
+fn questions_read_both_formats_and_answers_read_back() {
+    use crate::pipeline::{Directive, Question, answers_message, directives, parse_answers};
+    let reply = "Two things:\n\n```monaged-question\n{\"header\": \"Storage\", \"question\": \"Where?\", \"why\": \"schema\", \"options\": [{\"label\": \"JSON file\", \"description\": \"no dependency\"}, {\"label\": \"SQLite\", \"description\": \"queries\"}], \"recommended\": 0}\n```\n\n```monaged-question\n{\"question\": \"Filters?\", \"options\": [\"Date\", \"Customer\"], \"multi\": true}\n```\n";
+    let qs: Vec<Question> = directives(reply).into_iter().filter_map(|d| if let Directive::Question(q) = d { Some(q) } else { None }).collect();
+    assert_eq!(qs.len(), 2);
+    assert_eq!(qs[0].header, "Storage");
+    assert_eq!(qs[0].options[1].label, "SQLite");
+    assert_eq!(qs[0].options[1].description, "queries");
+    assert_eq!(qs[0].recommended_label(), "JSON file");
+    assert!(!qs[0].multi);
+    assert_eq!(qs[1].labels(), ["Date", "Customer"]);
+    assert!(qs[1].multi);
+    assert_eq!(qs[1].recommended_label(), "Date");
+    // What was sent reads back in order, own words included.
+    let sent = answers_message(&[(qs[0].clone(), "SQLite".into()), (qs[1].clone(), "Keep a year, then archive (in my own words)".into())], false);
+    assert_eq!(parse_answers(&sent).unwrap(), ["SQLite", "Keep a year, then archive (in my own words)"]);
+    assert!(parse_answers(&answers_message(&[(qs[0].clone(), "JSON file".into())], true)).is_some());
+    assert!(parse_answers("Please fix the coupon test").is_none());
 }

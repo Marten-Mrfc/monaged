@@ -1,10 +1,10 @@
 //! Phase 3: running the pipeline (what happens when a role agent finishes a
 //! turn), the gates, question cards, and the pipeline panel.
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Focusable, FontWeight, div, prelude::*, px, rgb};
 use serde_json::Value;
 
-use crate::agent::{Item, Tone};
+use crate::agent::{Item, Pick, Tone};
 use crate::pipeline::{self, Directive, Gate, Pipeline, Question, Role, Segment, Stage};
 use crate::icons::{Icon, icon};
 use crate::review_ui::render_markdown;
@@ -302,7 +302,7 @@ impl Monaged {
             if auto {
                 let answers: Vec<(Question, String)> = questions
                     .iter()
-                    .map(|q| (q.clone(), q.options[q.recommended.unwrap_or(0)].clone()))
+                    .map(|q| (q.clone(), q.recommended_label()))
                     .collect();
                 if let Some(agent) = self.agent_mut(agent_id) {
                     agent.notice(Tone::Info, format!("Auto mode answered {} question(s) with the recommended option.", answers.len()));
@@ -311,7 +311,7 @@ impl Monaged {
             } else {
                 let n = questions.len();
                 self.set_note(sub_id, format!("{name} has {n} question{} for you.", if n == 1 { "" } else { "s" }));
-                let asked = questions.iter().map(|q| format!("\"{}\" ({})", q.question, q.options.join(" / "))).collect::<Vec<_>>().join("; ");
+                let asked = questions.iter().map(|q| format!("\"{}\" ({})", q.question, q.labels().join(" / "))).collect::<Vec<_>>().join("; ");
                 self.tell_lead(
                     sub_id,
                     format!("{name} asks the user: {asked}. If the user already told you the answer, give it to {name} with message_agent; otherwise leave it to the user (it's on the dashboard)."),
@@ -613,23 +613,84 @@ impl Monaged {
 
     /// The user picked an option on a question card. Once every question in
     /// that reply has an answer, they're sent together.
-    pub(crate) fn answer_question(&mut self, agent_id: i64, item: usize, question: usize, option: usize, cx: &mut Context<Self>) {
+    /// The questions in one agent reply, in order.
+    pub(crate) fn questions_at(&self, agent_id: i64, item: usize) -> Vec<Question> {
+        let Some(Item::Agent(text)) = self.agent(agent_id).and_then(|a| a.items.get(item)) else { return Vec::new() };
+        pipeline::directives(text).into_iter().filter_map(|d| if let Directive::Question(q) = d { Some(q) } else { None }).collect()
+    }
+
+    /// Your answer to one question so far: None until it's answered (and
+    /// "something else" needs words in its box).
+    pub(crate) fn answer_text(&self, agent_id: i64, item: usize, qi: usize, q: &Question, cx: &gpui::App) -> Option<String> {
+        match self.agent(agent_id)?.answers.get(&(item, qi))? {
+            Pick::Options(list) if !list.is_empty() => Some(list.iter().filter_map(|&i| q.options.get(i).map(|o| o.label.clone())).collect::<Vec<_>>().join(", ")),
+            Pick::Options(_) => None,
+            Pick::Other => {
+                let text = self.answer_inputs.get(&(agent_id, item, qi))?.read(cx).text().trim().to_string();
+                (!text.is_empty()).then(|| format!("{text} (in my own words)"))
+            }
+        }
+    }
+
+    /// Picks an option (or, on a question that allows several, toggles it).
+    pub(crate) fn pick_option(&mut self, agent_id: i64, item: usize, qi: usize, oi: usize, multi: bool, cx: &mut Context<Self>) {
         let Some(agent) = self.agent_mut(agent_id) else { return };
-        let Some(Item::Agent(text)) = agent.items.get(item) else { return };
-        let questions: Vec<Question> =
-            pipeline::directives(text).into_iter().filter_map(|d| if let Directive::Question(q) = d { Some(q) } else { None }).collect();
-        agent.answers.insert((item, question), option);
-        if !(0..questions.len()).all(|q| agent.answers.contains_key(&(item, q))) {
-            cx.notify();
+        let entry = agent.answers.entry((item, qi)).or_insert(Pick::Options(Vec::new()));
+        match entry {
+            Pick::Options(list) if multi => {
+                if let Some(at) = list.iter().position(|&i| i == oi) {
+                    list.remove(at);
+                } else {
+                    list.push(oi);
+                    list.sort_unstable();
+                }
+            }
+            _ => *entry = Pick::Options(vec![oi]),
+        }
+        cx.notify();
+    }
+
+    /// "Something else": a box for your own words, ready to type in.
+    pub(crate) fn pick_other(&mut self, agent_id: i64, item: usize, qi: usize, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if let Some(agent) = self.agent_mut(agent_id) {
+            agent.answers.insert((item, qi), Pick::Other);
+        }
+        let input = self
+            .answer_inputs
+            .entry((agent_id, item, qi))
+            .or_insert_with(|| cx.new(|cx| crate::text_input::TextInput::new("Your answer, in your own words", cx)))
+            .clone();
+        window.focus(&input.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Fills in every question you haven't answered with the agent's recommendation.
+    pub(crate) fn use_recommended(&mut self, agent_id: i64, item: usize, cx: &mut Context<Self>) {
+        let questions = self.questions_at(agent_id, item);
+        let open: Vec<usize> = (0..questions.len()).filter(|&qi| self.answer_text(agent_id, item, qi, &questions[qi], cx).is_none()).collect();
+        let Some(agent) = self.agent_mut(agent_id) else { return };
+        for qi in open {
+            agent.answers.insert((item, qi), Pick::Options(vec![questions[qi].recommended.unwrap_or(0)]));
+        }
+        cx.notify();
+    }
+
+    /// Sends every answer at once (only when each question has one).
+    pub(crate) fn send_answers(&mut self, agent_id: i64, item: usize, cx: &mut Context<Self>) {
+        let questions = self.questions_at(agent_id, item);
+        if questions.is_empty() {
             return;
         }
-        let answers: Vec<(Question, String)> = questions
-            .iter()
-            .enumerate()
-            .map(|(q, quest)| (quest.clone(), quest.options[agent.answers[&(item, q)]].clone()))
-            .collect();
+        let answers: Option<Vec<(Question, String)>> =
+            questions.iter().enumerate().map(|(qi, q)| self.answer_text(agent_id, item, qi, q, cx).map(|a| (q.clone(), a))).collect();
+        let Some(answers) = answers else {
+            self.toast(Tone::Info, "Answer every question first, or use the recommended answers for the rest.", cx);
+            return;
+        };
+        let Some(agent) = self.agent_mut(agent_id) else { return };
         agent.answers.retain(|(i, _), _| *i != item);
         let sub_id = agent.record.subproject_id;
+        self.answer_inputs.retain(|(a, i, _), _| !(*a == agent_id && *i == item));
         if let Some(p) = self.pipelines.get_mut(&sub_id) {
             p.note = None;
         }
@@ -637,7 +698,13 @@ impl Monaged {
         self.bypass_budget = true;
         self.send_prompt(agent_id, pipeline::answers_message(&answers, false));
         self.bypass_budget = false;
+        self.focus_request = Some(agent_id);
         cx.notify();
+    }
+
+    /// The "something else" box that has the keyboard: (agent, reply item).
+    pub(crate) fn focused_answer_box(&self, window: &gpui::Window, cx: &gpui::App) -> Option<(i64, usize)> {
+        self.answer_inputs.iter().find(|(_, input)| input.focus_handle(cx).is_focused(window)).map(|((agent, item, _), _)| (*agent, *item))
     }
 
     // ---- Rendering --------------------------------------------------------------------
@@ -1054,43 +1121,230 @@ impl Monaged {
             .into_any_element()
     }
 
-    /// One question from an agent, with its options as buttons.
-    pub(crate) fn render_question_card(&self, agent_id: i64, item: usize, qi: usize, q: &Question, answered: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// An agent's questions as one card: each with its options (what each
+    /// means under it, the recommended one marked) and "something else" with a
+    /// box for your own words; how many are answered, the recommended answers
+    /// in one click, and Send. Once sent, what you answered.
+    pub(crate) fn render_question_set(&self, agent_id: i64, item: usize, questions: &[Question], cx: &mut Context<Self>) -> AnyElement {
+        self.question_set(agent_id, item, questions, false, cx)
+    }
+
+    /// The same, inside another card (the dashboard's): no frame of its own.
+    fn question_set(&self, agent_id: i64, item: usize, questions: &[Question], nested: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(agent) = self.agent(agent_id) else { return div().into_any_element() };
-        let chosen = agent.answers.get(&(item, qi)).copied();
-        let options = q.options.iter().enumerate().map(|(oi, option)| {
-            let selected = chosen == Some(oi);
-            let mut text = option.clone();
-            if q.recommended == Some(oi) {
-                text.push_str("  (recommended)");
-            }
+        let name = agent.record.name.clone();
+        // Answered once a message of yours (or auto mode's) follows.
+        let reply = agent.items.get(item + 1..).unwrap_or_default().iter().find_map(|i| if let Item::User(t) = i { Some(t.clone()) } else { None });
+        let n = questions.len();
+        let title = if n == 1 { format!("A question from {name}") } else { format!("{n} questions from {name}") };
+        let head = |status: String, attention: bool| {
             div()
-                .id(SharedString::from(format!("q-{agent_id}-{item}-{qi}-{oi}")))
-                .px(px(10.))
-                .py(px(5.))
-                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(icon(Icon::Ask).size(px(15.)).text_color(rgb(if attention { theme::red_text() } else { theme::text_3() })))
+                .child(div().flex_1().min_w(px(0.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())).child(title.clone()))
+                .child(div().flex_none().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(if attention { theme::red_text() } else { theme::text_3() })).child(status))
+        };
+        let number = |qi: usize| {
+            div()
+                .flex_none()
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
                 .border_1()
-                .text_size(px(13.))
-                .border_color(rgb(if selected { theme::text() } else { theme::line_strong() }))
-                .when(selected, |d| d.bg(rgb(theme::selected())))
-                .when(!answered, |d| {
-                    d.cursor_pointer().hover(|s| s.bg(rgb(theme::hover()))).on_click(cx.listener(move |this, _, _, cx| {
-                        this.answer_question(agent_id, item, qi, oi, cx)
-                    }))
-                })
-                .child(text)
-        });
-        gate_card("Question")
-            .border_color(rgb(if answered { theme::line() } else { theme::red() }))
-            .child(div().font_weight(FontWeight::MEDIUM).child(q.question.clone()))
-            .when(!q.why.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(q.why.clone())))
-            .child(div().flex().flex_wrap().gap_2().children(options))
-            .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(if answered {
-                "Answered."
+                .border_color(rgb(theme::line_strong()))
+                .font_family(theme::MONO)
+                .text_size(px(10.5))
+                .text_color(rgb(theme::text_2()))
+                .child((qi + 1).to_string())
+        };
+        let topic = |q: &Question| {
+            (!q.header.is_empty()).then(|| div().font_family(theme::MONO).text_size(px(10.5)).text_color(rgb(theme::text_3())).child(q.header.to_uppercase()))
+        };
+
+        // Sent: each question with what you answered.
+        if let Some(reply) = reply {
+            let given = pipeline::parse_answers(&reply);
+            return ui::card()
+                .gap(px(10.))
+                .child(head("answered".into(), false))
+                .children(questions.iter().enumerate().map(|(qi, q)| {
+                    let answer = given.as_ref().and_then(|g| g.get(qi).cloned()).unwrap_or_else(|| "answered in your message".into());
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(10.))
+                        .child(number(qi))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.))
+                                .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(q.question.clone()))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .gap(px(6.))
+                                        .text_size(px(13.))
+                                        .text_color(rgb(theme::text()))
+                                        .child(div().pt(px(3.)).child(icon(Icon::Check).size(px(12.)).text_color(rgb(theme::text_3()))))
+                                        .child(div().flex_1().min_w(px(0.)).child(answer)),
+                                ),
+                        )
+                }))
+                .into_any_element();
+        }
+
+        let picks: Vec<Option<Pick>> = (0..n).map(|qi| agent.answers.get(&(item, qi)).cloned()).collect();
+        let done = (0..n).filter(|&qi| self.answer_text(agent_id, item, qi, &questions[qi], cx).is_some()).count();
+        let status = if done == n { "ready to send".to_string() } else if n == 1 { "waiting for you".to_string() } else { format!("{done} of {n} answered") };
+        let key = |qi: usize, oi: usize| agent_id as usize * 1_000_000 + item * 1_000 + qi * 20 + oi;
+
+        let option_row = |id: usize, selected: bool, multi: bool, label: String, description: String, recommended: bool| {
+            let mark = if multi {
+                div()
+                    .size(px(15.))
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(rgb(if selected { theme::text() } else { theme::line_strong() }))
+                    .when(selected, |d| d.bg(rgb(theme::text())))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .children(selected.then(|| icon(Icon::Check).size(px(11.)).text_color(rgb(theme::bg()))))
             } else {
-                "Pick an option, or type your own answer."
-            }))
-            .into_any_element()
+                div()
+                    .size(px(15.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(if selected { theme::text() } else { theme::line_strong() }))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .children(selected.then(|| div().size(px(7.)).rounded_full().bg(rgb(theme::text()))))
+            };
+            div()
+                .id(("q-option", id))
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .px(px(11.))
+                .py(px(7.))
+                .rounded(px(7.))
+                .border_1()
+                .border_color(rgb(if selected { theme::text_3() } else { theme::line() }))
+                .when(selected, |d| d.bg(rgb(theme::selected())))
+                .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::hover())).border_color(rgb(theme::line_strong()))))
+                .cursor_pointer()
+                .child(div().flex_none().pt(px(2.)).child(mark))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(div().text_size(px(13.5)).text_color(rgb(theme::text())).child(label))
+                                .when(recommended, |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .px(px(5.))
+                                            .rounded(px(3.))
+                                            .border_1()
+                                            .border_color(rgb(theme::line_strong()))
+                                            .font_family(theme::MONO)
+                                            .text_size(px(10.))
+                                            .text_color(rgb(theme::text_2()))
+                                            .child("recommended"),
+                                    )
+                                }),
+                        )
+                        .when(!description.is_empty(), |d| d.child(div().text_size(px(12.5)).line_height(px(18.)).text_color(rgb(theme::text_3())).child(description))),
+                )
+        };
+
+        let blocks = questions.iter().enumerate().map(|(qi, q)| {
+            let pick = picks[qi].clone();
+            let multi = q.multi;
+            let options = q.options.iter().enumerate().map(|(oi, o)| {
+                let selected = matches!(&pick, Some(Pick::Options(list)) if list.contains(&oi));
+                option_row(key(qi, oi), selected, multi, o.label.clone(), o.description.clone(), q.recommended == Some(oi))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_option(agent_id, item, qi, oi, multi, cx)))
+                    .into_any_element()
+            });
+            let other_on = matches!(pick, Some(Pick::Other));
+            let other = option_row(key(qi, 19), other_on, multi, "Something else…".into(), String::new(), false)
+                .on_click(cx.listener(move |this, _, window, cx| this.pick_other(agent_id, item, qi, window, cx)));
+            let input = other_on.then(|| self.answer_inputs.get(&(agent_id, item, qi)).cloned()).flatten();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .when(qi > 0, |d| d.pt(px(14.)).border_t_1().border_color(rgb(theme::line())))
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(10.))
+                        .child(number(qi))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.))
+                                .children(topic(q))
+                                .child(div().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())).child(q.question.clone()))
+                                .when(!q.why.is_empty(), |d| d.child(div().text_size(px(12.5)).line_height(px(18.)).text_color(rgb(theme::text_3())).child(q.why.clone())))
+                                .when(multi, |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child("Pick any that apply."))),
+                        ),
+                )
+                .child(div().flex().flex_col().gap(px(6.)).pl(px(30.)).children(options).child(other).children(input.map(|i| div().pl(px(25.)).child(i))))
+        });
+
+        let all = done == n;
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pt(px(12.))
+            .border_t_1()
+            .border_color(rgb(theme::line()))
+            .when(!all, |d| {
+                d.child(
+                    ui::button(("q-recommended", key(0, 0)), Kind::Secondary, None, if done == 0 { "Use the recommended answers" } else { "Recommended for the rest" })
+                        .tooltip(crate::shell::tip("Pick the option the agent recommends wherever you haven't answered"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.use_recommended(agent_id, item, cx))),
+                )
+            })
+            .child(ui::one_line(div().flex_1()).text_size(px(12.)).text_color(rgb(theme::text_3())).child(if all { "" } else { "Or reply in the message box." }))
+            .child(if all {
+                ui::button(("q-send", key(0, 0)), Kind::Primary, Some(Icon::Send), if n == 1 { "Send the answer".to_string() } else { format!("Send {n} answers") })
+                    .on_click(cx.listener(move |this, _, _, cx| this.send_answers(agent_id, item, cx)))
+                    .into_any_element()
+            } else {
+                div()
+                    .id(("q-send-off", key(0, 0)))
+                    .tooltip(crate::shell::tip("Answer every question first"))
+                    .child(ui::disabled_button(("q-send-disabled", key(0, 0)), Kind::Primary, Some(Icon::Send), if n == 1 { "Send the answer".to_string() } else { format!("Send {n} answers") }))
+                    .into_any_element()
+            });
+
+        let frame = if nested { div().flex().flex_col().gap(px(14.)).pt(px(4.)) } else { ui::card().gap(px(14.)).border_color(rgb(theme::red_line())) };
+        frame.child(head(status, !all)).children(blocks).child(footer).into_any_element()
     }
 
     /// The questions in an agent's last reply that still wait for an answer.
@@ -1100,28 +1354,27 @@ impl Monaged {
             return Vec::new();
         }
         let Some(item) = agent.items.iter().rposition(|i| matches!(i, Item::Agent(_))) else { return Vec::new() };
-        let Item::Agent(text) = &agent.items[item] else { return Vec::new() };
-        pipeline::directives(text)
-            .into_iter()
-            .filter_map(|d| if let Directive::Question(q) = d { Some(q) } else { None })
-            .enumerate()
-            .map(|(qi, q)| self.render_question_card(agent_id, item, qi, &q, false, cx))
-            .collect()
+        let questions = self.questions_at(agent_id, item);
+        if questions.is_empty() {
+            return Vec::new();
+        }
+        vec![self.question_set(agent_id, item, &questions, true, cx)]
     }
 
     /// An agent reply containing `monaged-*` blocks: Markdown plus cards.
     pub(crate) fn render_agent_reply(&self, agent_id: i64, item: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let Some(agent) = self.agent(agent_id) else { return render_markdown(text) };
-        let answered = agent.items[item + 1..].iter().any(|i| matches!(i, Item::User(_)));
-        let mut question_index = 0usize;
+        let questions = self.questions_at(agent_id, item);
+        let mut questions_shown = false;
         let mut column = div().flex().flex_col().gap_2();
         for segment in pipeline::segments(text) {
             let element: AnyElement = match segment {
                 Segment::Text(t) => render_markdown(&t),
-                Segment::Directive(Directive::Question(q)) => {
-                    let qi = question_index;
-                    question_index += 1;
-                    self.render_question_card(agent_id, item, qi, &q, answered, cx)
+                // All of a reply's questions in one card, where the first was.
+                Segment::Directive(Directive::Question(_)) if questions_shown => continue,
+                Segment::Directive(Directive::Question(_)) => {
+                    questions_shown = true;
+                    self.render_question_set(agent_id, item, &questions, cx)
                 }
                 Segment::Directive(Directive::Research(v)) => result_card("Research report", v["summary"].as_str()),
                 Segment::Directive(Directive::Verification(v)) => {

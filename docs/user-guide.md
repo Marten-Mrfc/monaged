@@ -24,7 +24,7 @@ Messages follow one rule: things that *happened* appear bottom right and fade (e
 A subproject's dashboard is the one place for what you need to do there:
 
 - **The request** you started it with, and one line on where it stands. With a pipeline, its stages and **Auto mode** sit on top, with **Stop pipeline** or **Run pipeline**, **All changes** and **New agent**.
-- **Needs you**: every agent's open question (pick an option, or **Reply** with your own words), permission request, form and secret request; the pipeline's "build this?" and the plan to approve; work held below the bar (see the quality gate); a failed session to restart; and the merge, when it waits for you. You answer here; **Open** takes you to the agent when you want the whole conversation.
+- **Needs you**: every agent's open questions (answered right there, the same card as in the conversation), permission request, form and secret request; the pipeline's "build this?" and the plan to approve; work held below the bar (see the quality gate); a failed session to restart; and the merge, when it waits for you. You answer here; **Open** takes you to the agent when you want the whole conversation.
 - **Agents**: each one's state, score, findings and what it's doing, with Open, Changes, Review, **Fix findings** and Stop.
 - **The lead**, on the right: an agent that oversees the others. Ask it how things stand, or tell it what should happen next ("tell the API builder to use UUIDs", "start an agent on the README"); it passes it on. It doesn't write code itself, and it can't accept work below the bar for you. Monaged tells it what happens (a builder passed, was sent back or waits for you), and it answers in a sentence. Every pipeline starts one (Settings → Agents turns that off); elsewhere **Start the lead** does. On a narrow window it opens as a pane.
 
@@ -47,7 +47,7 @@ The inbox opens the dashboard too, and the dashboard button in an agent's header
 - **The chips** under the message box set the session's mode (Manual, Accept edits, Plan, Auto…), model and effort.
 - **Attachments**: paste an image, drop files from Explorer, or use the paperclip.
 - **Queue**: messages typed while the agent works wait for its turn to end, and survive a restart.
-- **Questions**: when an agent asks something, a form appears in its conversation; it waits for your answer.
+- **Questions**: an agent's questions come as one card, numbered, each with why it matters and its options (what each one means, the recommended one marked; checkboxes when several can apply). **Something else…** on any question opens a box for your own words. Nothing goes out until you press **Send** (or Enter in a box), so you can change your mind; **Use the recommended answers** fills in the rest. Afterwards the card shows what you answered. You can still reply in the message box instead. Forms a tool asks you to fill in appear in the conversation too, and wait for you.
 - **Steps fold into one line**: a run of tool calls (and the agent's thinking) shows as one line that says what it did, such as "Read 4 files, searched twice and ran a command · 7 steps", with failures in red; click it to see each step. Settings → General (or Ctrl K → "Show every step of an agent") shows every step instead.
 - **While it works**, the line under the conversation names the step that's running (the command, the file), the step number and the time, with **Stop** (or Esc).
 - **When a turn ends**: how long it took, how many steps, and how many files it changed (click to open its changes); **Copy reply** appears when you point at it.
@@ -85,7 +85,7 @@ Summaries and reviews run after every turn (Settings → Reviews turns that off)
 
 **The quality gate.** A builder or the integrator saying it's done isn't enough: Monaged reviews the work first, and it needs **4/5** (Settings → Reviews: 3, 4 or 5) to count. Below that, the findings and failing tests go back to the agent to fix, twice; then it waits for you on the dashboard with **Fix again**, **Review again**, **Changes** and **Accept anyway** (which is logged). Integration starts when every builder is through, and merging into `develop` by itself needs the same score. When reviews are off, the work waits for you instead of going through unchecked. Tests that already failed on the branch the agent started from don't count against it: when the tests fail, Monaged runs them on that branch too, and only failures that are new are the agent's.
 
-Questions from pipeline agents show as cards with options (the recommended one is marked). Any stage can be run again from the Pipeline tab.
+Questions from pipeline agents show as one card with their options (the recommended ones marked) and room for your own answers; auto mode answers with the recommended options. Any stage can be run again from the Pipeline tab.
 
 ## Agents working together
 

@@ -1904,6 +1904,26 @@ impl Monaged {
         match item {
             Item::User(text) if text.starts_with(pipeline::BRIEF_HEADER) => pipeline_ui::render_brief(text),
             Item::User(text) if text.starts_with("[monaged-ask #") || text.contains(coord::DIGEST_HEADER) => coord_ui::render_user_message(text),
+            // The answers to a question card: the card above shows each one.
+            Item::User(text) if pipeline::parse_answers(text).is_some() => {
+                let n = pipeline::parse_answers(text).map_or(0, |a| a.len());
+                let auto = text.starts_with("Answers (chosen automatically");
+                div()
+                    .flex()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme::text_3()))
+                    .child(icon_sized(Icon::Check, 12.).text_color(rgb(theme::text_3())))
+                    .child(match (auto, n) {
+                        (true, 1) => "Auto mode answered the question".to_string(),
+                        (true, n) => format!("Auto mode answered {n} questions"),
+                        (false, 1) => "You answered the question".to_string(),
+                        (false, n) => format!("You answered {n} questions"),
+                    })
+                    .into_any_element()
+            }
             Item::User(text) if text.starts_with(crate::lead::UPDATE_PREFIX) => div()
                 .flex()
                 .items_start()

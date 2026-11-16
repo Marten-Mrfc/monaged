@@ -322,10 +322,33 @@ impl Pipeline {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Question {
+    /// A short topic ("Storage"), when the agent gives one.
+    pub header: String,
     pub question: String,
     pub why: String,
-    pub options: Vec<String>,
+    pub options: Vec<QOption>,
     pub recommended: Option<usize>,
+    /// More than one option can be picked.
+    pub multi: bool,
+}
+
+/// One answer an agent offers: a label, and what choosing it means.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QOption {
+    pub label: String,
+    pub description: String,
+}
+
+impl Question {
+    /// The options' labels (for messages to the lead and auto mode).
+    pub fn labels(&self) -> Vec<String> {
+        self.options.iter().map(|o| o.label.clone()).collect()
+    }
+
+    /// The option auto mode and "Use the recommended answers" pick.
+    pub fn recommended_label(&self) -> String {
+        self.options.get(self.recommended.unwrap_or(0)).map(|o| o.label.clone()).unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -419,12 +442,46 @@ fn parse_directive(kind: &str, body: &str) -> Directive {
 
 fn parse_question(value: &Value) -> Option<Question> {
     let question = value["question"].as_str()?.trim().to_string();
-    let options: Vec<String> = value["options"].as_array()?.iter().filter_map(|o| o.as_str().map(str::to_owned)).collect();
+    // Options are plain strings, or {"label", "description"} objects.
+    let options: Vec<QOption> = value["options"]
+        .as_array()?
+        .iter()
+        .filter_map(|o| match o {
+            Value::String(s) => Some(QOption { label: s.trim().to_string(), description: String::new() }),
+            Value::Object(_) => {
+                let label = o["label"].as_str().or(o["title"].as_str())?.trim().to_string();
+                Some(QOption { label, description: o["description"].as_str().unwrap_or_default().trim().to_string() })
+            }
+            _ => None,
+        })
+        .filter(|o| !o.label.is_empty())
+        .collect();
     if question.is_empty() || options.is_empty() {
         return None;
     }
     let recommended = value["recommended"].as_u64().map(|i| i as usize).filter(|i| *i < options.len());
-    Some(Question { question, why: value["why"].as_str().unwrap_or_default().to_string(), options, recommended })
+    Some(Question {
+        header: value["header"].as_str().unwrap_or_default().trim().chars().take(24).collect(),
+        question,
+        why: value["why"].as_str().unwrap_or_default().to_string(),
+        options,
+        recommended,
+        multi: value["multi"].as_bool().or(value["multiSelect"].as_bool()).unwrap_or(false),
+    })
+}
+
+/// The answers in a message `answers_message` wrote ("1. question → answer"),
+/// in order; None when the message isn't one.
+pub fn parse_answers(message: &str) -> Option<Vec<String>> {
+    if !(message.starts_with("Answers from the developer:") || message.starts_with("Answers (chosen automatically")) {
+        return None;
+    }
+    let answers: Vec<String> = message
+        .lines()
+        .filter(|l| l.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+        .filter_map(|l| l.rsplit_once(" → ").map(|(_, a)| a.trim().to_string()))
+        .collect();
+    (!answers.is_empty()).then_some(answers)
 }
 
 /// The message that answers a set of questions, e.g. after the user (or auto mode) chose.
@@ -517,12 +574,15 @@ pub fn workstreams(plan: &Value) -> Vec<Workstream> {
 // ---- Briefs -------------------------------------------------------------------
 
 const QUESTION_FORMAT: &str = "To ask the developer something you can't find out from the code, put each question in its \
-own block, then stop and wait for the answers (max 3 per turn):\n\n\
+own block, then stop and wait for the answers (at most 4 per turn; they're shown together, and the developer answers \
+them all at once):\n\n\
 ```monaged-question\n\
-{\"question\": \"...\", \"why\": \"how the answer changes the work\", \"options\": [\"...\", \"...\"], \"recommended\": 0}\n\
+{\"header\": \"Storage\", \"question\": \"...?\", \"why\": \"how the answer changes the work\", \"options\": [{\"label\": \"...\", \"description\": \"what choosing it means\"}, {\"label\": \"...\", \"description\": \"...\"}], \"recommended\": 0}\n\
 ```\n\n\
-`recommended` is the index of the option you'd pick. Good questions raise everyone's confidence; don't ask what the code \
-already tells you.";
+`header` is a topic of a word or two; give 2 to 4 options, each with a short label and a one-line description of its \
+consequence; `recommended` is the index of the option you'd pick; add `\"multi\": true` when several can apply. The \
+developer can always answer in their own words instead. Good questions raise everyone's confidence; don't ask what the \
+code already tells you.";
 
 /// How builders work together through Monaged's MCP tools (Phase 4).
 const COORDINATION: &str = "## Working with the other builders\n\

@@ -48,7 +48,7 @@ pub fn brief(sub: &str, branch: &str, request: Option<&str>) -> String {
          sentences; the user reads along.\n\n\
          Ask the user only what only they can decide, as a question block (then stop and wait):\n\n\
          ```monaged-question\n\
-         {{\"question\": \"...\", \"why\": \"how the answer changes the work\", \"options\": [\"...\", \"...\"], \"recommended\": 0}}\n\
+         {{\"header\": \"Topic\", \"question\": \"...?\", \"why\": \"how the answer changes the work\", \"options\": [{{\"label\": \"...\", \"description\": \"what it means\"}}, {{\"label\": \"...\", \"description\": \"...\"}}], \"recommended\": 0}}\n\
          ```\n\n\
          {request}\n\n\
          Start with `team_status`, then greet the user in two sentences at most: where things stand and what (if anything) \
