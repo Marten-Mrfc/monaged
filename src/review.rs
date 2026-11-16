@@ -238,9 +238,11 @@ done
   if [ $icode -ne 0 ]; then echo "MONAGED_INSTALL_FAILED $icode"; printf '%s\n' "$iout" | tail -n 15; exit 0; fi
 fi
 out=$(timeout 600 "$@" "$cmd" 2>&1); code=$?
+{strip}
 printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)' | head -n 200 | sed 's/^/MONAGED_FAILLINE /'
 echo "MONAGED_EXIT $code"
 printf '%s\n' "$out" | tail -n 30"#,
+        strip = STRIP_COLORS,
         wt = quote(worktree),
         given = quote(command.unwrap_or_default()),
         js = JS_PACKAGE_MANAGER,
@@ -254,6 +256,32 @@ printf '%s\n' "$out" | tail -n 30"#,
         let now: String = out.lines().filter_map(|l| l.strip_prefix("MONAGED_FAILLINE ")).collect::<Vec<_>>().join("\n");
         base.and_then(|base| base_failures(distro, worktree, base, command, fence)).is_some_and(|before| only_failed_before(&now, &before))
     })
+}
+
+/// Takes terminal colours out of `$out`. Test runners colour their output
+/// even into a pipe (vitest's " FAIL " starts with an escape code), which
+/// hid every failing test's name, so failures that were there before the
+/// change looked new.
+const STRIP_COLORS: &str = r#"out=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g')"#;
+
+/// The same for text read back in Rust (a review saved before colours were taken out).
+fn strip_colors(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            while let Some(&n) = chars.peek() {
+                chars.next();
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Works out a JavaScript project's package manager (`$pm`, empty for
@@ -271,6 +299,7 @@ fi"#;
 /// Reads `run_checks`' output. `failed_before` says whether the failing tests
 /// of `command` failed on the base branch too (only asked when tests fail).
 fn read_checks(out: &str, failed_before: impl FnOnce(&str) -> bool) -> Checks {
+    let out = &strip_colors(out);
     if out.contains("MONAGED_NO_FENCE") {
         return Checks::Unavailable("this project uses the sandbox, and running the tests fenced needs bubblewrap in WSL (the setup guide's extras install it)".into());
     }
@@ -341,10 +370,15 @@ wt=$(pwd -P)
 {runner}tmp=$(mktemp -d) || exit 1
 if ! git worktree add --detach -q "$tmp/base" {sha} >/dev/null 2>&1; then rm -rf "$tmp"; echo MONAGED_NO_BASE; exit 0; fi
 cd "$tmp/base"
-# Installed dependencies aren't in git: borrow the worktree's.
-for d in node_modules .venv venv vendor; do [ -e "$wt/$d" ] && [ ! -e "$d" ] && ln -s "$wt/$d" "$d"; done
+# Installed dependencies aren't in git: borrow the worktree's (a monorepo has
+# node_modules in its packages too).
+for d in .venv venv vendor; do [ -e "$wt/$d" ] && [ ! -e "$d" ] && ln -s "$wt/$d" "$d"; done
+(cd "$wt" && find . -maxdepth 3 -name node_modules -prune -type d 2>/dev/null) | while IFS= read -r d; do
+  [ ! -e "$d" ] && [ -d "$(dirname "$d")" ] && ln -s "$wt/$d" "$d"
+done
 [ -d "$wt/target" ] && export CARGO_TARGET_DIR="$wt/target"
 out=$(timeout 600 "$@" {cmd} 2>&1); code=$?
+{strip}
 cd "$wt"
 git worktree remove --force "$tmp/base" >/dev/null 2>&1
 rm -rf "$tmp"
@@ -355,6 +389,7 @@ printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)
         sha = quote(&sha),
         cmd = quote(command),
         runner = runner(fence),
+        strip = STRIP_COLORS,
     );
     let out = run(distro, &script).ok()?;
     let code: i32 = out.lines().find_map(|l| l.strip_prefix("MONAGED_EXIT ")).and_then(|c| c.trim().parse().ok())?;
@@ -797,6 +832,16 @@ mod checks_tests {
     }
 
     #[test]
+    fn coloured_failures_are_read_like_plain_ones() {
+        // vitest colours " FAIL " even into a pipe; that hid every failing test.
+        let line = "\u{1b}[41m\u{1b}[1m FAIL \u{1b}[22m\u{1b}[49m \u{1b}[30m\u{1b}[45m tools \u{1b}[49m\u{1b}[39m app/x.test.ts\u{1b}[2m > \u{1b}[22madds";
+        assert_eq!(strip_colors(line), " FAIL   tools  app/x.test.ts > adds");
+        assert_eq!(failure_lines(&strip_colors(line)).len(), 1);
+        let c = read(&format!("MONAGED_CMD bun run test\nMONAGED_EXIT 1\n{line}\n"));
+        assert!(matches!(&c, Checks::Failed { tail, .. } if !tail.contains('\u{1b}')), "{}", c.describe());
+    }
+
+    #[test]
     fn a_failed_install_says_what_failed() {
         let c = read("MONAGED_CMD bun run test\nMONAGED_INSTALL bun install --frozen-lockfile\nMONAGED_INSTALL_FAILED 1\nerror: lockfile had changes, but lockfile is frozen\n");
         assert!(matches!(&c, Checks::Unavailable(why) if why.contains("bun install --frozen-lockfile") && why.contains("lockfile is frozen")), "{}", c.describe());
@@ -844,5 +889,22 @@ mod wsl_checks {
         assert!(matches!(&bun, Checks::Passed(c) if c == "bun run test"), "bun project: {}", bun.describe());
         println!("npm project: {}", npm.describe());
         assert!(!matches!(npm, Checks::Failed { .. }), "an npm project without a Linux npm must not count as failing: {}", npm.describe());
+    }
+}
+
+#[cfg(test)]
+mod real_worktree {
+    use super::*;
+
+    /// Runs the checks on a real worktree, with the base comparison
+    /// (`MONAGED_TEST_WORKTREE`, `MONAGED_TEST_BASE`; needs WSL):
+    /// `cargo test -- --ignored checks_on_a_real_worktree --nocapture`.
+    #[test]
+    #[ignore]
+    fn checks_on_a_real_worktree() {
+        let (Ok(worktree), Ok(base)) = (std::env::var("MONAGED_TEST_WORKTREE"), std::env::var("MONAGED_TEST_BASE")) else { return };
+        let distro = std::env::var("MONAGED_TEST_DISTRO").unwrap_or_else(|_| "Ubuntu".into());
+        let checks = run_checks(&distro, &worktree, None, Some(&base), false);
+        println!("CHECKS: {}", checks.describe().lines().take(3).collect::<Vec<_>>().join(" | "));
     }
 }

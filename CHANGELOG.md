@@ -4,6 +4,13 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-16
+
+### Fixed
+
+- **Tests that already failed before a change still counted against the agent when the runner prints in colour**: vitest colours its " FAIL " lines even into a pipe, so Monaged found no failing test names, couldn't compare them with the base branch, and scored the work as failing (at most 2/5). Colours are now taken out first, so a run whose failures all fail on the base branch too counts as "failed before" (at most 4/5), as intended. Seen on the Mobietrain Rework run: 11,714 passed, 84 failed in 7 files that fail on the base commit as well.
+- **The base-branch comparison in a monorepo**: it borrows the worktree's node_modules from the packages too, not only the root one, so the base run resolves the same dependencies.
+
 ## [0.9.1] - 2026-11-16
 
 ### Fixed
@@ -230,6 +237,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.9.2]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.2
 [0.9.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.1
 [0.9.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.8.0
