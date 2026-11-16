@@ -12,6 +12,15 @@ use crate::review;
 use crate::ui::Kind;
 use crate::{AgentSpec, Monaged, button, dots, git, theme, tone_color, ui};
 
+/// The plan's workstreams, or one for the whole plan when it names none.
+pub(crate) fn plan_streams(plan: &Value) -> Vec<pipeline::Workstream> {
+    let mut streams = pipeline::workstreams(plan);
+    if streams.is_empty() {
+        streams.push(pipeline::Workstream { name: "all".into(), value: serde_json::json!({ "name": "all", "goal": "the whole plan" }) });
+    }
+    streams
+}
+
 impl Monaged {
     pub(crate) fn unique_agent_name(&self, sub_id: i64, base: &str) -> String {
         let taken = |name: &str| self.agents.iter().any(|a| a.record.subproject_id == sub_id && a.record.name == name);
@@ -69,7 +78,7 @@ impl Monaged {
 
     pub(crate) fn role_spec(name: &str, role: Role, brief: String, select: bool) -> AgentSpec {
         let on_feature_branch = role == Role::Integrator;
-        AgentSpec { name: name.into(), role, on_feature_branch, brief: Some(brief), select }
+        AgentSpec { name: name.into(), role, on_feature_branch, brief: Some(brief), select, merge_from: Vec::new() }
     }
 
     // ---- Stage transitions ---------------------------------------------------
@@ -151,35 +160,89 @@ impl Monaged {
 
     fn launch_builders(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
-        if p.stage != Stage::Approve {
+        if p.stage != Stage::Approve || p.plan.is_none() {
             return;
-        }
-        let Some(plan) = p.plan.clone() else { return };
-        let mut streams = pipeline::workstreams(&plan);
-        if streams.is_empty() {
-            streams.push(pipeline::Workstream { name: "all".into(), value: serde_json::json!({ "name": "all", "goal": "the whole plan" }) });
         }
         p.stage = Stage::Build;
         p.done.clear();
-        p.note = Some(format!("{} builder{} working in parallel.", streams.len(), if streams.len() == 1 { " is" } else { "s are" }));
-        let request = p.request.clone();
         self.save_pipeline(sub_id);
-        let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
+        // This run's builders are the agents made from now on.
+        let newest = self.agents.iter().map(|a| a.record.id).max().unwrap_or(0);
+        let _ = self.store.set_setting(&format!("pipeline:{sub_id}:build_from"), &newest.to_string());
+        let started = self.launch_ready_builders(sub_id, cx);
+        let total = self.pipelines.get(&sub_id).and_then(|p| p.plan.as_ref()).map_or(0, |plan| plan_streams(plan).len());
+        let waiting = total.saturating_sub(started.len());
+        let note = if waiting == 0 {
+            format!("{} builder{} working in parallel.", started.len(), if started.len() == 1 { " is" } else { "s are" })
+        } else {
+            format!(
+                "{} builder{} working; {waiting} more start{} once the work they build on passes review.",
+                started.len(),
+                if started.len() == 1 { " is" } else { "s are" },
+                if waiting == 1 { "s" } else { "" }
+            )
+        };
+        self.set_note(sub_id, note);
+    }
+
+    /// This build run's builders, as (workstream, agent name, branch). Runs
+    /// from before builders waited for each other count every builder.
+    fn run_builders(&self, sub_id: i64) -> Vec<(String, String, String)> {
+        let from: i64 = self.store.setting(&format!("pipeline:{sub_id}:build_from")).and_then(|v| v.parse().ok()).unwrap_or(0);
+        self.current_builders(sub_id)
+            .iter()
+            .filter(|a| a.record.id > from)
+            .filter_map(|a| match a.role() {
+                Role::Builder(stream) => Some((stream, a.record.name.clone(), a.record.branch.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Starts every workstream whose dependencies passed the gate, with their
+    /// work merged into its branch. Returns the workstreams it started.
+    pub(crate) fn launch_ready_builders(&mut self, sub_id: i64, cx: &mut Context<Self>) -> Vec<String> {
+        // Runs from before builders waited for each other started them all at once.
+        if self.store.setting(&format!("pipeline:{sub_id}:build_from")).is_none() {
+            return Vec::new();
+        }
+        let Some(p) = self.pipelines.get(&sub_id) else { return Vec::new() };
+        let Some(plan) = p.plan.clone().filter(|_| p.stage == Stage::Build) else { return Vec::new() };
+        let (request, done_names) = (p.request.clone(), p.done.clone());
+        let streams = plan_streams(&plan);
+        let run = self.run_builders(sub_id);
+        let mut started: Vec<String> = run.iter().map(|(s, ..)| s.clone()).collect();
+        started.extend(self.starting_streams.iter().filter(|(id, _)| *id == sub_id).map(|(_, s)| s.clone()));
+        let done: Vec<String> = run.iter().filter(|(_, n, _)| done_names.contains(n)).map(|(s, ..)| s.clone()).collect();
+        let ready = pipeline::ready_streams(&streams, &started, &done);
+        let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return Vec::new() };
         let sub_slug = git::slug(&sub.name);
         let mut used: Vec<String> = Vec::new();
-        for stream in &streams {
+        for stream in &ready {
             let mut name = self.unique_agent_name(sub_id, &format!("build-{}", stream.name));
             while used.contains(&name) {
                 name = format!("{name}-x");
             }
             used.push(name.clone());
             let branch = format!("agent/{sub_slug}/{name}");
-            let brief = pipeline::builder_brief(&request, &plan, stream, &branch);
-            self.spawn_agent(sub_id, Self::role_spec(&name, Role::Builder(stream.name.clone()), brief, false), cx);
+            // The reviewed work it builds on.
+            let base: Vec<(String, String)> = stream
+                .depends_on()
+                .iter()
+                .filter_map(|d| run.iter().find(|(s, n, _)| s == d && done_names.contains(n)).map(|(s, _, b)| (s.clone(), b.clone())))
+                .collect();
+            let merged: Vec<String> = base.iter().map(|(s, _)| s.clone()).collect();
+            let brief = pipeline::builder_brief(&request, &plan, stream, &branch, &merged);
+            let mut spec = Self::role_spec(&name, Role::Builder(stream.name.clone()), brief, false);
+            spec.merge_from = base.into_iter().map(|(_, b)| b).collect();
+            self.starting_streams.insert((sub_id, stream.name.clone()));
+            self.spawn_agent(sub_id, spec, cx);
         }
+        ready.into_iter().map(|w| w.name).collect()
     }
 
     /// The builder doing each workstream now: the newest one (a rerun replaces the old).
+    /// Workstreams still waiting for their dependencies have none yet.
     pub(crate) fn current_builders(&self, sub_id: i64) -> Vec<&crate::agent::AgentView> {
         let members = self.pipelines.get(&sub_id).map(|p| p.members.clone()).unwrap_or_default();
         let mut latest: Vec<&crate::agent::AgentView> = Vec::new();
@@ -442,6 +505,11 @@ impl Monaged {
         for agent_id in waiting {
             self.review_fresh(agent_id, cx);
         }
+        // Builders whose dependencies passed while Monaged was closing.
+        let building: Vec<i64> = self.pipelines.iter().filter(|(_, p)| p.stage == Stage::Build).map(|(id, _)| *id).collect();
+        for sub_id in building {
+            self.launch_ready_builders(sub_id, cx);
+        }
     }
 
     /// Reviews now, or right after the review that's running (which may be of older work).
@@ -551,7 +619,8 @@ impl Monaged {
             p.done.push(name.clone());
         }
         let finished = builders.iter().filter(|b| p.done.contains(b)).count();
-        let total = builders.len();
+        // Workstreams still waiting for their dependencies have no builder yet, but count.
+        let total = builders.len().max(p.plan.as_ref().map_or(0, |plan| plan_streams(plan).len()));
         let building = p.stage == Stage::Build;
         if finished >= total && building {
             p.note = Some(format!("{name} {how}. Every builder is through. Integrating."));
@@ -559,9 +628,16 @@ impl Monaged {
             self.tell_lead(sub_id, format!("{name} {how}. Every builder is through; the integrator is merging their branches."));
             self.start_integration(sub_id, cx);
         } else {
-            p.note = Some(format!("{name} {how}. {finished} of {total} builders done."));
             self.save_pipeline(sub_id);
-            self.tell_lead(sub_id, format!("{name} {how} ({finished} of {total} builders done)."));
+            // What waited for this work can start now.
+            let started = if building { self.launch_ready_builders(sub_id, cx) } else { Vec::new() };
+            let next = if started.is_empty() {
+                String::new()
+            } else {
+                format!(" Started the builder{} for {}, on top of the reviewed work.", if started.len() == 1 { "" } else { "s" }, started.join(", "))
+            };
+            self.set_note(sub_id, format!("{name} {how}. {finished} of {total} builders done.{next}"));
+            self.tell_lead(sub_id, format!("{name} {how} ({finished} of {total} builders done).{next}"));
         }
         cx.notify();
     }
@@ -1070,9 +1146,35 @@ impl Monaged {
                         )
                     })
             });
+        // Workstreams that start once what they build on has passed review.
+        let waiting: Vec<(String, Vec<String>)> = match (&p.plan, p.stage) {
+            (Some(plan), Stage::Build) if self.store.setting(&format!("pipeline:{sub_id}:build_from")).is_some() => {
+                let run = self.run_builders(sub_id);
+                plan_streams(plan)
+                    .into_iter()
+                    .filter(|w| !run.iter().any(|(s, ..)| *s == w.name) && !self.starting_streams.contains(&(sub_id, w.name.clone())))
+                    .map(|w| {
+                        let open = w.depends_on().into_iter().filter(|d| !run.iter().any(|(s, n, _)| s == d && p.done.contains(n))).collect();
+                        (w.name, open)
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let waiting_rows = waiting.into_iter().enumerate().map(|(i, (stream, open))| {
+            let after = if open.is_empty() { "starting".to_string() } else { format!("after {}", open.join(", ")) };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(ui::status_dot(("build-wait-dot", i), ui::State::Idle))
+                .child(div().flex_1().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_3())).child(format!("build-{stream}")))
+                .child(ui::mono(after))
+        });
         gate_card("Builders")
             .child(div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(format!("Each needs a review of {}/5 or better before it's integrated.", self.min_score())))
             .children(rows)
+            .children(waiting_rows)
             .children(p.gate.held.iter().enumerate().map(|(i, (name, why))| self.render_held(sub_id, i, name, why, cx)))
             .into_any_element()
     }

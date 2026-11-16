@@ -98,7 +98,7 @@ pub fn launch(config: AgentConfig) -> UnboundedReceiver<AgentEvent> {
 
 fn run(config: &AgentConfig, tx: &UnboundedSender<AgentEvent>) -> Result<()> {
     let guard = if config.agents_use_git_accounts { "" } else { AGENT_GIT_GUARD };
-    let mut child = wsl::bash(&config.distro, &format!("cd ~ && {guard}exec {}", config.agent_cmd))
+    let mut child = wsl::bash(&config.distro, &format!("cd ~ && {}{guard}exec {}", wsl::TOOL_PATHS, config.agent_cmd))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

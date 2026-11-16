@@ -77,18 +77,64 @@ fn scrub_line(line: &str) -> String {
         }
         rest = &tail[len..];
     }
-    // "Authorization: Bearer xyz", "password=xyz", "token: xyz"
-    let lower = out.to_lowercase();
-    for key in ["bearer ", "password=", "password: ", "passwd=", "secret=", "token=", "api_key=", "apikey="] {
-        if let Some(at) = lower.find(key) {
+    mask_assignments(&out)
+}
+
+/// Keys whose literal value is a secret: "Authorization: Bearer xyz", "password=xyz", "API_KEY=xyz".
+const SECRET_KEYS: [&str; 8] = ["bearer ", "password=", "password: ", "passwd=", "secret=", "token=", "api_key=", "apikey="];
+
+/// Masks the literal value after each secret key on the line. Code that only
+/// passes a secret along (`hasApiKey={hasApiKey}`, `token=${token}`,
+/// `csrfToken={t}`) shows no value: masking it would hand the reviewer code
+/// that no longer compiles, which it then reports as broken.
+fn mask_assignments(line: &str) -> String {
+    // ASCII lowercase keeps every byte offset the same as in `line`.
+    let lower = line.to_ascii_lowercase();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for key in SECRET_KEYS {
+        let mut from = 0;
+        while let Some(found) = lower[from..].find(key) {
+            let at = from + found;
+            from = at + key.len();
+            // The key on its own, not the end of a longer name like `hasApiKey`.
+            if lower[..at].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric()) {
+                continue;
+            }
             let start = at + key.len();
-            let value_len = out[start..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '&').unwrap_or(out.len() - start);
-            if value_len >= 6 {
-                out.replace_range(start..start + value_len, "[masked]");
+            let value = &line[start..];
+            let len = value
+                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '&' | ';' | ')' | '}' | ']' | '>' | '`'))
+                .unwrap_or(value.len());
+            if len >= 6 && is_literal(&value[..len]) {
+                spans.push((start, start + len));
             }
         }
     }
+    if spans.is_empty() {
+        return line.to_string();
+    }
+    spans.sort_unstable();
+    let mut out = String::with_capacity(line.len());
+    let mut done = 0;
+    for (start, end) in spans {
+        if start < done {
+            continue;
+        }
+        out.push_str(&line[done..start]);
+        out.push_str("[masked]");
+        done = end;
+    }
+    out.push_str(&line[done..]);
     out
+}
+
+/// A value written out, not an expression that reads one from somewhere.
+fn is_literal(value: &str) -> bool {
+    !value.starts_with(['{', '$', '(', '[', '<', '%', '*', '@'])
+        && !value.contains('(')
+        && !value.contains("process.env")
+        && !value.contains("environ")
+        && !value.starts_with("env.")
 }
 
 /// Vault values by name, then token shapes.
@@ -710,6 +756,32 @@ mod tests {
         assert!(out.contains("ghp_short is fine"));
         // Words that merely contain a prefix aren't touched.
         assert_eq!(scrub_tokens("a mask-ant-thing"), "a mask-ant-thing");
+    }
+
+    #[test]
+    fn code_that_passes_a_secret_along_is_left_alone() {
+        // The Mobietrain review saw `hasApiKey=[masked]` and called the JSX broken.
+        for code in [
+            "<StatusCard hasApiKey={hasApiKey} csrfToken={token} />",
+            "const auth = `Bearer ${token}`;",
+            "headers: { Authorization: \"Bearer \" + apiKey },",
+            "api_key=os.getenv(\"MOBIETRAIN_API_KEY\")",
+            "TOKEN=$GITHUB_TOKEN ./deploy.sh",
+            "password=process.env.DB_PASSWORD",
+        ] {
+            assert_eq!(scrub_tokens(code), code);
+        }
+    }
+
+    #[test]
+    fn every_literal_secret_on_a_line_is_masked() {
+        assert_eq!(scrub_tokens("MY_API_KEY=abcdef123456"), "MY_API_KEY=[masked]");
+        assert_eq!(scrub_tokens("?apikey=abcdef123456&token=zyxwvu987654"), "?apikey=[masked]&token=[masked]");
+        assert_eq!(scrub_tokens("export SECRET=s3cr3tvalue; echo ok"), "export SECRET=[masked]; echo ok");
+        // Short values (flags, placeholders) stay.
+        assert_eq!(scrub_tokens("token=abc"), "token=abc");
+        // Non-ASCII before a key doesn't shift where the value is cut.
+        assert_eq!(scrub_tokens("ÄÖ password=hunter2hunter2 ü"), "ÄÖ password=[masked] ü");
     }
 
     #[test]

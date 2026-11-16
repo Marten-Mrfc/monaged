@@ -197,6 +197,9 @@ struct AgentSpec {
     /// Sent as the first message once the session is open.
     brief: Option<String>,
     select: bool,
+    /// Branches merged into the new worktree before the agent starts (a
+    /// builder starting on the reviewed work it depends on).
+    merge_from: Vec<String>,
 }
 
 struct Monaged {
@@ -289,6 +292,8 @@ struct Monaged {
     lead_updates: HashMap<i64, Vec<String>>,
     /// Subprojects whose builders are about to start (git is being checked).
     starting_build: HashSet<i64>,
+    /// (subproject, workstream) builders whose worktree is being made.
+    starting_streams: HashSet<(i64, String)>,
     /// Subprojects whose lead is being created.
     starting_lead: HashSet<i64>,
     /// Agents the lead asked a review of.
@@ -571,6 +576,7 @@ impl Monaged {
             exporting: false,
             starting_lead: HashSet::new(),
             starting_build: HashSet::new(),
+            starting_streams: HashSet::new(),
             dashboard_chat: true,
             awake: false,
             hosts_polled: None,
@@ -1306,7 +1312,7 @@ impl Monaged {
         }
         let number = self.agents.iter().filter(|a| a.record.subproject_id == sub_id).count() + 1;
         self.creating_agent = Some(sub_id);
-        let spec = AgentSpec { name: format!("agent-{number}"), role: Role::Free, on_feature_branch: false, brief: None, select: true };
+        let spec = AgentSpec { name: format!("agent-{number}"), role: Role::Free, on_feature_branch: false, brief: None, select: true, merge_from: Vec::new() };
         self.spawn_agent(sub_id, spec, cx);
     }
 
@@ -1324,25 +1330,56 @@ impl Monaged {
         let pipeline_role = !matches!(spec.role, Role::Free | Role::Lead);
         self.creating_agent = Some(sub_id);
         cx.notify();
+        let merge_from = spec.merge_from.clone();
         cx.spawn(async move |view, cx| {
             let (distro, repo, wt, br, from) =
                 (project.distro.clone(), project.path.clone(), worktree.clone(), branch.clone(), sub.branch.clone());
-            let added = cx.background_spawn(async move { git::add_worktree(&distro, &repo, &wt, &br, &from) }).await;
+            // (branches that conflicted, the commit it starts from), when it starts on other agents' work.
+            let added = cx
+                .background_spawn(async move {
+                    git::add_worktree(&distro, &repo, &wt, &br, &from)?;
+                    if merge_from.is_empty() {
+                        return anyhow::Ok(None);
+                    }
+                    git::merge_branches(&distro, &wt, &merge_from).map(Some)
+                })
+                .await;
             view.update(cx, |this, cx| {
                 this.creating_agent = None;
                 if is_lead {
                     this.starting_lead.remove(&sub_id);
                 }
+                if let Role::Builder(stream) = &spec.role {
+                    this.starting_streams.remove(&(sub_id, stream.clone()));
+                }
+                let merged = match &added {
+                    Ok(merged) => merged.clone(),
+                    Err(_) => None,
+                };
                 match added.and_then(|_| this.store.add_agent(sub_id, &name, &branch, &worktree, &role)) {
                     Ok(record) => {
                         let id = record.id;
+                        // Its review diffs against where it started, not against the
+                        // feature branch (which doesn't have the work it started on).
+                        if let Some((_, head)) = merged.as_ref().filter(|(_, head)| !head.is_empty()) {
+                            let _ = this.store.set_setting(&format!("agent:{id}:base"), head);
+                        }
                         // Pipeline agents belong to the run that started them.
                         if pipeline_role && let Some(p) = this.pipelines.get_mut(&sub_id) {
                             p.members.push(id);
                             this.save_pipeline(sub_id);
                         }
                         let mut agent = AgentView::new(record);
-                        agent.queued_prompt = spec.brief;
+                        let conflicted = merged.map(|(c, _)| c).unwrap_or_default();
+                        agent.queued_prompt = match spec.brief {
+                            Some(brief) if !conflicted.is_empty() => Some(format!(
+                                "{brief}\n\n## Before you start\nMonaged couldn't merge {} into your branch without conflicts. Merge \
+                                 {} yourself first (`git merge <branch>`), keeping both sides' intent, and commit.",
+                                conflicted.iter().map(|b| format!("`{b}`")).collect::<Vec<_>>().join(", "),
+                                if conflicted.len() == 1 { "it" } else { "them" }
+                            )),
+                            brief => brief,
+                        };
                         this.agents.push(agent);
                         if spec.select && this.sel_sub == Some(sub_id) {
                             this.select_agent(id, cx);

@@ -162,6 +162,7 @@ impl Monaged {
             on_feature_branch: false,
             brief: Some(brief(&sub.name, &sub.branch, request.as_deref())),
             select: false,
+            merge_from: Vec::new(),
         };
         self.spawn_agent(sub_id, spec, cx);
     }
@@ -282,7 +283,7 @@ impl Monaged {
                 } else if running >= MAX_AGENTS {
                     ToolReply::error(format!("This subproject already has {running} agents. Give the work to one of them with message_agent, or ask the user to archive some."))
                 } else {
-                    let spec = AgentSpec { name: name.clone(), role: Role::Free, on_feature_branch: false, brief: Some(task), select: false };
+                    let spec = AgentSpec { name: name.clone(), role: Role::Free, on_feature_branch: false, brief: Some(task), select: false, merge_from: Vec::new() };
                     self.spawn_agent(sub_id, spec, cx);
                     let _ = self.store.log_event(sub_id, Some(from), "lead", &format!("The lead started {name}"));
                     ToolReply::ok(format!("Starting {name} in its own worktree; it gets the task as soon as its session is open."))

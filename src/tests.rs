@@ -745,3 +745,57 @@ fn questions_read_both_formats_and_answers_read_back() {
     assert!(parse_answers(&answers_message(&[(qs[0].clone(), "JSON file".into())], true)).is_some());
     assert!(parse_answers("Please fix the coupon test").is_none());
 }
+
+// ---- Builders start in dependency order -------------------------------------------
+
+fn mobietrain_like_plan() -> Vec<pipeline::Workstream> {
+    pipeline::workstreams(&json!({ "workstreams": [
+        { "name": "db-core", "depends_on": [] },
+        { "name": "api-client-worker", "depends_on": ["db-core"] },
+        { "name": "auth-package", "depends_on": ["db-core"] },
+        { "name": "beheer-ui", "depends_on": ["api-client-worker"] },
+        { "name": "settings-screen", "depends_on": ["api-client-worker", "Unknown Stream"] },
+        { "name": "docs", "depends_on": [] },
+    ]}))
+}
+
+fn names(streams: &[pipeline::Workstream]) -> Vec<&str> {
+    streams.iter().map(|w| w.name.as_str()).collect()
+}
+
+#[test]
+fn builders_wait_for_the_work_they_depend_on() {
+    let streams = mobietrain_like_plan();
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    // At the start only what stands alone runs.
+    assert_eq!(names(&pipeline::ready_streams(&streams, &[], &[])), vec!["db-core", "docs"]);
+    // Nothing new while db-core is still being built or reviewed.
+    assert!(pipeline::ready_streams(&streams, &s(&["db-core", "docs"]), &s(&["docs"])).is_empty());
+    // db-core passed: both that build on it start.
+    assert_eq!(names(&pipeline::ready_streams(&streams, &s(&["db-core", "docs"]), &s(&["db-core"]))), vec!["api-client-worker", "auth-package"]);
+    // A dependency the plan doesn't have doesn't block.
+    let started = s(&["db-core", "docs", "api-client-worker", "auth-package"]);
+    assert_eq!(names(&pipeline::ready_streams(&streams, &started, &s(&["db-core", "api-client-worker"]))), vec!["beheer-ui", "settings-screen"]);
+}
+
+#[test]
+fn a_dependency_cycle_starts_everything_instead_of_waiting_forever() {
+    let streams = pipeline::workstreams(&json!({ "workstreams": [
+        { "name": "a", "depends_on": ["b"] },
+        { "name": "b", "depends_on": ["a"] },
+    ]}));
+    assert_eq!(names(&pipeline::ready_streams(&streams, &[], &[])), vec!["a", "b"]);
+    // Depending on itself is ignored.
+    let alone = pipeline::workstreams(&json!({ "workstreams": [{ "name": "x", "depends_on": ["x"] }] }));
+    assert_eq!(names(&pipeline::ready_streams(&alone, &[], &[])), vec!["x"]);
+}
+
+#[test]
+fn a_builder_on_reviewed_work_is_told_so() {
+    let streams = mobietrain_like_plan();
+    let brief = pipeline::builder_brief("req", &json!({}), &streams[1], "agent/x/build-api", &["db-core".to_string()]);
+    assert!(brief.contains("\"db-core\") passed review and is already merged into your branch"));
+    assert!(brief.contains("bun install"));
+    let first = pipeline::builder_brief("req", &json!({}), &streams[0], "agent/x/build-db", &[]);
+    assert!(!first.contains("already merged"));
+}

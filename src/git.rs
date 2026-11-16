@@ -70,6 +70,25 @@ pub fn add_worktree(distro: &str, repo: &str, worktree: &str, branch: &str, from
     Ok(())
 }
 
+/// Merges `branches` into the worktree's branch, one at a time (a builder
+/// starting on the reviewed work it depends on). A merge that conflicts is
+/// aborted and left for the agent. Returns the branches that conflicted and
+/// the commit the worktree starts from, which is what its review diffs against.
+pub fn merge_branches(distro: &str, worktree: &str, branches: &[String]) -> Result<(Vec<String>, String)> {
+    let mut script = format!("cd {} || exit 1\n", quote(worktree));
+    for branch in branches {
+        let b = quote(branch);
+        script.push_str(&format!(
+            "if ! git merge --no-edit -q {b} >/dev/null 2>&1; then git merge --abort >/dev/null 2>&1; echo \"MONAGED_CONFLICT {branch}\"; fi\n"
+        ));
+    }
+    script.push_str("echo \"MONAGED_HEAD $(git rev-parse HEAD)\"\n");
+    let out = run(distro, &script)?;
+    let conflicted = out.lines().filter_map(|l| l.strip_prefix("MONAGED_CONFLICT ")).map(str::to_string).collect();
+    let head = out.lines().find_map(|l| l.strip_prefix("MONAGED_HEAD ")).map(str::trim).unwrap_or_default().to_string();
+    Ok((conflicted, head))
+}
+
 /// Git has a name and email for commits in this repo.
 pub fn identity_ok(distro: &str, repo: &str) -> Result<bool> {
     let repo = quote(repo);

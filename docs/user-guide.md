@@ -60,8 +60,8 @@ The inbox opens the dashboard too, and the dashboard button in an agent's header
 
 The **Changes** tab shows the agent's diff against where its branch started, a summary written by Haiku, and a **1–5 confidence score** that always lists its reasons:
 
-- the project's tests run first (from Project settings → Run, `monaged.json`, or detected); failing tests cap the score at 2, no tests at 4;
-- then a short Haiku review asked to find what's broken; "partly" caps the score at 3, "broken" at 2.
+- the project's tests run first (from Project settings → Run, `monaged.json`, or detected); failing tests cap the score at 2, no tests at 4. Detection uses the project's own package manager (bun, pnpm, yarn or npm, from the lock file or `packageManager`) and installs the dependencies first when the worktree has none. Tests that can't run (the tool isn't installed in WSL, only a Windows copy is found through interop, the install fails, or the runner stops without a word) say why and cap the score at 4 instead of counting as failing;
+- then a short Haiku review asked to find what's broken; "partly" caps the score at 3, "broken" at 2. Findings must be defects the code shows: one that rests on code the reviewer couldn't see is marked "not confirmed" and counts as minor.
 
 The reviewer doesn't only see the diff: it gets the task and what you said to the agent after it, the project's `CLAUDE.md` and the shared notes for its agents (so it follows the project's conventions instead of flagging them), the agent's own account of its work (as a claim to check), the changed files in full (so it can see what the diff calls), and the findings you ruled out before.
 
@@ -77,9 +77,9 @@ Summaries and reviews run after every turn (Settings → Reviews turns that off)
 1. **Research**: one agent reads the code and reports.
 2. **Verify**: two agents check the report against the code.
 3. **Decide**: "do we build this?" You decide, or auto mode does when no verifier found major issues.
-4. **Plan**: workstreams that can run in parallel, each owning its files, with contracts between them, a size, risk flags, a confidence score and an estimated cost.
+4. **Plan**: workstreams, each owning its files, with contracts between them, what each depends on, a size, risk flags, a confidence score and an estimated cost.
 5. **Approve**: small plans with confidence 4–5 and no risk flags start by themselves in auto mode (when the project allows it). Large, risky (migrations, auth, data, public APIs, infra, security) or uncertain plans always wait for you. **Edit plan** changes it before approving.
-6. **Build**: 1–10 builders in parallel, each on its own branch.
+6. **Build**: 1–10 builders, each on its own branch. Workstreams that stand alone start at once; one that depends on others starts when they've passed review, with their work merged into its branch (the Build card says what each waiting one is after), so it never builds against code that doesn't exist yet. Its review only covers its own part.
 7. **Integrate**: an integrator merges the builders' branches into the feature branch and runs the tests.
 8. **Done**: when the branch rules and the score allow it, the feature merges into `develop` by itself.
 

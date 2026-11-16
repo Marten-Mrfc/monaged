@@ -557,6 +557,32 @@ pub struct Workstream {
     pub value: Value,
 }
 
+impl Workstream {
+    /// The workstreams this one builds on (names as `workstreams` gives them).
+    pub fn depends_on(&self) -> Vec<String> {
+        self.value["depends_on"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).map(crate::git::slug).filter(|d| *d != self.name).collect()
+    }
+}
+
+/// The workstreams that can start now: not started yet, and every workstream
+/// they depend on in this plan has passed the gate (`done`). A builder that
+/// starts before the code it imports exists can't compile, test or pass
+/// review. When nothing could ever start (a cycle), they all start at once.
+pub fn ready_streams(streams: &[Workstream], started: &[String], done: &[String]) -> Vec<Workstream> {
+    let names: Vec<&str> = streams.iter().map(|w| w.name.as_str()).collect();
+    let waiting: Vec<&Workstream> = streams.iter().filter(|w| !started.contains(&w.name)).collect();
+    let ready: Vec<Workstream> = waiting
+        .iter()
+        .filter(|w| w.depends_on().iter().filter(|d| names.contains(&d.as_str())).all(|d| done.contains(d)))
+        .map(|w| (*w).clone())
+        .collect();
+    let busy = started.iter().any(|s| !done.contains(s));
+    if ready.is_empty() && !busy {
+        return waiting.into_iter().cloned().collect();
+    }
+    ready
+}
+
 pub fn workstreams(plan: &Value) -> Vec<Workstream> {
     plan["workstreams"]
         .as_array()
@@ -642,8 +668,12 @@ pub fn planner_brief(request: &str, research: &Value, verifications: &[Value]) -
          ## Feature request\n{request}\n\n## Research\n```json\n{}\n```\n\n## Verification\n```json\n{}\n```\n\n\
          {QUESTION_FORMAT}\n\n\
          ## How to plan\n\
-         - Split the work into workstreams that can run **in parallel**, each done by one builder agent (max {MAX_BUILDERS}; \
-         use 1 for small features). Each workstream owns specific paths; two workstreams must never edit the same files.\n\
+         - Split the work into workstreams, each done by one builder agent (max {MAX_BUILDERS}; use 1 for small features). \
+         Each workstream owns specific paths; two workstreams must never edit the same files.\n\
+         - depends_on lists the workstreams whose code this one imports, calls, tests against or documents. Monaged starts \
+         a workstream only once those passed review, with their work merged into its branch; the rest run in parallel. \
+         Leave depends_on empty only when the workstream truly stands alone: a builder whose imports don't exist yet can't \
+         compile, test or pass review. Docs and config that describe other workstreams' code depend on them.\n\
          - Define the contracts between workstreams (API shapes, data models, function signatures) so builders can work \
          without talking to each other.\n\
          - size: small (one workstream, roughly an hour), medium, or large.\n\
@@ -660,15 +690,27 @@ pub fn planner_brief(request: &str, research: &Value, verifications: &[Value]) -
     )
 }
 
-pub fn builder_brief(request: &str, plan: &Value, workstream: &Workstream, branch: &str) -> String {
+/// `merged`: the workstreams this one depends on, whose reviewed work is
+/// merged into its branch before it starts.
+pub fn builder_brief(request: &str, plan: &Value, workstream: &Workstream, branch: &str, merged: &[String]) -> String {
+    let start = if merged.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " The work you build on ({}) passed review and is already merged into your branch: use it as it is, and \
+             don't edit its files.",
+            merged.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", ")
+        )
+    };
     format!(
         "{BRIEF_HEADER} Builder ({name})\n\n\
          You are a BUILDER for workstream \"{name}\" of the plan below, working in your own git worktree on branch \
-         `{branch}`. Other builders handle the other workstreams at the same time.\n\n\
+         `{branch}`. Other builders handle the other workstreams.{start}\n\n\
          ## Rules\n\
          - Only edit the files your workstream owns (see `owns`). If you need a change elsewhere, don't make it: list it \
          under `needs_from_others` in your result.\n\
          - Follow the plan's contracts exactly; other builders rely on them.\n\
+         - {SETUP}\n\
          - Run the tests you can. Commit your work on your branch with clear messages. Don't push.\n\
          - {REVIEWED}\n\n\
          {COORDINATION}\n\n\
@@ -684,6 +726,12 @@ pub fn builder_brief(request: &str, plan: &Value, workstream: &Workstream, branc
     )
 }
 
+/// A fresh worktree has the code but not what installs next to it.
+const SETUP: &str = "Your worktree is a fresh checkout without installed dependencies (node_modules, .venv, vendor…). \
+Before running anything, install them with the project's own package manager (the lock file says which: bun.lock → \
+`bun install`, pnpm-lock.yaml → `pnpm install`, package-lock.json → `npm ci`, uv.lock → `uv sync`). Use the Linux tools \
+inside WSL; anything under /mnt/c is a Windows program and can't run this project.";
+
 /// What builders and the integrator are told about the quality gate.
 const REVIEWED: &str = "When you report done, Monaged runs the project's tests and a skeptical review of your diff. \
 Your work only counts as done with a high score; otherwise you get the findings back to fix. Check each finding \
@@ -696,7 +744,7 @@ pub fn integrator_brief(request: &str, plan: &Value, branches: &[String], featur
          You are the INTEGRATOR. The builders finished their workstreams on these branches:\n{list}\n\n\
          Your worktree is on the feature branch `{feature_branch}`. Merge each builder branch into it, resolve conflicts \
          keeping both sides' intent, make sure the plan's contracts line up across the pieces, run the project's tests, \
-         and commit. Don't push and don't merge into any other branch. {REVIEWED}\n\n\
+         and commit. Don't push and don't merge into any other branch. {SETUP} {REVIEWED}\n\n\
          Start with `board_read` (all=true, a Monaged tool): the builders posted their contracts, decisions and answers \
          there, and anything they agreed on overrides the plan.\n\n\
          ## Feature request\n{request}\n\n## Plan\n```json\n{}\n```\n\n\

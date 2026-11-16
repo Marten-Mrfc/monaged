@@ -53,6 +53,17 @@ const NOT_INSTALLED: &str = "WSL isn't installed on this PC. Ctrl K → Setup gu
 const PRELUDE: &str = "export GIT_TERMINAL_PROMPT=0\n\
 [ -n \"$(git config --get core.sshCommand 2>/dev/null)\" ] || export GIT_SSH_COMMAND=\"ssh -o BatchMode=yes -o ConnectTimeout=20\"\n";
 
+/// Puts the usual per-user tool folders (bun, nvm's newest node, cargo, go,
+/// volta, deno, pnpm, ~/.local/bin) ahead of the rest of PATH when they
+/// exist. Installers add them in ~/.bashrc, which stops early in a
+/// non-interactive shell, so agents and checks otherwise found only Windows'
+/// npm through interop (it can't run a project inside WSL) and no bun at all.
+/// One line with no quotes in it, so it survives `wsl.exe … bash -lc`.
+pub const TOOL_PATHS: &str = "for d in $HOME/.local/bin $HOME/go/bin $HOME/.cargo/bin $HOME/.volta/bin $HOME/.deno/bin \
+$HOME/.local/share/pnpm $HOME/.bun/bin; do [ -d $d ] && case :$PATH: in *:$d:*) ;; *) PATH=$d:$PATH ;; esac; done; \
+n=$(command -v node 2>/dev/null); case x$n in x|x/mnt/*) nb=; for v in $HOME/.nvm/versions/node/*/bin; do [ -x $v/node ] && nb=$v; done; \
+[ -z $nb ] || PATH=$nb:$PATH ;; esac; export PATH; ";
+
 /// `wsl.exe -d <distro> --cd ~ -- bash -lc <script>`, without a console window.
 pub fn bash(distro: &str, script: &str) -> Command {
     let mut command = command(distro);
@@ -80,7 +91,7 @@ pub fn run(distro: &str, script: &str) -> Result<String> {
         .context("could not run wsl.exe — is WSL installed?")?;
     {
         let mut stdin = child.stdin.take().context("wsl stdin missing")?;
-        stdin.write_all(format!("{PRELUDE}{script}\n").as_bytes())?;
+        stdin.write_all(format!("{PRELUDE}{TOOL_PATHS}\n{script}\n").as_bytes())?;
     }
     let output = child.wait_with_output().context("waiting for wsl.exe failed")?;
     if !output.status.success() {

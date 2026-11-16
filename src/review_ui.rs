@@ -70,6 +70,9 @@ impl Monaged {
         let sub = self.subprojects.iter().find(|s| s.id == agent.record.subproject_id)?;
         let base = if agent.role() == crate::pipeline::Role::Integrator {
             self.projects.iter().find(|p| p.id == sub.project_id).map(|p| p.base_branch.clone())?
+        } else if let Some(start) = self.store.setting(&format!("agent:{}:base", agent.record.id)) {
+            // A builder that started on other builders' reviewed work: only its own part counts.
+            start
         } else {
             sub.branch.clone()
         };

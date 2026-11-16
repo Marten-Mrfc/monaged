@@ -725,7 +725,7 @@ impl Monaged {
                 self.select_agent(agent_id, cx);
             }
             None => {
-                let spec = AgentSpec { name: "resolver".into(), role: Role::Free, on_feature_branch: true, brief: Some(brief), select: true };
+                let spec = AgentSpec { name: "resolver".into(), role: Role::Free, on_feature_branch: true, brief: Some(brief), select: true, merge_from: Vec::new() };
                 self.spawn_agent(sub_id, spec, cx);
             }
         }

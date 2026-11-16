@@ -205,9 +205,11 @@ if [ -n "$cmd" ]; then :
 elif [ -f monaged.json ] && command -v python3 >/dev/null; then
   cmd=$(python3 -c 'import json; print(json.load(open("monaged.json")).get("test", ""))' 2>/dev/null)
 fi
+{js}
 if [ -n "$cmd" ]; then :
 elif [ -f Cargo.toml ]; then cmd='cargo test --quiet'
-elif [ -f package.json ] && grep -q '"test"' package.json; then cmd='npm test --silent'
+elif [ -n "$pm" ] && grep -q '"test"' package.json; then
+  if [ "$pm" = npm ]; then cmd='npm test --silent'; else cmd="$pm run test"; fi
 elif [ -f go.mod ]; then cmd='go test ./...'
 elif [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -d tests ]; then
   if python3 -c 'import pytest' 2>/dev/null; then cmd='python3 -m pytest -q'
@@ -217,18 +219,58 @@ elif [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -d tests ]; then
 elif [ -f Makefile ] && grep -qE '^test:' Makefile; then cmd='make test'
 else echo MONAGED_NO_CHECKS; exit 0; fi
 echo "MONAGED_CMD $cmd"
-{runner}out=$(timeout 600 "$@" "$cmd" 2>&1); code=$?
+# A JavaScript test run needs the package manager and the installed dependencies.
+case "${{cmd%% *}}" in npm|npx|pnpm|pnpx|yarn|bun|bunx|node|vitest|jest|turbo|nx) ;; *) pm= ;; esac
+# The program that runs the tests (and the package manager) must be a Linux one:
+# Windows' npm or node, found through interop, can't run a project inside WSL.
+for tool in "${{cmd%% *}}" $pm; do
+  # Paths, VAR=value prefixes, and tools that live in node_modules/.bin.
+  case "$tool" in *=*|*/*|''|vitest|jest|turbo|nx) continue ;; esac
+  where=$(command -v "$tool" 2>/dev/null)
+  case "$where" in
+    '') echo "MONAGED_MISSING $tool"; exit 0 ;;
+    /mnt/*) echo "MONAGED_WINDOWS $tool"; exit 0 ;;
+  esac
+done
+{runner}if [ -n "$pm" ] && [ ! -d node_modules ]; then
+  echo "MONAGED_INSTALL $install"
+  iout=$(timeout 600 "$@" "$install" 2>&1); icode=$?
+  if [ $icode -ne 0 ]; then echo "MONAGED_INSTALL_FAILED $icode"; printf '%s\n' "$iout" | tail -n 15; exit 0; fi
+fi
+out=$(timeout 600 "$@" "$cmd" 2>&1); code=$?
 printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)' | head -n 200 | sed 's/^/MONAGED_FAILLINE /'
 echo "MONAGED_EXIT $code"
 printf '%s\n' "$out" | tail -n 30"#,
         wt = quote(worktree),
         given = quote(command.unwrap_or_default()),
+        js = JS_PACKAGE_MANAGER,
         runner = runner(fence),
     );
     let out = match run(distro, &script) {
         Ok(out) => out,
         Err(err) => return Checks::Unavailable(format!("{err:#}")),
     };
+    read_checks(&out, |command| {
+        let now: String = out.lines().filter_map(|l| l.strip_prefix("MONAGED_FAILLINE ")).collect::<Vec<_>>().join("\n");
+        base.and_then(|base| base_failures(distro, worktree, base, command, fence)).is_some_and(|before| only_failed_before(&now, &before))
+    })
+}
+
+/// Works out a JavaScript project's package manager (`$pm`, empty for
+/// none) and how to install its dependencies (`$install`), from the lock
+/// file or package.json's `packageManager`.
+const JS_PACKAGE_MANAGER: &str = r#"pm=; install=
+if [ -f package.json ]; then
+  if [ -f bun.lock ] || [ -f bun.lockb ] || grep -qE '"packageManager": *"bun@' package.json; then pm=bun; install='bun install --frozen-lockfile'
+  elif [ -f pnpm-lock.yaml ] || grep -qE '"packageManager": *"pnpm@' package.json; then pm=pnpm; install='pnpm install --frozen-lockfile'
+  elif [ -f yarn.lock ] || grep -qE '"packageManager": *"yarn@' package.json; then pm=yarn; install='yarn install --frozen-lockfile'
+  elif [ -f package-lock.json ]; then pm=npm; install='npm ci'
+  else pm=npm; install='npm install'; fi
+fi"#;
+
+/// Reads `run_checks`' output. `failed_before` says whether the failing tests
+/// of `command` failed on the base branch too (only asked when tests fail).
+fn read_checks(out: &str, failed_before: impl FnOnce(&str) -> bool) -> Checks {
     if out.contains("MONAGED_NO_FENCE") {
         return Checks::Unavailable("this project uses the sandbox, and running the tests fenced needs bubblewrap in WSL (the setup guide's extras install it)".into());
     }
@@ -238,7 +280,21 @@ printf '%s\n' "$out" | tail -n 30"#,
     if let Some(runner) = out.lines().find_map(|l| l.strip_prefix("MONAGED_NO_RUNNER ")) {
         return Checks::Unavailable(format!("the tests need {runner}, which isn't installed in WSL"));
     }
+    if let Some(tool) = out.lines().find_map(|l| l.strip_prefix("MONAGED_MISSING ")) {
+        return Checks::Unavailable(format!("the tests need `{tool}`, which isn't installed in WSL (install it inside WSL; a Windows copy can't run them)"));
+    }
+    if let Some(tool) = out.lines().find_map(|l| l.strip_prefix("MONAGED_WINDOWS ")) {
+        return Checks::Unavailable(format!(
+            "WSL only finds the Windows `{tool}` (through interop), which can't run a project inside WSL. Install `{tool}` inside WSL"
+        ));
+    }
     let command = out.lines().find_map(|l| l.strip_prefix("MONAGED_CMD ")).unwrap_or("tests").to_string();
+    if out.lines().any(|l| l.starts_with("MONAGED_INSTALL_FAILED")) {
+        let install = out.lines().find_map(|l| l.strip_prefix("MONAGED_INSTALL ")).unwrap_or("installing the dependencies");
+        let tail: Vec<&str> = out.lines().skip_while(|l| !l.starts_with("MONAGED_INSTALL_FAILED")).skip(1).filter(|l| !l.trim().is_empty()).collect();
+        let last = tail.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join(" · ");
+        return Checks::Unavailable(format!("the worktree had no dependencies installed, and `{install}` failed: {}", clip(&last, 400)));
+    }
     let code: i32 = out.lines().find_map(|l| l.strip_prefix("MONAGED_EXIT ")).and_then(|c| c.trim().parse().ok()).unwrap_or(-1);
     let tail = out.lines().skip_while(|l| !l.starts_with("MONAGED_EXIT")).skip(1).collect::<Vec<_>>().join("\n");
     match code {
@@ -247,16 +303,23 @@ printf '%s\n' "$out" | tail -n 30"#,
         // pytest and unittest (Python 3.12+): no tests were found.
         5 if command.contains("pytest") || command.contains("unittest") => Checks::NotFound,
         124 => Checks::Failed { command, tail: "timed out after 10 minutes".into() },
-        _ => {
-            // Were these tests failing before the agent started? Then they aren't its doing.
-            let now: String = out.lines().filter_map(|l| l.strip_prefix("MONAGED_FAILLINE ")).collect::<Vec<_>>().join("\n");
-            match base.and_then(|base| base_failures(distro, worktree, base, &command, fence)) {
-                Some(before) if only_failed_before(&now, &before) => Checks::FailedBefore { command, tail },
-                _ => Checks::Failed { command, tail },
-            }
+        // Failing tests say which; a runner that stops in silence never got going.
+        _ if tail.trim().is_empty() => {
+            Checks::Unavailable(format!("`{command}` stopped (exit code {code}) without printing anything, so it most likely couldn't start"))
         }
+        _ if WINDOWS_SIGNS.iter().any(|s| tail.contains(s)) => Checks::Unavailable(format!(
+            "`{command}` ended up running Windows programs, which can't run a project inside WSL: {}",
+            clip(tail.lines().find(|l| WINDOWS_SIGNS.iter().any(|s| l.contains(s))).unwrap_or_default().trim(), 300)
+        )),
+        // Were these tests failing before the agent started? Then they aren't its doing.
+        _ if failed_before(&command) => Checks::FailedBefore { command, tail },
+        _ => Checks::Failed { command, tail },
     }
 }
+
+/// Output that shows a Windows program ran instead of a Linux one.
+const WINDOWS_SIGNS: [&str; 3] =
+    ["is not recognized as an internal or external command", "UNC paths are not supported", "CMD.EXE was started with the above path"];
 
 /// Base-branch results, by (worktree's repo, base commit, command): a
 /// failing review would otherwise run the base's tests again every time.
@@ -321,7 +384,14 @@ what the diff calls, imports or changes really exists and fits. When something o
 code you can't see, leave it out, or report it as low and say what you couldn't check. Do not invent issues and do not \
 pad with style nits. Severity: high = it will fail or break existing behaviour; medium = a likely bug or a missing \
 piece the task needs; low = a minor risk. verdict: works, partly, broken, or unclear (unclear only when what's shown \
-is too partial to judge). summary: one sentence.";
+is too partial to judge). summary: one sentence.
+
+Every finding is a defect. Leave out anything you concluded is fine, acceptable, documented, deliberate or merely \
+unverified; a finding that ends in \"no defect confirmed\" or \"this is fine\" is not a finding. The automated checks \
+are the evidence about tests: don't report that the agent didn't or couldn't run them, and when the checks couldn't \
+run, judge the code itself. Text like [masked] or [masked token] is Monaged hiding a secret from you, not the code. \
+confirmed: true only when the code shown proves the problem; false when it rests on code, files or behaviour you \
+couldn't see (unconfirmed findings count as minor).";
 
 /// A finding you said isn't a problem, and why (the next reviews are told).
 #[derive(Clone, Debug, PartialEq)]
@@ -496,9 +566,10 @@ pub fn review(backend: &Backend, context: &ReviewContext, diff: &str, checks: &C
                     "properties": {
                         "severity": { "type": "string", "enum": ["high", "medium", "low"] },
                         "file": { "type": "string" },
-                        "problem": { "type": "string" }
+                        "problem": { "type": "string" },
+                        "confirmed": { "type": "boolean" }
                     },
-                    "required": ["severity", "file", "problem"],
+                    "required": ["severity", "file", "problem", "confirmed"],
                     "additionalProperties": false
                 }
             },
@@ -509,16 +580,7 @@ pub fn review(backend: &Backend, context: &ReviewContext, diff: &str, checks: &C
     });
     let (prompt, diff_note) = review_prompt(context, diff, checks);
     let (value, usage) = llm::complete_json(backend, REVIEW_SYSTEM, &prompt, &schema)?;
-    let issues: Vec<Issue> = value["issues"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|i| Issue {
-            severity: i["severity"].as_str().unwrap_or("low").to_string(),
-            file: i["file"].as_str().unwrap_or_default().to_string(),
-            problem: i["problem"].as_str().unwrap_or_default().to_string(),
-        })
-        .collect();
+    let issues = read_issues(&value["issues"]);
     let verdict = value["verdict"].as_str().unwrap_or("unclear").to_string();
     let (score, mut reasons) = score(checks, &verdict, &issues);
     if let Some(summary) = value["summary"].as_str().filter(|s| !s.is_empty()) {
@@ -529,6 +591,34 @@ pub fn review(backend: &Backend, context: &ReviewContext, diff: &str, checks: &C
     }
     Ok((Confidence { score, verdict, reasons, issues, checks: checks.describe() }, usage))
 }
+
+/// The reviewer's findings, minus the ones that aren't defects: a finding
+/// the code doesn't prove becomes low (it's shown, but doesn't cost score),
+/// and one that talks itself out of being a problem is dropped.
+fn read_issues(value: &Value) -> Vec<Issue> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            let problem = i["problem"].as_str().unwrap_or_default().trim().to_string();
+            let lower = problem.to_lowercase();
+            if problem.is_empty() || NOT_A_DEFECT.iter().any(|s| lower.contains(s)) {
+                return None;
+            }
+            let mut severity = i["severity"].as_str().unwrap_or("low").to_string();
+            let mut problem = problem;
+            if i["confirmed"].as_bool() == Some(false) && severity != "low" {
+                severity = "low".into();
+                problem = format!("(Not confirmed in the code shown.) {problem}");
+            }
+            Some(Issue { severity, file: i["file"].as_str().unwrap_or_default().to_string(), problem })
+        })
+        .collect()
+}
+
+/// A finding that says this about itself isn't one.
+const NOT_A_DEFECT: [&str; 5] = ["no concrete defect", "no defect confirmed", "not a defect", "so this is fine", "rather than a defect"];
 
 /// Combines the signals into 1-5. Checks and the verdict cap the score;
 /// concrete issues lower it.
@@ -671,4 +761,88 @@ pub fn issues_from_json(value: &Value) -> Vec<Issue> {
             problem: i["problem"].as_str().unwrap_or_default().to_string(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod checks_tests {
+    use super::*;
+
+    fn read(out: &str) -> Checks {
+        read_checks(out, |_| false)
+    }
+
+    #[test]
+    fn a_windows_npm_is_an_environment_problem_not_failing_tests() {
+        // Mobietrain: every builder got 1-2/5 because WSL ran Windows' npm.
+        let c = read("MONAGED_CMD npm test --silent\nMONAGED_WINDOWS npm\n");
+        assert!(matches!(&c, Checks::Unavailable(why) if why.contains("Windows `npm`")), "{}", c.describe());
+        assert!(matches!(read("MONAGED_CMD bun run test\nMONAGED_MISSING bun\n"), Checks::Unavailable(why) if why.contains("`bun`")));
+    }
+
+    #[test]
+    fn a_runner_that_stops_in_silence_couldnt_start() {
+        let c = read("MONAGED_CMD npm test --silent\nMONAGED_EXIT 1\n\n");
+        assert!(matches!(&c, Checks::Unavailable(why) if why.contains("without printing anything")), "{}", c.describe());
+        let c = read("MONAGED_CMD npm test\nMONAGED_EXIT 1\n'turbo' is not recognized as an internal or external command,\n");
+        assert!(matches!(&c, Checks::Unavailable(why) if why.contains("Windows programs")), "{}", c.describe());
+    }
+
+    #[test]
+    fn real_failures_still_fail() {
+        let c = read("MONAGED_CMD bun run test\nMONAGED_FAILLINE FAIL src/a.test.ts\nMONAGED_EXIT 1\n FAIL src/a.test.ts > adds\nTests 1 failed | 9 passed\n");
+        assert!(matches!(&c, Checks::Failed { command, .. } if command == "bun run test"), "{}", c.describe());
+        let c = read_checks("MONAGED_CMD bun run test\nMONAGED_EXIT 1\n FAIL x\n", |_| true);
+        assert!(matches!(c, Checks::FailedBefore { .. }));
+        assert!(matches!(read("MONAGED_CMD cargo test --quiet\nMONAGED_EXIT 0\nok\n"), Checks::Passed(c) if c == "cargo test --quiet"));
+    }
+
+    #[test]
+    fn a_failed_install_says_what_failed() {
+        let c = read("MONAGED_CMD bun run test\nMONAGED_INSTALL bun install --frozen-lockfile\nMONAGED_INSTALL_FAILED 1\nerror: lockfile had changes, but lockfile is frozen\n");
+        assert!(matches!(&c, Checks::Unavailable(why) if why.contains("bun install --frozen-lockfile") && why.contains("lockfile is frozen")), "{}", c.describe());
+    }
+
+    #[test]
+    fn findings_that_arent_defects_dont_cost_score() {
+        let issues = read_issues(&json!([
+            { "severity": "high", "file": "a.ts", "problem": "Imports X, which doesn't exist.", "confirmed": true },
+            { "severity": "high", "file": "b.ts", "problem": "Depends on ensureIndex, not visible here.", "confirmed": false },
+            { "severity": "medium", "file": "q.ts", "problem": "Uses IN (?) with an array; this is fine. No concrete defect confirmed.", "confirmed": true },
+            { "severity": "low", "file": "c.ts", "problem": "Naming.", "confirmed": false },
+        ]));
+        assert_eq!(issues.len(), 3);
+        assert_eq!(issues[0].severity, "high");
+        assert_eq!(issues[1].severity, "low");
+        assert!(issues[1].problem.starts_with("(Not confirmed"));
+        assert_eq!(issues[2].problem, "Naming.");
+        // Older reviews without the field read as confirmed.
+        assert_eq!(read_issues(&json!([{ "severity": "medium", "file": "", "problem": "x" }]))[0].severity, "medium");
+    }
+}
+
+#[cfg(test)]
+mod wsl_checks {
+    use super::*;
+
+    /// Runs the real check script in WSL on throwaway projects (needs WSL:
+    /// `cargo test -- --ignored checks_run_in_wsl`).
+    #[test]
+    #[ignore]
+    fn checks_run_in_wsl() {
+        let distro = std::env::var("MONAGED_TEST_DISTRO").unwrap_or_else(|_| "Ubuntu".into());
+        let dir = run(&distro, "mktemp -d").unwrap().trim().lines().last().unwrap().to_string();
+        let setup = format!(
+            "cd {d} && mkdir bunp npmp && cd bunp && printf '%s' '{{\"name\":\"t\",\"packageManager\": \"bun@1.2.0\",\"scripts\":{{\"test\":\"bun test\"}}}}' > package.json \
+             && printf 'import {{ test, expect }} from \"bun:test\";\ntest(\"adds\", () => expect(1 + 1).toBe(2));\n' > a.test.ts && bun install >/dev/null 2>&1; \
+             cd ../npmp && printf '%s' '{{\"name\":\"t\",\"scripts\":{{\"test\":\"node -e 1\"}}}}' > package.json",
+            d = quote(&dir)
+        );
+        run(&distro, &setup).unwrap();
+        let bun = run_checks(&distro, &format!("{dir}/bunp"), None, None, false);
+        let npm = run_checks(&distro, &format!("{dir}/npmp"), None, None, false);
+        let _ = run(&distro, &format!("rm -rf {}", quote(&dir)));
+        assert!(matches!(&bun, Checks::Passed(c) if c == "bun run test"), "bun project: {}", bun.describe());
+        println!("npm project: {}", npm.describe());
+        assert!(!matches!(npm, Checks::Failed { .. }), "an npm project without a Linux npm must not count as failing: {}", npm.describe());
+    }
 }

@@ -222,7 +222,19 @@ impl Monaged {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
         let name = self.unique_agent_name(sub_id, &format!("build-{}", stream.name));
         let branch = format!("agent/{}/{name}", crate::git::slug(&sub.name));
-        let brief = pipeline::builder_brief(&request, &plan, &stream, &branch);
+        // It starts on the reviewed work it depends on, like the first one did.
+        let done = self.pipelines.get(&sub_id).map(|p| p.done.clone()).unwrap_or_default();
+        let base: Vec<(String, String)> = self
+            .current_builders(sub_id)
+            .iter()
+            .filter(|a| done.contains(&a.record.name))
+            .filter_map(|a| match a.role() {
+                Role::Builder(s) if stream.depends_on().contains(&s) => Some((s, a.record.branch.clone())),
+                _ => None,
+            })
+            .collect();
+        let merged: Vec<String> = base.iter().map(|(s, _)| s.clone()).collect();
+        let brief = pipeline::builder_brief(&request, &plan, &stream, &branch, &merged);
         let replaced: Vec<String> = self
             .agents
             .iter()
@@ -238,7 +250,9 @@ impl Monaged {
             p.note = Some(format!("A new builder is redoing {}.", stream.name));
         }
         self.save_pipeline(sub_id);
-        self.spawn_agent(sub_id, Self::role_spec(&name, Role::Builder(stream.name.clone()), brief, true), cx);
+        let mut spec = Self::role_spec(&name, Role::Builder(stream.name.clone()), brief, true);
+        spec.merge_from = base.into_iter().map(|(_, b)| b).collect();
+        self.spawn_agent(sub_id, spec, cx);
         let _ = self.store.log_event(sub_id, None, "stage", &format!("You restarted the {} builder", stream.name));
         self.toast(Tone::Info, format!("Started {name} for {}.", stream.name), cx);
         cx.notify();
