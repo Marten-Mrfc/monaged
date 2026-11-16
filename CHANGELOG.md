@@ -4,12 +4,23 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-16
+
+Pipelines whose builders can pass review: they start in the order their work depends on, the tests run with the project's own package manager inside WSL, and the reviewer only counts real defects. Plus questions as one card.
+
 ### Changed
+
+- **Builders start in dependency order**: a workstream that depends on others starts once they've passed review, with their work merged into its branch, instead of every builder starting at once against code that doesn't exist yet (which no review could pass). What stands alone still starts right away, the Build card lists the waiting ones with what they're after, a dependency cycle starts everything rather than waiting forever, and a rerun builder starts on the same reviewed work. Its review diffs against where it started, so it's only judged on its own part. Planners are told what `depends_on` now means, including that docs depend on the code they describe.
+- **Reviews only count defects**: the reviewer marks each finding confirmed or not; one that rests on code it couldn't see counts as minor, and findings that talk themselves out of being a problem ("no concrete defect confirmed") are dropped. It no longer reports that the agent didn't run the tests (the checks are the evidence) and knows `[masked]` is Monaged hiding a secret.
+- **Builders and the integrator set up their worktree first**: their brief says a fresh worktree has no installed dependencies, which package manager to use, and that anything under /mnt/c is a Windows program.
 
 - **Questions, redesigned**: an agent's questions come as one card instead of a card each, numbered, with a short topic, why each matters and its options as a list (what each option means, the recommended one marked; checkboxes when several can apply). Every question has **Something else…** with a box for your own words. Nothing is sent on a click any more: **Send** (or Enter in a box) sends every answer at once, **Use the recommended answers** fills in the rest, and the card shows how many are answered. Once sent, the card says what you answered, and the answers message is one quiet line. Agents are asked for this richer format (topic, option descriptions, several choices, up to four questions); the old one still works.
 
 ### Fixed
 
+- **Reviews scored JavaScript work 1-2/5 when the tests couldn't run at all**: WSL found Windows' npm through interop (it can't run a project inside WSL) and the review counted its silent exit as failing tests, every round. The checks now use the project's package manager (bun, pnpm, yarn or npm, from the lock file or `packageManager`), install the dependencies when the worktree has none, and refuse a Windows npm or node; a run that can't start says why and counts as "couldn't run" (at most 4/5), not as failing.
+- **Agents and checks couldn't find bun, nvm's node or other per-user tools**: their folders are set up in ~/.bashrc, which a non-interactive shell stops reading early. ~/.bun/bin, nvm's newest node, ~/.cargo/bin, ~/go/bin, Volta, Deno, pnpm and ~/.local/bin now come first on PATH when they exist, ahead of Windows programs.
+- **Masking secrets broke the code reviewers saw**: `hasApiKey={hasApiKey}` reached the review as `hasApiKey=[masked]`, which it called invalid JSX. Only literal values after a key named like a secret are masked now, not code that passes one along (`token={token}`, `Bearer ${key}`, `process.env.…`), and every such value on a line is masked, not just the first.
 - **A subproject's dashboard drew its sections on top of each other on wide screens**: once the column reached its full width, the request card, the "Needs you" cards and the agent cards were laid out shorter than their text, so the next section started over them. The column now has an exact width, like the agent cards.
 
 ## [0.8.0] - 2026-11-16
@@ -213,6 +224,10 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.9.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.0
+[0.8.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.8.0
+[0.7.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.7.0
+[0.6.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.5.0
 [0.4.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.4.0

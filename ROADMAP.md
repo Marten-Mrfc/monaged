@@ -426,6 +426,17 @@ Asked for: one agent at a time and a close button that works; Fix findings next 
 
 **Not tested yet:** a real lead on Claude (does it use its tools well and keep its replies short), and how much its updates cost over a long pipeline.
 
+### Release 0.9.0: pipelines that can pass review (done 2026-11-16)
+Asked for: pull the Mobietrain Rework run (7 builders, 6 stuck below the bar at 1–2/5) through Monaged's MCP tools, find out why, and improve the app.
+
+- [x] Diagnosis: the review ran `npm test`, which in WSL was Windows' npm through interop (the project is a bun monorepo; Linux bun sat in ~/.bun/bin, off PATH), so every check "failed" silently and capped the score at 2; all 7 builders started at once although the plan said 5 depend on others, so their imports didn't exist; masking turned `hasApiKey={hasApiKey}` into `hasApiKey=[masked]`, which the reviewer called broken; findings that said "no concrete defect" still counted.
+- [x] Builders start in dependency order, on top of the reviewed work they build on, and are reviewed against where they started; the Build card lists the waiting ones.
+- [x] Checks use the project's package manager, install missing dependencies, refuse Windows tools, and say "couldn't run" instead of "failed" when nothing ran; per-user tool folders come first on PATH for agents and checks.
+- [x] Masking leaves code alone; reviews mark findings confirmed or not and drop non-defects; briefs tell builders to install dependencies first.
+- [ ] Next: a toolchain check per project in Health (before a run costs anything), a stronger reviewer for large or risky plans, a typecheck of all passed work together after each builder, holding at once when a fix round changed nothing, installing dependencies when a worktree is made.
+
+**Tested:** dependency order, the brief, the check output parsing and the finding filter as unit tests; the real check script in WSL on a bun project (passes) and an npm project with only Windows' npm (couldn't run, not failed). **Not tested yet:** a full pipeline run with waiting builders in the real app.
+
 ### Release 0.8.0: git workflow, readable conversations, the dock, the sidebar (done 2026-11-16)
 Released with the rounds below.
 
