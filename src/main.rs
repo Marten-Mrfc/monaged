@@ -100,7 +100,7 @@ use text_input::TextInput;
 
 actions!(
     monaged,
-    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext, FocusTree, ToggleSideChat, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen, NextNeedsYou]
+    [Submit, Cancel, TogglePalette, ToggleSidebar, ToggleInspector, OpenSettings, PaletteUp, PaletteDown, ShowShortcuts, NewAgentHere, PrevAgent, NextAgent, ToggleZen, FindInConversation, SearchAgents, ReplayPrev, ReplayNext, FocusTree, ToggleSideChat, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen, NextNeedsYou, DockPipeline, DockMerge, DockGit, DockRun, DockActivity]
 );
 
 pub(crate) enum Conn {
@@ -230,6 +230,8 @@ struct Monaged {
     // Coordination (Phase 4).
     bridge: Option<coord::Bridge>,
     board: Vec<store::BoardEntry>,
+    /// Subprojects whose whole board shows (else the latest three).
+    board_all: HashSet<i64>,
     claims: Vec<(i64, String)>,
     asks: Vec<coord_ui::Ask>,
     next_ask: u64,
@@ -533,6 +535,7 @@ impl Monaged {
             creds_ok: None,
             bridge,
             board,
+            board_all: HashSet::new(),
             claims,
             asks: Vec::new(),
             next_ask: 1,
@@ -1140,6 +1143,12 @@ impl Monaged {
 
     fn select_agent(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         self.sel_agent = Some(agent_id);
+        // The Git tab follows the agent you open, unless you picked a worktree there.
+        if let Some(sub_id) = self.agent(agent_id).filter(|a| !a.record.archived).map(|a| a.record.subproject_id)
+            && self.git_panels.get(&sub_id).is_some_and(|p| !p.pinned)
+        {
+            self.set_git_target(sub_id, git_ui::GitTarget::Agent(agent_id), false, cx);
+        }
         self.dismissed.remove(&agent_id);
         self.focus_request = Some(agent_id);
         self.ensure_session(agent_id);
@@ -1646,6 +1655,38 @@ impl Monaged {
         self.inspector_open = !self.inspector_open;
         let _ = self.store.set_setting("ui:inspector", if self.inspector_open { "1" } else { "0" });
         cx.notify();
+    }
+
+    /// Alt 1-5: a dock tab (opening the dock if it's hidden; again closes it).
+    fn show_dock_tab(&mut self, tab: shell::InspectorTab, cx: &mut Context<Self>) {
+        if self.inspector_open && self.inspector_tab == tab {
+            self.inspector_open = false;
+        } else {
+            self.inspector_open = true;
+            self.inspector_tab = tab;
+        }
+        let _ = self.store.set_setting("ui:inspector", if self.inspector_open { "1" } else { "0" });
+        cx.notify();
+    }
+
+    fn on_dock_pipeline(&mut self, _: &DockPipeline, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock_tab(shell::InspectorTab::Pipeline, cx);
+    }
+
+    fn on_dock_merge(&mut self, _: &DockMerge, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock_tab(shell::InspectorTab::Merge, cx);
+    }
+
+    fn on_dock_git(&mut self, _: &DockGit, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock_tab(shell::InspectorTab::Git, cx);
+    }
+
+    fn on_dock_run(&mut self, _: &DockRun, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock_tab(shell::InspectorTab::Run, cx);
+    }
+
+    fn on_dock_activity(&mut self, _: &DockActivity, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock_tab(shell::InspectorTab::Timeline, cx);
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {

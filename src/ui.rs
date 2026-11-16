@@ -183,8 +183,8 @@ pub fn menu_chip(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Sta
         .cursor_pointer()
         .hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text())))
         .active(|s| s.bg(rgb(theme::selected())))
-        .child(text.into())
-        .child(icon_sized(Icon::ChevronDown, 10.).text_color(rgb(theme::text_3())))
+        .child(one_line(div()).child(text.into()))
+        .child(icon_sized(Icon::ChevronDown, 10.).flex_none().text_color(rgb(theme::text_3())))
 }
 
 /// Cuts text to one line with an ellipsis, measured at the width it ends

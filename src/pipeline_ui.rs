@@ -655,14 +655,20 @@ impl Monaged {
     /// produced, and the decision waiting for you (if any).
     pub(crate) fn render_pipeline_inspector(&self, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
         let Some(p) = self.pipelines.get(&sub_id) else {
-            return ui::panel_section("Pipeline")
-                .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(
-                    "No pipeline has run here yet. It researches the request, has two agents verify that, writes a plan, then builds it with agents in parallel.",
-                ))
-                .child(div().flex().child(
-                    ui::button("insp-run-pipeline", ui::Kind::Primary, Some(Icon::Play), "Run pipeline")
-                        .on_click(cx.listener(move |this, _, window, cx| this.open_pipeline_form(sub_id, window, cx))),
-                ))
+            return div()
+                .flex()
+                .flex_col()
+                .child(
+                    ui::panel_section("Pipeline")
+                        .child(div().text_size(px(13.)).line_height(px(19.)).text_color(rgb(theme::text_2())).child(
+                            "No pipeline has run here yet. It researches the request, has two agents verify that, writes a plan, then builds it with agents in parallel.",
+                        ))
+                        .child(div().flex().child(
+                            ui::button("insp-run-pipeline", ui::Kind::Primary, Some(Icon::Play), "Run pipeline")
+                                .on_click(cx.listener(move |this, _, window, cx| this.open_pipeline_form(sub_id, window, cx))),
+                        )),
+                )
+                .children(self.render_board_sections(sub_id, false, cx))
                 .into_any_element();
         };
         let stopped = p.stage == Stage::Stopped;
@@ -733,10 +739,12 @@ impl Monaged {
                 .child(mark)
                 .child(div().flex_1().child(stage.label()))
                 .child(ui::mono(if done || now { meta_for(stage) } else { String::new() }))
+                .when(!rerunnable, |d| d.child(div().flex_none().size(px(22.))))
                 .when(rerunnable, |d| {
                     d.child(
                         div()
                             .id(("stage-rerun", i))
+                            .flex_none()
                             .invisible()
                             .group_hover("stage-row", |s| s.visible())
                             .size(px(22.))
@@ -763,32 +771,41 @@ impl Monaged {
         };
         let spent = self.sub_costs.get(&sub_id).copied().unwrap_or(0.0);
         let cap = self.sub_cap(sub_id);
-        let plan_lines = p.plan.as_ref().map(|plan| {
-            let (cost, _, pct) = self.plan_estimate(plan);
-            ui::panel_section("Plan")
-                .child(div().text_size(px(13.)).text_color(rgb(theme::text())).child(pipeline::plan_title(plan)))
-                .child(kv("Estimate", format!("${cost:.0} · ≈{pct:.1}% of week")))
-                .child(kv("Spent this week", match cap {
-                    Some(c) => format!("${spent:.2} of ${c:.0} cap"),
-                    None => format!("${spent:.2}"),
-                }))
-        });
-        let cap_section = ui::panel_section("Spending cap")
+        // The plan and what it costs, in one place.
+        let budget = ui::panel_section(if p.plan.is_some() { "Plan and budget" } else { "Budget" })
+            .children(p.plan.as_ref().map(|plan| div().text_size(px(13.)).text_color(rgb(theme::text())).child(pipeline::plan_title(plan))))
+            .children(p.plan.as_ref().map(|plan| {
+                let (cost, _, pct) = self.plan_estimate(plan);
+                kv("Estimate", format!("${cost:.0} · ≈{pct:.1}% of week"))
+            }))
             .child(
                 div()
                     .flex()
                     .items_center()
+                    .justify_between()
                     .gap(px(8.))
-                    .child(div().flex_1().text_size(px(12.5)).text_color(rgb(theme::text_2())).child(match cap {
-                        Some(c) => format!("${spent:.2} of ${c:.0} this week"),
-                        None => format!("${spent:.2} this week · no cap"),
-                    }))
-                    .child(ui::button("cap-edit", ui::Kind::Ghost, None, if cap.is_some() { "Change" } else { "Set a cap" }).on_click(cx.listener(move |this, _, window, cx| this.ask_sub_cap(sub_id, window, cx)))),
+                    .min_h(px(24.))
+                    .child(div().text_size(px(12.5)).text_color(rgb(theme::text_3())).child("This week"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(ui::mono(match cap {
+                                Some(c) => format!("${spent:.2} of ${c:.0} cap"),
+                                None => format!("${spent:.2} · no cap"),
+                            }))
+                            .child(
+                                ui::menu_chip("cap-edit", if cap.is_some() { "change" } else { "set a cap" })
+                                    .on_click(cx.listener(move |this, _, window, cx| this.ask_sub_cap(sub_id, window, cx))),
+                            ),
+                    ),
             )
             .children(cap.map(|c| {
                 let ratio = (spent / c).clamp(0.0, 1.0) as f32;
                 div().h(px(4.)).rounded_full().bg(rgb(theme::line_strong())).child(div().h_full().rounded_full().w(gpui::relative(ratio)).bg(rgb(if ratio >= 1.0 { theme::red() } else { theme::text_2() })))
             }));
+        let board = self.render_board_sections(sub_id, matches!(p.stage, Stage::Build | Stage::Integrate), cx);
 
         div()
             .flex()
@@ -802,8 +819,8 @@ impl Monaged {
             })
             .children(gate.map(|g| div().px(px(12.)).py(px(12.)).border_b_1().border_color(rgb(theme::line())).child(g)))
             .child(div().px(px(16.)).py(px(14.)).border_b_1().border_color(rgb(theme::line())).child(steps))
-            .children(plan_lines)
-            .child(cap_section)
+            .children(board)
+            .child(budget)
             .child(
                 div()
                     .flex()

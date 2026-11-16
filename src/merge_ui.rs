@@ -425,7 +425,7 @@ impl Monaged {
                 .await;
             view.update(cx, |this, cx| {
                 let (tone, text, conflict) = match result {
-                    Ok(MergeReport { outcome: MergeOutcome::Merged(sha), .. }) => (Tone::Info, format!("{} has the latest of {target} now ({sha}).", sub.branch), Vec::new()),
+                    Ok(MergeReport { outcome: MergeOutcome::Merged(sha), .. }) => (Tone::Info, format!("{} has the latest of {target} now, at {sha}.", sub.branch), Vec::new()),
                     Ok(MergeReport { outcome: MergeOutcome::AlreadyMerged, .. }) => (Tone::Info, format!("{} already has everything from {target}.", sub.branch), Vec::new()),
                     Ok(MergeReport { outcome: MergeOutcome::Conflict(files), .. }) => (
                         Tone::Warn,
@@ -536,7 +536,7 @@ impl Monaged {
                 let caught_note = if caught > 0 { format!(" ({target} first caught up with {caught} commit{} from origin.)", if caught == 1 { "" } else { "s" }) } else { String::new() };
                 let pushed = report.as_ref().ok().and_then(|r| r.pushed.clone());
                 let (mut tone, mut text, merged_sha, conflict) = match report.map(|r| r.outcome) {
-                    Ok(MergeOutcome::Merged(sha)) => (Tone::Info, format!("Merged {source} into {target} ({sha})."), Some(sha), Vec::new()),
+                    Ok(MergeOutcome::Merged(sha)) => (Tone::Info, format!("Merged {source} into {target} at {sha}."), Some(sha), Vec::new()),
                     Ok(MergeOutcome::AlreadyMerged) => (Tone::Info, format!("{target} already contains everything from {source}."), Some(String::new()), Vec::new()),
                     Ok(MergeOutcome::Conflict(files)) => (
                         Tone::Warn,
@@ -1469,7 +1469,7 @@ impl Monaged {
                     None => ui::mono("not reviewed yet").into_any_element(),
                 },
             ))
-            .when_some(sync.filter(|_| has_origin), |d, counts| d.child(kv("Origin", ui::mono(sync_words(counts)).into_any_element())));
+            .when_some(sync.filter(|_| has_origin), |d, counts| d.child(kv("Origin", ui::mono(if counts.is_none() { "not pushed yet".to_string() } else { sync_words(counts) }).into_any_element())));
 
         div()
             .flex()

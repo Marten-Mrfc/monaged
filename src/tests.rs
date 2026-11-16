@@ -64,6 +64,7 @@ fn markdown_blocks_and_styles() {
             Block::Quote(_) => "q",
             Block::Code(..) => "code",
             Block::Rule => "hr",
+            Block::Table { .. } => "table",
         })
         .collect();
     assert_eq!(kinds, ["h", "p", "li", "li", "li", "li", "li", "code"]);
@@ -649,4 +650,32 @@ fn git_labels_read_short() {
     assert_eq!(short_when("1 minute ago"), "1m");
     assert_eq!(short_when("3 months ago"), "3mo");
     assert_eq!(short_when("2 years, 3 months ago"), "2 years, 3 months");
+}
+
+#[test]
+fn markdown_reads_tables_tasks_and_strikes() {
+    use crate::markdown::{Align, Block, looks_like_markdown, parse};
+    let blocks = parse("| A | B |\n|---|--:|\n| `x` | 2 |\n| y | **3** |\n\n- [x] done\n- [ ] todo\n\nOld ~~gone~~ text.");
+    let Block::Table { align, rows } = &blocks[0] else { panic!("a table first") };
+    assert_eq!(align, &vec![Align::Left, Align::Right]);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0][0].text, "A");
+    assert_eq!(rows[1][0].text, "x");
+    assert!(rows[1][0].styles.iter().any(|(_, s)| s.code));
+    assert!(rows[2][1].styles.iter().any(|(_, s)| s.bold));
+    let checks: Vec<Option<bool>> = blocks.iter().filter_map(|b| if let Block::Item { check, .. } = b { Some(*check) } else { None }).collect();
+    assert_eq!(checks, vec![Some(true), Some(false)]);
+    let Some(Block::Paragraph(p)) = blocks.last() else { panic!("a paragraph last") };
+    assert!(p.styles.iter().any(|(r, s)| s.strike && &p.text[r.clone()] == "gone"));
+    // A table still being written shows what's there.
+    assert!(matches!(parse("| a | b |\n|---|---|\n| 1 | 2 |").first(), Some(Block::Table { rows, .. }) if rows.len() == 2));
+    // Formatting someone typed is shown formatted; plain text stays plain.
+    assert!(looks_like_markdown("Run `cargo test` first"));
+    assert!(looks_like_markdown("Steps:\n1. build\n2. test"));
+    assert!(!looks_like_markdown("Please fix the failing coupon test"));
+    assert!(!looks_like_markdown("Version 2. is out"));
+    // Code without a language: JSON and shell are recognised.
+    assert_eq!(crate::review_ui::guess_lang("{\"a\": 1}"), Some(crate::syntax::Lang::Json));
+    assert_eq!(crate::review_ui::guess_lang("git status"), Some(crate::syntax::Lang::Shell));
+    assert_eq!(crate::review_ui::guess_lang("hello"), None);
 }

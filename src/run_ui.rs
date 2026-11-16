@@ -210,7 +210,7 @@ fn run_tests(distro: &str, worktree: &str, command: &str, times: usize, exports:
 }
 
 impl Monaged {
-    fn run_dir(&self, sub_id: i64) -> Option<String> {
+    pub(crate) fn run_dir(&self, sub_id: i64) -> Option<String> {
         let target = self.run_targets.get(&sub_id).copied().unwrap_or_else(|| self.default_run_target(sub_id));
         match target {
             GitTarget::Agent(id) => self.agent(id).filter(|a| !a.record.archived).map(|a| a.record.worktree.clone()),
@@ -447,38 +447,26 @@ impl Monaged {
         let state = self.run_states.get(&dir);
         let config = state.and_then(|s| s.config.clone());
 
-        let mut targets: Vec<(GitTarget, String)> =
-            self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived).map(|a| (GitTarget::Agent(a.record.id), a.record.name.clone())).collect();
-        targets.push((GitTarget::Project, "project checkout".into()));
-        let picker = div().flex().flex_wrap().gap(px(4.)).children(targets.into_iter().enumerate().map(|(i, (t, name))| {
-            let on = t == target;
-            let running = match t {
-                GitTarget::Agent(id) => self.agent(id).and_then(|a| self.run_states.get(&a.record.worktree)).and_then(|r| r.dev.as_ref()).is_some_and(|d| d.running),
-                GitTarget::Project => false,
-            };
-            div()
-                .id(("run-target", i))
-                .px(px(7.))
-                .h(px(22.))
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .rounded(px(4.))
-                .border_1()
-                .border_color(rgb(if on { theme::text_3() } else { theme::line() }))
-                .when(on, |d| d.bg(rgb(theme::selected())))
-                .font_family(theme::MONO)
-                .text_size(px(11.))
-                .text_color(rgb(if on { theme::text() } else { theme::text_3() }))
-                .cursor_pointer()
-                .when(running, |d| d.child(ui::status_dot(("run-target-dot", i), State::Working)))
-                .child(name)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.run_targets.insert(sub_id, t);
-                    this.prepare_run(sub_id, cx);
-                    cx.notify();
-                }))
-        }));
+        // Which worktree: a menu (following the selected agent unless you pick one).
+        let target_name = match target {
+            GitTarget::Agent(id) => self.agent(id).map(|a| a.record.name.clone()).unwrap_or_else(|| "agent".into()),
+            GitTarget::Project => "project checkout".into(),
+        };
+        let elsewhere = self
+            .agents
+            .iter()
+            .filter(|a| a.record.subproject_id == sub_id && !a.record.archived && a.record.worktree != dir)
+            .filter(|a| self.run_states.get(&a.record.worktree).and_then(|r| r.dev.as_ref()).is_some_and(|d| d.running))
+            .count();
+        let picker = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(div().flex_none().text_size(px(12.5)).text_color(rgb(theme::text_3())).child(if elsewhere > 0 { format!("Worktree · {elsewhere} more running") } else { "Worktree".to_string() }))
+            .child(div().flex_1())
+            .child(ui::menu_chip("run-target", target_name).flex_shrink().min_w(px(0.)).max_w(px(240.)).on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                this.open_menu(crate::menu::MenuTarget::Worktree(sub_id, true), event.position(), window, cx)
+            })));
 
         let Some(config) = config else {
             return ui::panel_section("Run").child(picker).child(ui::skeleton_text("run-sk", 3)).into_any_element();

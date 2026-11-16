@@ -24,12 +24,53 @@ const READING_WIDTH: f32 = 680.;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum InspectorTab {
+    /// The pipeline, and the board its agents coordinate on.
     Pipeline,
-    Board,
     Merge,
     Git,
-    Timeline,
     Run,
+    /// What happened, newest first.
+    Timeline,
+}
+
+impl InspectorTab {
+    /// The dock's tabs in order, with their shortcut ids (Alt 1-5 by default).
+    pub(crate) const ALL: [(InspectorTab, &'static str); 5] = [
+        (InspectorTab::Pipeline, "dock-pipeline"),
+        (InspectorTab::Merge, "dock-merge"),
+        (InspectorTab::Git, "dock-git"),
+        (InspectorTab::Run, "dock-run"),
+        (InspectorTab::Timeline, "dock-activity"),
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            InspectorTab::Pipeline => "Pipeline",
+            InspectorTab::Merge => "Merge",
+            InspectorTab::Git => "Git",
+            InspectorTab::Run => "Run",
+            InspectorTab::Timeline => "Activity",
+        }
+    }
+
+    pub(crate) fn icon(self) -> Icon {
+        match self {
+            InspectorTab::Pipeline => Icon::Flow,
+            InspectorTab::Merge => Icon::Merge,
+            InspectorTab::Git => Icon::Branch,
+            InspectorTab::Run => Icon::Play,
+            InspectorTab::Timeline => Icon::Clock,
+        }
+    }
+}
+
+/// A dock tab's badge.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum DockBadge {
+    NeedsYou,
+    Working,
+    Ready,
+    Count(usize),
 }
 
 /// One pane in the agent area.
@@ -492,6 +533,11 @@ impl Monaged {
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_inspector))
+            .on_action(cx.listener(Self::on_dock_pipeline))
+            .on_action(cx.listener(Self::on_dock_merge))
+            .on_action(cx.listener(Self::on_dock_git))
+            .on_action(cx.listener(Self::on_dock_run))
+            .on_action(cx.listener(Self::on_dock_activity))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_palette_up))
             .on_action(cx.listener(Self::on_palette_down))
@@ -1092,7 +1138,6 @@ impl Monaged {
                 d.child(
                     item("status-working")
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(theme::hover())))
                         .tooltip(tip("Go to the next working agent"))
                         .child(ui::status_dot("working-dot", State::Working))
                         .child(format!("{working} working"))
@@ -1133,7 +1178,7 @@ impl Monaged {
             .child(
                 item("status-inspector")
                     .cursor_pointer()
-                    .tooltip(tip_key("Inspector", crate::keys::label("inspector")))
+                    .tooltip(tip_key("Dock", crate::keys::label("inspector")))
                     .child(icon_sized(Icon::PanelRight, 14.))
                     .on_click(cx.listener(|this, _, window, cx| this.on_toggle_inspector(&crate::ToggleInspector, window, cx))),
             )
@@ -1831,7 +1876,7 @@ impl Monaged {
                         .border_color(rgb(theme::line()))
                         .text_size(px(14.))
                         .line_height(px(21.))
-                        .child(text.clone()),
+                        .child(if crate::markdown::looks_like_markdown(text) { review_ui::render_markdown(text) } else { text.clone().into_any_element() }),
                 )
                 .into_any_element(),
             Item::Agent(text) if pipeline::contains_directive(text) => self.render_agent_reply(agent_id, index, text, cx),
@@ -1940,43 +1985,122 @@ impl Monaged {
 
     // ---- Inspector ----------------------------------------------------------------------------------
 
+    /// What a dock tab has to say before you open it: something needs you,
+    /// something runs, something is ready, or how many.
+    fn dock_badge(&self, sub_id: i64, tab: InspectorTab) -> Option<DockBadge> {
+        match tab {
+            InspectorTab::Pipeline => {
+                let needs = self.pipeline_needs_you(sub_id) || self.asks.iter().any(|a| self.sub_of(a.to) == Some(sub_id) && a.waiting());
+                let running = self.pipelines.get(&sub_id).is_some_and(|p| !matches!(p.stage, Stage::Done | Stage::Stopped));
+                let board = self.board_count(sub_id);
+                if needs {
+                    Some(DockBadge::NeedsYou)
+                } else if running {
+                    Some(DockBadge::Working)
+                } else {
+                    (board > 0).then_some(DockBadge::Count(board))
+                }
+            }
+            InspectorTab::Merge => {
+                let state = self.merges.get(&sub_id);
+                if state.is_some_and(|m| m.busy) {
+                    return Some(DockBadge::Working);
+                }
+                if state.is_some_and(|m| !m.conflict.is_empty()) {
+                    return Some(DockBadge::NeedsYou);
+                }
+                let sub = self.subprojects.iter().find(|s| s.id == sub_id)?;
+                let target = self.merge_target(sub_id)?;
+                let ahead = self.branch_info.get(&sub.project_id).and_then(|i| i.ahead.get(&(sub.branch.clone(), target))).copied().unwrap_or(0);
+                let at_bar = self.sub_confidence(sub_id).is_some_and(|(score, _)| score >= self.min_score());
+                (ahead > 0 && at_bar).then_some(DockBadge::Ready)
+            }
+            InspectorTab::Git => {
+                let panel = self.git_panels.get(&sub_id)?;
+                if panel.busy.is_some() {
+                    return Some(DockBadge::Working);
+                }
+                let files = panel.status.as_ref().and_then(|s| s.as_ref().ok()).map(|s| s.files.len()).unwrap_or(0);
+                (files > 0).then_some(DockBadge::Count(files))
+            }
+            InspectorTab::Run => {
+                let dirs: Vec<String> = self
+                    .agents
+                    .iter()
+                    .filter(|a| a.record.subproject_id == sub_id && !a.record.archived)
+                    .map(|a| a.record.worktree.clone())
+                    .chain(self.run_dir(sub_id))
+                    .collect();
+                let states: Vec<&crate::run_ui::RunState> = dirs.iter().filter_map(|d| self.run_states.get(d)).collect();
+                if states.iter().any(|r| r.tests.as_ref().is_some_and(|t| !t.passed)) {
+                    Some(DockBadge::NeedsYou)
+                } else if states.iter().any(|r| r.testing || r.dev.as_ref().is_some_and(|d| d.running)) {
+                    Some(DockBadge::Working)
+                } else {
+                    None
+                }
+            }
+            InspectorTab::Timeline => None,
+        }
+    }
+
     fn render_inspector(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let Some(sub_id) = self.sel_sub else { return div().into_any_element() };
-        let board = self.board_count(sub_id);
         let body: AnyElement = match self.inspector_tab {
             InspectorTab::Pipeline => self.render_pipeline_inspector(sub_id, cx),
-            InspectorTab::Board => self.render_board(sub_id, cx),
             InspectorTab::Merge => self.render_merge_inspector(sub_id, cx),
             InspectorTab::Git => self.render_git_inspector(sub_id, cx),
             InspectorTab::Timeline => self.render_timeline(sub_id, cx),
             InspectorTab::Run => self.render_run_inspector(sub_id, cx),
         };
         let handle = self.inspector_handle(width, cx);
-        // Five tabs: icons only when the inspector is narrow.
-        let show_icons = width >= 400.;
-        let tab = |id: &'static str, glyph: Icon, label: String, which: InspectorTab| {
+        // Icons beside the labels only when there's room for both.
+        let show_icons = width >= 420.;
+        let tabs = InspectorTab::ALL.iter().enumerate().map(|(i, (which, key))| {
+            let which = *which;
             let on = self.inspector_tab == which;
+            let badge: Option<AnyElement> = self.dock_badge(sub_id, which).map(|b| match b {
+                DockBadge::NeedsYou => div().size(px(6.)).rounded_full().bg(rgb(theme::red())).into_any_element(),
+                DockBadge::Ready => div().size(px(6.)).rounded_full().bg(rgb(theme::text())).into_any_element(),
+                DockBadge::Working => ui::status_dot(("dock-badge", i), ui::State::Working),
+                DockBadge::Count(n) => div()
+                    .px(px(4.))
+                    .min_w(px(16.))
+                    .h(px(15.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(if on { theme::line_strong() } else { theme::line() }))
+                    .font_family(theme::MONO)
+                    .text_size(px(10.))
+                    .text_color(rgb(if on { theme::text() } else { theme::text_2() }))
+                    .child(if n > 99 { "99+".to_string() } else { n.to_string() })
+                    .into_any_element(),
+            });
             div()
-                .id(id)
+                .id(("dock-tab", i))
+                .flex_none()
+                .h(px(28.))
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .px(px(7.))
-                .pt(px(9.))
-                .pb(px(8.))
+                .px(px(8.))
+                .rounded(px(6.))
                 .text_size(px(12.5))
                 .cursor_pointer()
                 .text_color(rgb(if on { theme::text() } else { theme::text_3() }))
-                .border_b_2()
-                .border_color(rgb(if on { theme::text() } else { theme::panel() }))
-                .when(!on, |d| d.hover(|s| s.text_color(rgb(theme::text_2()))))
-                .when(show_icons, |d| d.child(icon(glyph).size(px(14.))))
-                .child(label)
+                .when(on, |d| d.bg(rgb(theme::selected())))
+                .when(!on, |d| d.hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text_2()))))
+                .tooltip(tip_key(which.label(), crate::keys::label(key)))
+                .when(show_icons, |d| d.child(icon(which.icon()).size(px(13.))))
+                .child(which.label())
+                .children(badge)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.inspector_tab = which;
                     cx.notify();
                 }))
-        };
+        });
         div()
             .relative()
             .w(px(width))
@@ -1990,16 +2114,23 @@ impl Monaged {
             .child(handle)
             .child(
                 div()
+                    .flex_none()
+                    .h(px(44.))
                     .flex()
-                    .px(px(8.))
+                    .items_center()
+                    .gap(px(2.))
+                    .pl(px(8.))
+                    .pr(px(6.))
                     .border_b_1()
                     .border_color(rgb(theme::line()))
-                    .child(tab("insp-pipeline", Icon::Flow, "Pipeline".into(), InspectorTab::Pipeline))
-                    .child(tab("insp-board", Icon::Board, if board > 0 { format!("Board {board}") } else { "Board".into() }, InspectorTab::Board))
-                    .child(tab("insp-merge", Icon::Merge, "Merge".into(), InspectorTab::Merge))
-                    .child(tab("insp-git", Icon::Branch, "Git".into(), InspectorTab::Git))
-                    .child(tab("insp-run", Icon::Play, "Run".into(), InspectorTab::Run))
-                    .child(tab("insp-timeline", Icon::Clock, "Timeline".into(), InspectorTab::Timeline)),
+                    .children(tabs)
+                    .child(div().flex_1())
+                    .child(
+                        ui::icon_button("dock-hide", Icon::PanelRight)
+                            .size(px(26.))
+                            .tooltip(tip_key("Hide the dock", crate::keys::label("inspector")))
+                            .on_click(cx.listener(|this, _, window, cx| this.on_toggle_inspector(&crate::ToggleInspector, window, cx))),
+                    ),
             )
             .child(div().id("inspector-body").flex_1().min_h(px(0.)).overflow_y_scroll().child(body))
             .into_any_element()

@@ -6,6 +6,10 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **Formatted agent replies**: tables, task lists and strikethrough; code blocks say their language and have a Copy button, and unlabelled JSON and shell are recognised and highlighted. Your own messages (and Monaged's to agents) are formatted when they use Markdown.
+- **Tool calls you can read**: a call's input is laid out field by field instead of raw JSON (a command as a shell line, an edit as a diff, file contents highlighted in their language), and JSON output is highlighted.
+- **The dock tells you what's going on**: each tab has a badge (needs you, running, ready to merge, board posts, uncommitted files), Alt 1–5 switch tabs (again hides the dock), and a button hides it.
+
 - **How merges reach a branch**, per project: here then push (the default with an origin), here only, or through GitHub pull requests or GitLab merge requests, merged on the host once its reviews and checks allow it (protected branches work). Click the chip in the project view or the Merge tab.
 - **Update from develop**: when develop has commits a feature branch doesn't, one button brings them in (after catching develop up with origin), so conflicts show up early and can go to an agent.
 - **Better pull and merge requests**: the description says what each agent did, how it was checked, the score with its reasons and any open findings; below the quality bar the request opens as a draft and is marked ready once the score reaches the bar.
@@ -14,6 +18,9 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 - **Merges know about origin**: Monaged fetches first, catches the target up when origin moved on, and stops (instead of making a branch that can't be pushed) when the target went its own way both here and on origin.
 - **Fetching is on by default** (every 15 minutes), and open requests and running CI are re-checked about once a minute while you're in the project.
+- **The dock, reorganised**: five tabs (Pipeline, Merge, Git, Run, Activity). The board lives in Pipeline (the latest three entries, all on request), next to who owns which files; plan and budget are one section; the steps' details line up.
+- **Worktree menus**: Git and Run pick a worktree from a menu (it was a wall of chips) and follow the agent you open until you choose one.
+- **Activity** (was Timeline) hides each turn's entry unless you ask for them, so reviews, merges and the pipeline's steps stand out.
 - **The Merge tab, redone**: one line says where the work stands, one button does the next thing (merge, or resolve conflicts), and the other actions are a list that says what each would act on ("6 new commits", "1 to push", "as a draft"). The pull or merge request shows its CI and why the host is waiting; the rules sit under **How it merges**.
 - **Rules and the merge method open a menu** with every choice explained, instead of changing each time you click.
 - **Branches against origin**: the project view says under each branch whether it's in sync, or how many commits there are to push or pull, and pushes or pulls it in one click. The Git tab says "5 to push" instead of "↑5 ↓0" and can push any branch that's ahead (it could only push the feature branch).
@@ -24,7 +31,8 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 - The merge queue counted a feature as ready at 3/5; it now uses the quality bar.
 - The Git tab showed origin's address as "…", and branch labels in its history ran over the times; `origin/x` next to `x` is one label now.
-- Long lines in a subproject's Recent list were cut off without an ellipsis.
+- Long lines in a subproject's Recent list were cut off without an ellipsis, and so were branch names and commit subjects in the Git tab.
+- A debug build crashed when an agent started working (the status bar styled one item twice).
 
 ## [0.7.0] - 2026-11-15
 

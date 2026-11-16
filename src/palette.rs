@@ -174,11 +174,11 @@ impl Monaged {
             out.push(Entry { group: "Actions", glyph: Icon::Plus, title: "New agent".into(), detail: sub.name.clone(), state: None, hint: None, command: Command::NewAgent(sub.id) });
             out.push(Entry { group: "Actions", glyph: Icon::Diff, title: "All changes".into(), detail: sub.name.clone(), state: None, hint: None, command: Command::SubChanges(sub.id) });
             out.push(Entry { group: "Actions", glyph: Icon::Push, title: "Push branch".into(), detail: sub.branch.clone(), state: None, hint: None, command: Command::Push(sub.id) });
-            out.push(Entry { group: "Actions", glyph: Icon::Flow, title: "Show pipeline".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Pipeline) });
-            out.push(Entry { group: "Actions", glyph: Icon::Board, title: "Show board".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Board) });
-            out.push(Entry { group: "Actions", glyph: Icon::Merge, title: "Show merge".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Merge) });
-            out.push(Entry { group: "Actions", glyph: Icon::Play, title: "Run the app or its tests".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Run) });
-            out.push(Entry { group: "Actions", glyph: Icon::Branch, title: "Show git".into(), detail: "Inspector".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Git) });
+            out.push(Entry { group: "Actions", glyph: Icon::Flow, title: "Show pipeline".into(), detail: "Dock".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Pipeline) });
+            out.push(Entry { group: "Actions", glyph: Icon::Board, title: "Show the board".into(), detail: "Pipeline".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Pipeline) });
+            out.push(Entry { group: "Actions", glyph: Icon::Merge, title: "Show merge".into(), detail: "Dock".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Merge) });
+            out.push(Entry { group: "Actions", glyph: Icon::Play, title: "Run the app or its tests".into(), detail: "Dock".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Run) });
+            out.push(Entry { group: "Actions", glyph: Icon::Branch, title: "Show git".into(), detail: "Dock".into(), state: None, hint: None, command: Command::Inspector(InspectorTab::Git) });
         }
         if let Some(agent) = self.sel_agent.and_then(|id| self.agent(id)) {
             out.push(Entry { group: "Actions", glyph: Icon::Eye, title: "Review".into(), detail: agent.record.name.clone(), state: None, hint: None, command: Command::Review(agent.record.id) });

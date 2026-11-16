@@ -65,7 +65,6 @@ impl SavedLayout {
 fn tab_key(tab: InspectorTab) -> &'static str {
     match tab {
         InspectorTab::Pipeline => "pipeline",
-        InspectorTab::Board => "board",
         InspectorTab::Merge => "merge",
         InspectorTab::Git => "git",
         InspectorTab::Timeline => "timeline",
@@ -75,7 +74,6 @@ fn tab_key(tab: InspectorTab) -> &'static str {
 
 fn tab_from(key: &str) -> InspectorTab {
     match key {
-        "board" => InspectorTab::Board,
         "merge" => InspectorTab::Merge,
         "git" => InspectorTab::Git,
         "timeline" => InspectorTab::Timeline,

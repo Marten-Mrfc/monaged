@@ -26,7 +26,7 @@ use crate::text_input::TextInput;
 use crate::ui::{self, Kind};
 use crate::{Monaged, theme};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum GitTarget {
     Agent(i64),
     Project,
@@ -34,6 +34,8 @@ pub(crate) enum GitTarget {
 
 pub(crate) struct GitPanel {
     pub target: GitTarget,
+    /// You picked the worktree; otherwise it follows the selected agent.
+    pub pinned: bool,
     pub status: Option<Result<Status, String>>,
     pub stashes: usize,
     pub message: Entity<TextInput>,
@@ -95,6 +97,7 @@ impl Monaged {
             sub_id,
             GitPanel {
                 target,
+                pinned: false,
                 status: None,
                 stashes: 0,
                 message,
@@ -163,8 +166,12 @@ impl Monaged {
         .detach();
     }
 
-    fn set_git_target(&mut self, sub_id: i64, target: GitTarget, cx: &mut Context<Self>) {
+    pub(crate) fn set_git_target(&mut self, sub_id: i64, target: GitTarget, pinned: bool, cx: &mut Context<Self>) {
         if let Some(panel) = self.git_panels.get_mut(&sub_id) {
+            panel.pinned = pinned;
+            if panel.target == target {
+                return cx.notify();
+            }
             panel.target = target;
             panel.status = None;
         }
@@ -503,38 +510,28 @@ impl Monaged {
         let project_id = sub.project_id;
         let busy = panel.busy.clone();
 
-        // Which worktree.
-        let mut targets: Vec<(GitTarget, String)> =
-            self.agents.iter().filter(|a| a.record.subproject_id == sub_id && !a.record.archived).map(|a| (GitTarget::Agent(a.record.id), a.record.name.clone())).collect();
-        targets.push((GitTarget::Project, "project checkout".into()));
-        let picker = div().flex().flex_wrap().gap(px(4.)).children(targets.into_iter().enumerate().map(|(i, (target, name))| {
-            let on = panel.target == target;
-            div()
-                .id(("git-target", i))
-                .px(px(7.))
-                .h(px(22.))
-                .flex()
-                .items_center()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(rgb(if on { theme::text_3() } else { theme::line() }))
-                .when(on, |d| d.bg(rgb(theme::selected())))
-                .font_family(theme::MONO)
-                .text_size(px(11.))
-                .text_color(rgb(if on { theme::text() } else { theme::text_3() }))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::hover())))
-                .child(name)
-                .on_click(cx.listener(move |this, _, _, cx| this.set_git_target(sub_id, target, cx)))
-        }));
+        // Which worktree: a menu (following the selected agent unless you pick one).
+        let target_name = match panel.target {
+            GitTarget::Agent(id) => self.agent(id).map(|a| a.record.name.clone()).unwrap_or_else(|| "agent".into()),
+            GitTarget::Project => "project checkout".into(),
+        };
+        let picker = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(div().flex_none().text_size(px(12.5)).text_color(rgb(theme::text_3())).child("Worktree"))
+            .child(div().flex_1())
+            .child(ui::menu_chip("git-target", target_name).flex_shrink().min_w(px(0.)).max_w(px(240.)).on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                this.open_menu(crate::menu::MenuTarget::Worktree(sub_id, false), event.position(), window, cx)
+            })));
 
         // Status and committing.
         let status_section = match &panel.status {
-            None => ui::panel_section("Worktree").child(picker).child(ui::skeleton_text("git-status-sk", 3)),
-            Some(Err(err)) => ui::panel_section("Worktree").child(picker).child(ui::callout(Tone::Error, err.clone())),
+            None => ui::panel_section("Changes").child(picker).child(ui::skeleton_text("git-status-sk", 3)),
+            Some(Err(err)) => ui::panel_section("Changes").child(picker).child(ui::callout(Tone::Error, err.clone())),
             Some(Ok(status)) => {
                 let files = status.files.clone();
-                let mut section = ui::panel_section("Worktree")
+                let mut section = ui::panel_section("Changes")
                     .child(picker)
                     .child(
                         div()
@@ -542,7 +539,7 @@ impl Monaged {
                             .items_center()
                             .gap(px(8.))
                             .child(icon_sized(Icon::Branch, 13.).text_color(rgb(theme::text_3())))
-                            .child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(12.)).child(status.branch.clone()))
+                            .child(ui::one_line(div().flex_1()).font_family(theme::MONO).text_size(px(12.)).child(status.branch.clone()))
                             .child(ui::mono(match (&status.upstream, status.ahead, status.behind) {
                                 (None, _, _) => "no upstream".to_string(),
                                 (Some(_), 0, 0) => "up to date".to_string(),
@@ -581,7 +578,7 @@ impl Monaged {
                                         .children(ticked.then(|| icon_sized(Icon::Check, 10.).text_color(rgb(theme::text())))),
                                 )
                                 .child(div().w(px(52.)).flex_none().font_family(theme::MONO).text_size(px(10.5)).text_color(rgb(if f.label() == "conflict" { theme::red_text() } else { theme::text_3() })).child(f.label()))
-                                .child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(11.5)).child(f.path.clone()))
+                                .child(ui::one_line(div().flex_1()).font_family(theme::MONO).text_size(px(11.5)).child(f.path.clone()))
                                 .child(
                                     div()
                                         .id(("git-discard", i))
@@ -640,7 +637,7 @@ impl Monaged {
                             .min_h(px(24.))
                             .child(icon_sized(Icon::Commit, 12.).text_color(rgb(theme::text_4())))
                             .child(div().flex_none().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::text_3())).child(sha.clone()))
-                            .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.)).text_color(rgb(theme::text_2())).child(subject.clone()))
+                            .child(ui::one_line(div().flex_1()).text_size(px(12.)).text_color(rgb(theme::text_2())).child(subject.clone()))
                             .when(!*pushed, |d| {
                                 d.child(
                                     ui::button("git-undo-commit", Kind::Ghost, None, "Undo")
@@ -705,7 +702,7 @@ impl Monaged {
                         .items_center()
                         .gap(px(8.))
                         .h(px(28.))
-                        .child(div().flex_1().min_w(px(0.)).truncate().font_family(theme::MONO).text_size(px(11.5)).child(branch.clone()))
+                        .child(ui::one_line(div().flex_1()).font_family(theme::MONO).text_size(px(11.5)).child(branch.clone()))
                         .child(ui::mono(crate::merge_ui::sync_words(*counts)))
                         .when(matches!(counts, Some((0, behind)) if *behind > 0), |d| {
                             d.child(ui::button(("git-pull", i), Kind::Secondary, None, "Pull").on_click(cx.listener(move |this, _, _, cx| {
@@ -824,11 +821,9 @@ fn render_graph_line(i: usize, line: &GraphLine, project_id: i64, cx: &mut Conte
                 .items_center()
                 .gap(px(4.))
                 .children(short_refs(&refs).into_iter().take(2).map(|r| {
-                    div()
-                        .flex_shrink()
+                    ui::one_line(div().flex_shrink())
                         .min_w(px(24.))
                         .max_w(px(120.))
-                        .truncate()
                         .px(px(4.))
                         .rounded(px(3.))
                         .border_1()
@@ -838,7 +833,7 @@ fn render_graph_line(i: usize, line: &GraphLine, project_id: i64, cx: &mut Conte
                         .text_color(rgb(theme::text_2()))
                         .child(r)
                 }))
-                .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.)).text_color(rgb(theme::text_2())).child(subject)),
+                .child(ui::one_line(div().flex_1()).min_w(px(64.)).text_size(px(12.)).text_color(rgb(theme::text_2())).child(subject)),
         )
         .child(div().flex_none().pl(px(4.)).text_size(px(10.5)).text_color(rgb(theme::text_4())).child(short_when(&when)))
         .tooltip(crate::session_ui::tip_static(format!("{author} · {when} · click for the diff")))

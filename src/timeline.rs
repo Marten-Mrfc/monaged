@@ -44,23 +44,29 @@ fn local_offset_seconds() -> i64 {
 }
 
 impl Monaged {
-    pub(crate) fn render_timeline(&self, sub_id: i64, _cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_timeline(&self, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
         let events = self.store.timeline(sub_id, 400).unwrap_or_default();
         if events.is_empty() {
-            return ui::panel_section("Timeline").child(ui::meta("Nothing yet. Turns, reviews, merges and board posts show up here.")).into_any_element();
+            return ui::panel_section("Activity").child(ui::meta("Nothing yet. Reviews, merges, the pipeline's steps and board posts show up here, newest first.")).into_any_element();
         }
+        // Each turn is an entry; most of the time the rest is what matters.
+        let show_turns = self.store.setting("ui:activity_turns").is_some_and(|v| v == "1");
         let agent_name = |id: Option<i64>| id.and_then(|id| self.agent(id)).map(|a| a.record.name.clone()).unwrap_or_else(|| "an agent".into());
         let total: f64 = events.iter().filter(|e| e.kind == "turn").filter_map(|e| e.data.split('|').nth(1)?.parse::<f64>().ok()).sum();
         let turns = events.iter().filter(|e| e.kind == "turn").count();
 
         let mut col = div().flex().flex_col();
         col = col.child(
-            ui::panel_section("Timeline")
-                .child(div().flex().gap(px(16.)).child(ui::mono(format!("{turns} turns"))).child(ui::mono(format!("${total:.2} API-equivalent")))),
+            ui::panel_section("Activity")
+                .child(div().flex().gap(px(16.)).child(ui::mono(format!("{turns} turns"))).child(ui::mono(format!("${total:.2} API-equivalent"))))
+                .child(ui::switch("activity-turns", "Show every turn", show_turns).on_click(cx.listener(move |this, _, _, cx| {
+                    let _ = this.store.set_setting("ui:activity_turns", if show_turns { "0" } else { "1" });
+                    cx.notify();
+                }))),
         );
         let mut day_list = div().flex().flex_col().px(px(16.)).pb(px(16.));
         let mut last_day = String::new();
-        for (n, event) in events.iter().enumerate() {
+        for (n, event) in events.iter().enumerate().filter(|(_, e)| show_turns || e.kind != "turn") {
             let (day, time) = local_time(event.at);
             if day != last_day {
                 day_list = day_list.child(div().pt(px(14.)).pb(px(6.)).child(ui::label(day.clone())));

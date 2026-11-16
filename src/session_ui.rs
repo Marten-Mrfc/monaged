@@ -976,10 +976,15 @@ impl Monaged {
         if let Some(input) = &detail.input
             && input != "{}"
         {
-            body = body.child(ui::label("Input")).child(mono_box(input.clone(), 14));
+            body = body.child(ui::label("Input")).child(render_tool_input(input));
         }
         for content in &detail.content {
             body = match content {
+                // JSON output reads better laid out and highlighted.
+                ToolContent::Text(text) if crate::review_ui::guess_lang(text) == Some(crate::syntax::Lang::Json) => {
+                    let pretty = serde_json::from_str::<serde_json::Value>(text).ok().and_then(|v| serde_json::to_string_pretty(&v).ok()).unwrap_or_else(|| text.clone());
+                    body.child(ui::label("Output")).child(crate::review_ui::code_block(pretty, "json", Some(24)))
+                }
                 ToolContent::Text(text) => body.child(ui::label("Output")).child(mono_box(text.clone(), 24)),
                 ToolContent::Diff { path, old, new } => body.child(ui::label(format!("Diff · {path}"))).child(render_text_diff(path, old.as_deref(), new)),
                 ToolContent::Terminal(id) => body.child(ui::mono(format!("Terminal {id}"))),
@@ -1118,10 +1123,83 @@ fn render_text_diff(path: &str, old: Option<&str>, new: &str) -> AnyElement {
         .line_height(px(17.))
         .px(px(6.))
         .py(px(4.))
-        .when(prefix > 0, |d| d.child(div().text_color(rgb(theme::text_3())).child(format!("  … {prefix} unchanged lines"))))
+        .when(prefix > 0, |d| d.child(div().text_color(rgb(theme::text_3())).child(format!("  … {prefix} unchanged line{}", if prefix == 1 { "" } else { "s" }))))
         .children(removed.iter().take(MAX).map(|l| line("-", l, theme::del(), theme::del_bg())))
         .children(added.iter().take(MAX.saturating_sub(removed.len().min(MAX))).map(|l| line("+", l, theme::add(), theme::add_bg())))
         .when(shown > MAX, |d| d.child(div().text_color(rgb(theme::text_3())).child(format!("  … {} more changed lines", shown - MAX))))
-        .when(suffix > 0, |d| d.child(div().text_color(rgb(theme::text_3())).child(format!("  … {suffix} unchanged lines"))))
+        .when(suffix > 0, |d| d.child(div().text_color(rgb(theme::text_3())).child(format!("  … {suffix} unchanged line{}", if suffix == 1 { "" } else { "s" }))))
         .into_any_element()
+}
+
+/// A tool call's input, laid out: each field on its own row, a command as a
+/// shell line, file contents and edits as code in the file's language, paths
+/// in mono, prose as prose; anything else as highlighted JSON.
+fn render_tool_input(input: &str) -> AnyElement {
+    use serde_json::Value;
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(input) else {
+        return crate::review_ui::code_block(input.to_string(), "json", Some(14));
+    };
+    // The file the call is about names the language of any code in it.
+    let path = ["file_path", "path", "notebook_path", "filename"].iter().find_map(|k| map.get(*k).and_then(Value::as_str)).unwrap_or_default().to_string();
+    let file_lang = crate::syntax::lang_from_path(&path);
+    // An edit's before and after read best as one diff.
+    let old = ["old_string", "old_str"].iter().find_map(|k| map.get(*k).and_then(Value::as_str));
+    let new = ["new_string", "new_str"].iter().find_map(|k| map.get(*k).and_then(Value::as_str));
+    let as_diff = old.is_some() && new.is_some();
+    let key_label = |k: &str| div().flex_none().w(px(92.)).pt(px(1.)).font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::text_3())).child(k.replace('_', " "));
+    let mut rows = div().flex().flex_col().gap(px(6.)).px(px(10.)).py(px(8.)).rounded(px(6.)).border_1().border_color(rgb(theme::line())).bg(rgb(theme::raised()));
+    for (key, value) in &map {
+        let k = key.as_str();
+        let el: AnyElement = match value {
+            Value::String(s) if matches!(k, "command" | "cmd" | "script") => {
+                rows = rows.child(crate::review_ui::code_block_titled(s.clone(), "shell", Some(k), Some(12)));
+                continue;
+            }
+            Value::String(_) if as_diff && matches!(k, "old_string" | "old_str") => continue,
+            Value::String(s) if as_diff && matches!(k, "new_string" | "new_str") => {
+                rows = rows.child(key_label("change"));
+                rows = rows.child(render_text_diff(&path, old, s));
+                continue;
+            }
+            Value::Number(n) if k.contains("timeout") && n.as_u64().is_some_and(|ms| ms >= 1000) => div()
+                .flex_1()
+                .font_family(theme::MONO)
+                .text_size(px(12.))
+                .text_color(rgb(theme::text_2()))
+                .child(format!("{} s", n.as_u64().unwrap_or(0) / 1000))
+                .into_any_element(),
+            Value::String(s) if matches!(k, "content" | "new_string" | "old_string" | "new_str" | "old_str" | "patch" | "code" | "new_source" | "diff") || s.lines().count() > 2 => {
+                let lang = match (k, file_lang) {
+                    ("patch" | "diff", _) => "diff".to_string(),
+                    (_, Some(_)) => path.rsplit('.').next().unwrap_or_default().to_string(),
+                    _ => String::new(),
+                };
+                rows = rows.child(key_label(k));
+                rows = rows.child(crate::review_ui::code_block(s.clone(), &lang, Some(16)));
+                continue;
+            }
+            Value::String(s) if matches!(k, "file_path" | "path" | "notebook_path" | "filename" | "url" | "pattern" | "glob" | "regex" | "cwd") => {
+                div().flex_1().min_w(px(0.)).font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text())).child(s.clone()).into_any_element()
+            }
+            Value::String(s) => div().flex_1().min_w(px(0.)).text_size(px(12.5)).line_height(px(18.)).text_color(rgb(theme::text_2())).child(s.clone()).into_any_element(),
+            Value::Bool(_) | Value::Number(_) | Value::Null => {
+                div().flex_1().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).child(value.to_string()).into_any_element()
+            }
+            Value::Array(items) if items.iter().all(|i| i.is_string()) && items.len() <= 12 => div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .children(items.iter().filter_map(Value::as_str).map(|s| div().font_family(theme::MONO).text_size(px(12.)).text_color(rgb(theme::text_2())).child(s.to_string())))
+                .into_any_element(),
+            other => {
+                rows = rows.child(key_label(k));
+                rows = rows.child(crate::review_ui::code_block(serde_json::to_string_pretty(other).unwrap_or_default(), "json", Some(14)));
+                continue;
+            }
+        };
+        rows = rows.child(div().flex().items_start().gap(px(10.)).child(key_label(k)).child(el));
+    }
+    rows.into_any_element()
 }

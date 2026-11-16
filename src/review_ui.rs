@@ -1023,7 +1023,150 @@ fn highlight(style: Style) -> HighlightStyle {
         h.color = Some(rgb(theme::text()).into());
         h.underline = Some(gpui::UnderlineStyle { thickness: px(1.), color: Some(rgb(theme::text_3()).into()), wavy: false });
     }
+    if style.strike {
+        h.color = Some(rgb(theme::text_3()).into());
+        h.strikethrough = Some(gpui::StrikethroughStyle { thickness: px(1.), color: Some(rgb(theme::text_3()).into()) });
+    }
     h
+}
+
+/// The language of a code block the agent didn't label: JSON when it parses
+/// as JSON, a shell session when it starts like one.
+pub(crate) fn guess_lang(code: &str) -> Option<crate::syntax::Lang> {
+    let t = code.trim_start();
+    if (t.starts_with('{') || t.starts_with('[')) && serde_json::from_str::<serde_json::Value>(code).is_ok() {
+        return Some(crate::syntax::Lang::Json);
+    }
+    let first = t.lines().next().unwrap_or_default();
+    let shellish = ["$ ", "cd ", "git ", "npm ", "pnpm ", "yarn ", "cargo ", "python", "pip ", "uv ", "make ", "docker ", "./", "sudo ", "export ", "curl "];
+    shellish.iter().any(|p| first.starts_with(p)).then_some(crate::syntax::Lang::Shell)
+}
+
+/// When a code block's Copy was last pressed (its hash and when), so it can
+/// say "Copied" for a moment.
+static COPIED: std::sync::Mutex<Option<(u64, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+/// A code block: the language (or "code") and a Copy button over the code,
+/// highlighted.
+pub(crate) fn code_block(text: String, lang_name: &str, max_lines: Option<usize>) -> AnyElement {
+    code_block_titled(text, lang_name, None, max_lines)
+}
+
+/// A code block whose header says what it is ("command") instead of its language.
+pub(crate) fn code_block_titled(text: String, lang_name: &str, title: Option<&str>, max_lines: Option<usize>) -> AnyElement {
+    let lang = crate::syntax::lang_from_name(lang_name).or_else(|| guess_lang(&text));
+    let label = match (lang_name.trim(), lang) {
+        _ if title.is_some() => title.unwrap_or_default().to_string(),
+        ("", Some(crate::syntax::Lang::Json)) => "json".to_string(),
+        ("", Some(crate::syntax::Lang::Shell)) => "shell".to_string(),
+        ("", _) => "code".to_string(),
+        (name, _) => name.to_lowercase(),
+    };
+    let hash = text_hash(&text);
+    let copied = COPIED.lock().ok().and_then(|c| *c).is_some_and(|(h, at)| h == hash && at.elapsed() < std::time::Duration::from_millis(1600));
+    let lines: Vec<&str> = text.lines().collect();
+    let shown = max_lines.unwrap_or(usize::MAX).min(lines.len());
+    let more = lines.len() - shown;
+    let to_copy = text.clone();
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(6.))
+        .bg(rgb(theme::code_bg()))
+        .border_1()
+        .border_color(rgb(theme::line()))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(26.))
+                .pl(px(12.))
+                .pr(px(4.))
+                .border_b_1()
+                .border_color(rgb(theme::line()))
+                .child(div().flex_1().font_family(theme::MONO).text_size(px(10.5)).text_color(rgb(theme::text_3())).child(label))
+                .child(
+                    div()
+                        .id(("code-copy", hash as usize))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .px(px(6.))
+                        .h(px(20.))
+                        .rounded(px(4.))
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::text_3()))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(theme::hover())).text_color(rgb(theme::text())))
+                        .child(icon_sized(if copied { Icon::Check } else { Icon::Copy }, 12.))
+                        .child(if copied { "Copied" } else { "Copy" })
+                        .on_click(move |_, window, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(to_copy.clone()));
+                            if let Ok(mut c) = COPIED.lock() {
+                                *c = Some((hash, std::time::Instant::now()));
+                            }
+                            window.refresh();
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .px(px(12.))
+                .py(px(9.))
+                .font_family(theme::MONO)
+                .text_size(px(12.5))
+                .line_height(px(19.))
+                .text_color(rgb(theme::text()))
+                .overflow_hidden()
+                .children(lines.into_iter().take(shown).map(|l| div().child(crate::syntax::line(&l.replace('\t', "    "), lang))))
+                .when(more > 0, |d| d.child(div().text_color(rgb(theme::text_3())).child(format!("… {more} more line{}", if more == 1 { "" } else { "s" })))),
+        )
+        .into_any_element()
+}
+
+/// A table: a header row, hairlines between rows, columns as wide as their
+/// longest cell (within reason), text wrapping inside its cell.
+fn table(align: Vec<markdown::Align>, rows: Vec<Vec<Inline>>) -> AnyElement {
+    let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
+    let weights: Vec<f32> = (0..columns)
+        .map(|c| rows.iter().filter_map(|r| r.get(c)).map(|cell| cell.plain_len()).max().unwrap_or(1).clamp(3, 36) as f32)
+        .collect();
+    let total: f32 = weights.iter().sum();
+    let mut out = div().flex().flex_col().rounded(px(6.)).border_1().border_color(rgb(theme::line())).overflow_hidden().text_size(px(13.)).line_height(px(19.));
+    for (r, row) in rows.into_iter().enumerate() {
+        let header = r == 0;
+        let mut line = div()
+            .flex()
+            .when(r > 0, |d| d.border_t_1().border_color(rgb(theme::line())))
+            .when(header, |d| d.bg(rgb(theme::raised())).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())));
+        let mut cells = row.into_iter();
+        for (c, weight) in weights.iter().enumerate() {
+            let cell = cells.next().unwrap_or_default();
+            let a = align.get(c).copied().unwrap_or(markdown::Align::Left);
+            line = line.child(
+                div()
+                    .w(gpui::relative(weight / total))
+                    .min_w(px(0.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .flex()
+                    .when(c > 0, |d| d.border_l_1().border_color(rgb(theme::line())))
+                    .when(a == markdown::Align::Right, |d| d.justify_end())
+                    .when(a == markdown::Align::Center, |d| d.justify_center())
+                    .child(div().min_w(px(0.)).child(styled(cell))),
+            );
+        }
+        out = out.child(line);
+    }
+    out.into_any_element()
 }
 
 fn render_block(block: Block) -> AnyElement {
@@ -1041,7 +1184,27 @@ fn render_block(block: Block) -> AnyElement {
             .child(styled(inline))
             .into_any_element(),
         Block::Paragraph(inline) => div().line_height(px(22.)).child(styled(inline)).into_any_element(),
-        Block::Item { depth, marker, content } => div()
+        Block::Item { depth, content, check: Some(done), .. } => div()
+            .flex()
+            .gap(px(10.))
+            .pl(px(depth as f32 * 18.))
+            .child(
+                div().flex_none().h(px(22.)).flex().items_center().child(
+                    div()
+                        .size(px(14.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(rgb(if done { theme::text_2() } else { theme::line_strong() }))
+                        .when(done, |d| d.bg(rgb(theme::selected())))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .children(done.then(|| icon_sized(Icon::Check, 10.).text_color(rgb(theme::text())))),
+                ),
+            )
+            .child(div().flex_1().min_w(px(0.)).line_height(px(22.)).when(done, |d| d.text_color(rgb(theme::text_3()))).child(styled(content)))
+            .into_any_element(),
+        Block::Item { depth, marker, content, check: None } => div()
             .flex()
             .gap(px(10.))
             .pl(px(depth as f32 * 18.))
@@ -1056,23 +1219,8 @@ fn render_block(block: Block) -> AnyElement {
             .line_height(px(22.))
             .child(styled(inline))
             .into_any_element(),
-        Block::Code(text, lang) => {
-            let lang = crate::syntax::lang_from_name(&lang);
-            div()
-            .px(px(12.))
-            .py(px(10.))
-            .rounded(px(6.))
-            .bg(rgb(theme::code_bg()))
-            .border_1()
-            .border_color(rgb(theme::line()))
-            .font_family(theme::MONO)
-            .text_size(px(12.5))
-            .line_height(px(19.))
-            .text_color(rgb(theme::text()))
-            .overflow_hidden()
-            .children(text.lines().map(|l| div().child(crate::syntax::line(l, lang))))
-            .into_any_element()
-        }
+        Block::Code(text, lang) => code_block(text, &lang, None),
+        Block::Table { align, rows } => table(align, rows),
         Block::Rule => div().h(px(1.)).bg(rgb(theme::line())).into_any_element(),
     }
 }

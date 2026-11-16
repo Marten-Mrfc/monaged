@@ -28,7 +28,7 @@ pub(crate) struct Ask {
 }
 
 impl Ask {
-    fn waiting(&self) -> bool {
+    pub(crate) fn waiting(&self) -> bool {
         self.reply.is_some() && self.at.elapsed() < coord::ASK_TIMEOUT
     }
 }
@@ -72,7 +72,7 @@ impl Monaged {
 
     // ---- Lookups -------------------------------------------------------------------
 
-    fn sub_of(&self, agent_id: i64) -> Option<i64> {
+    pub(crate) fn sub_of(&self, agent_id: i64) -> Option<i64> {
         self.agent(agent_id).map(|a| a.record.subproject_id)
     }
 
@@ -510,38 +510,101 @@ impl Monaged {
         cx.notify();
     }
 
-    /// The inspector's Board tab: questions in flight, who owns which files,
-    /// and every entry, newest first.
-    pub(crate) fn render_board(&self, sub_id: i64, cx: &mut Context<Self>) -> AnyElement {
-        let mut column = div().flex().flex_col();
-        column = column.child(
-            div().px(px(16.)).py(px(12.)).border_b_1().border_color(rgb(theme::line())).text_size(px(12.5)).line_height(px(18.)).text_color(rgb(theme::text_3())).child(
-                "Agents post contracts, decisions and answers here. Each gets new contracts and decisions with its next message; questions go to the librarian first.",
-            ),
-        );
+    /// The board, as sections of the Pipeline tab: questions in flight, the
+    /// entries (newest first; the latest three until you ask for all), and
+    /// who owns which files. Nothing when there's nothing to show, except a
+    /// hint while builders work.
+    pub(crate) fn render_board_sections(&self, sub_id: i64, building: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out: Vec<AnyElement> = Vec::new();
 
         // Questions in flight.
         let open: Vec<&Ask> = self.asks.iter().filter(|a| self.sub_of(a.to) == Some(sub_id)).collect();
         if !open.is_empty() {
-            column = column.child(ui::panel_section("Open questions").children(open.iter().map(|a| {
-                let secs = a.at.elapsed().as_secs();
-                let state = if a.waiting() { format!("waiting {}m{:02}s", secs / 60, secs % 60) } else { "timed out, answer goes on the board".into() };
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .child(
+            out.push(
+                ui::panel_section("Open questions")
+                    .children(open.iter().map(|a| {
+                        let secs = a.at.elapsed().as_secs();
+                        let state = if a.waiting() { format!("{}m{:02}s", secs / 60, secs % 60) } else { "timed out".into() };
                         div()
                             .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(ui::status_dot(("ask-dot", a.id as usize), if a.waiting() { ui::State::Working } else { ui::State::Idle }))
-                            .child(ui::mono(format!("{} → {}", self.agent_name(a.from), self.agent_name(a.to))))
-                            .child(div().flex_1())
-                            .child(ui::mono(state)),
-                    )
-                    .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(crate::review::clip(&a.question, 200)))
-            })));
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(ui::status_dot(("ask-dot", a.id as usize), if a.waiting() { ui::State::Working } else { ui::State::Idle }))
+                                    .child(ui::one_line(div().flex_1()).child(ui::mono(format!("{} → {}", self.agent_name(a.from), self.agent_name(a.to)))))
+                                    .child(ui::mono(state)),
+                            )
+                            .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(crate::review::clip(&a.question, 200)))
+                    }))
+                    .into_any_element(),
+            );
+        }
+
+        let entries: Vec<&BoardEntry> = self.board.iter().filter(|e| e.subproject_id == sub_id).rev().collect();
+        let total = entries.len();
+        let all = self.board_all.contains(&sub_id);
+        if total > 0 || building {
+            let mut section = ui::panel_section(if total > 0 { format!("Board · {total}") } else { "Board".to_string() });
+            if total == 0 {
+                section = section.child(ui::meta("Builders post contracts, decisions and answers here as they work."));
+            }
+            for e in entries.iter().take(if all { usize::MAX } else { 3 }) {
+                let id = e.id;
+                section = section.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.))
+                        .pt(px(4.))
+                        .group("board-entry")
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .px(px(5.))
+                                        .rounded(px(3.))
+                                        .border_1()
+                                        .border_color(rgb(if e.kind == "contract" { theme::text_3() } else { theme::line_strong() }))
+                                        .font_family(theme::MONO)
+                                        .text_size(px(10.))
+                                        .text_color(rgb(if e.kind == "contract" { theme::text() } else { theme::text_3() }))
+                                        .child(e.kind.clone()),
+                                )
+                                .child(ui::one_line(div().flex_1()).child(ui::mono(format!("{} · {}", e.author, ago(e.at)))))
+                                .child(
+                                    ui::icon_button(SharedString::from(format!("board-remove-{id}")), Icon::X)
+                                        .size(px(20.))
+                                        .invisible()
+                                        .group_hover("board-entry", |s| s.visible())
+                                        .tooltip(crate::shell::tip("Remove from the board"))
+                                        .on_click(cx.listener(move |this, _, _, cx| this.remove_board_entry(id, cx))),
+                                ),
+                        )
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())).child(e.title.clone()))
+                        .when(!e.paths.is_empty(), |d| d.child(ui::mono(e.paths.join(", "))))
+                        .child(div().text_size(px(13.)).child(render_markdown(&e.body))),
+                );
+            }
+            if total > 3 {
+                section = section.child(
+                    ui::action_row("board-all", if all { Icon::ChevronDown } else { Icon::ChevronRight }, if all { "Show the latest three".to_string() } else { format!("Show all {total}") }, None).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            if !this.board_all.remove(&sub_id) {
+                                this.board_all.insert(sub_id);
+                            }
+                            cx.notify();
+                        }),
+                    ),
+                );
+            }
+            out.push(section.into_any_element());
         }
 
         // Who owns what.
@@ -555,16 +618,12 @@ impl Monaged {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(3.))
+                        .gap(px(4.))
                         .child(div().text_size(px(12.5)).text_color(rgb(theme::text())).child(a.record.name.clone()))
-                        .child(div().flex().flex_wrap().gap(px(4.)).children(owned.into_iter().map(|(p, how)| {
-                            div()
-                                .px(px(5.))
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(rgb(theme::line_strong()))
+                        .child(div().flex().flex_col().gap(px(2.)).children(owned.into_iter().map(|(p, how)| {
+                            ui::one_line(div())
                                 .font_family(theme::MONO)
-                                .text_size(px(11.))
+                                .text_size(px(11.5))
                                 .text_color(rgb(if how == "claimed" { theme::text_3() } else { theme::text_2() }))
                                 .child(if how == "claimed" { format!("{p} (claimed)") } else { p })
                         })))
@@ -573,58 +632,9 @@ impl Monaged {
             })
             .collect();
         if !owners.is_empty() {
-            column = column.child(ui::panel_section("Files").children(owners));
+            out.push(ui::panel_section("Who owns which files").children(owners).into_any_element());
         }
-
-        let entries: Vec<&BoardEntry> = self.board.iter().filter(|e| e.subproject_id == sub_id).rev().collect();
-        if entries.is_empty() {
-            column = column.child(
-                div()
-                    .px(px(16.))
-                    .py(px(18.))
-                    .text_size(px(13.))
-                    .text_color(rgb(theme::text_3()))
-                    .child("Nothing on the board yet. Builders post here when they settle a contract or ask each other something."),
-            );
-        }
-        for e in entries {
-            let id = e.id;
-            column = column.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .px(px(16.))
-                    .py(px(14.))
-                    .border_b_1()
-                    .border_color(rgb(theme::line()))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .font_family(theme::MONO)
-                                    .text_size(px(10.5))
-                                    .text_color(rgb(if e.kind == "contract" { theme::text() } else { theme::text_3() }))
-                                    .child(e.kind.to_uppercase()),
-                            )
-                            .child(ui::mono(format!("#{} · {} · {}", e.id, e.author, ago(e.at))))
-                            .child(div().flex_1())
-                            .child(
-                                ui::icon_button(SharedString::from(format!("board-remove-{id}")), Icon::X)
-                                    .size(px(22.))
-                                    .tooltip(crate::shell::tip("Remove from the board"))
-                                    .on_click(cx.listener(move |this, _, _, cx| this.remove_board_entry(id, cx))),
-                            ),
-                    )
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::text())).child(e.title.clone()))
-                    .when(!e.paths.is_empty(), |d| d.child(ui::mono(e.paths.join(", "))))
-                    .child(div().text_size(px(13.)).child(render_markdown(&e.body))),
-            );
-        }
-        column.into_any_element()
+        out
     }
 }
 
@@ -659,7 +669,7 @@ pub(crate) fn render_user_message(text: &str) -> AnyElement {
                 .border_color(rgb(theme::line()))
                 .text_size(px(14.))
                 .line_height(px(21.))
-                .child(message.to_string()),
+                .child(if crate::markdown::looks_like_markdown(message) { render_markdown(message) } else { message.to_string().into_any_element() }),
         )
         .child(
             div()

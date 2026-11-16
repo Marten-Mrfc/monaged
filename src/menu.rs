@@ -29,6 +29,8 @@ pub(crate) enum MenuTarget {
     MergeRule(i64, usize),
     /// How merges reach their branch in a project.
     MergeMethod(i64),
+    /// Which worktree the Git tab (false) or the Run tab (true) looks at.
+    Worktree(i64, bool),
 }
 
 pub(crate) struct MenuState {
@@ -72,6 +74,8 @@ pub(crate) enum MenuAction {
     SideChat(i64),
     SetRule(i64, String, crate::merge_ui::Policy),
     SetMethod(i64, crate::merge_ui::Method),
+    /// (subproject, for the Run tab, the worktree; None follows the selected agent)
+    SetWorktree(i64, bool, Option<crate::git_ui::GitTarget>),
 }
 
 pub(crate) enum Entry {
@@ -160,7 +164,6 @@ impl Monaged {
                     item(if running { "Pipeline running" } else { "Run the pipeline" }, Icon::Play, MenuAction::RunPipeline(sid)).enabled(!running),
                     Entry::Separator,
                     item("Pipeline", Icon::Flow, MenuAction::Inspector(sid, InspectorTab::Pipeline)),
-                    item("Board", Icon::Board, MenuAction::Inspector(sid, InspectorTab::Board)),
                     item("Merge", Icon::Merge, MenuAction::Inspector(sid, InspectorTab::Merge)),
                     Entry::Separator,
                     item("Open the repo in Zed", Icon::External, MenuAction::OpenZed(path.clone())),
@@ -243,6 +246,40 @@ impl Monaged {
                     choice("Ask me", "you press Merge".into(), Policy::Ask),
                     choice("Confirm twice", "you press Merge, then confirm".into(), Policy::Confirm),
                 ]
+            }
+            MenuTarget::Worktree(sid, run) => {
+                use crate::git_ui::GitTarget;
+                let (current, follows) = if run {
+                    (self.run_targets.get(&sid).copied(), !self.run_targets.contains_key(&sid))
+                } else {
+                    self.git_panels.get(&sid).map(|p| (Some(p.target), !p.pinned)).unwrap_or((None, true))
+                };
+                let pick = |label: String, detail: String, target: Option<GitTarget>, checked: bool| Entry::Item {
+                    label,
+                    glyph: checked.then_some(Icon::Check),
+                    hint: None,
+                    detail: Some(detail),
+                    danger: false,
+                    enabled: true,
+                    action: MenuAction::SetWorktree(sid, run, target),
+                };
+                let mut out = vec![
+                    Entry::Heading(if run { "Run in".into() } else { "Show the worktree of".into() }),
+                    pick("The selected agent".into(), "follows what you open".into(), None, follows),
+                    Entry::Separator,
+                ];
+                for a in self.agents.iter().filter(|a| a.record.subproject_id == sid && !a.record.archived) {
+                    let running = run && self.run_states.get(&a.record.worktree).and_then(|r| r.dev.as_ref()).is_some_and(|d| d.running);
+                    out.push(pick(
+                        a.record.name.clone(),
+                        if running { format!("{} · running", a.record.branch) } else { a.record.branch.clone() },
+                        Some(GitTarget::Agent(a.record.id)),
+                        !follows && current == Some(GitTarget::Agent(a.record.id)),
+                    ));
+                }
+                let base = self.subprojects.iter().find(|s| s.id == sid).and_then(|s| self.projects.iter().find(|p| p.id == s.project_id)).map(|p| p.path.clone()).unwrap_or_default();
+                out.push(pick("Project checkout".into(), base, Some(GitTarget::Project), !follows && current == Some(GitTarget::Project)));
+                out
             }
             MenuTarget::MergeMethod(pid) => {
                 use crate::merge_ui::Method;
@@ -337,6 +374,18 @@ impl Monaged {
             MenuAction::SetConfig(aid, option, value) => self.set_config(aid, &option, &value, cx),
             MenuAction::SetRule(pid, target, policy) => self.set_policy(pid, &target, policy, cx),
             MenuAction::SetMethod(pid, method) => self.set_method(pid, method, cx),
+            MenuAction::SetWorktree(sid, true, target) => {
+                match target {
+                    Some(t) => drop(self.run_targets.insert(sid, t)),
+                    None => drop(self.run_targets.remove(&sid)),
+                }
+                self.prepare_run(sid, cx);
+            }
+            MenuAction::SetWorktree(sid, false, target) => {
+                let follow = self.sel_agent.and_then(|id| self.agent(id)).filter(|a| a.record.subproject_id == sid && !a.record.archived).map(|a| crate::git_ui::GitTarget::Agent(a.record.id));
+                let t = target.or(follow).unwrap_or(crate::git_ui::GitTarget::Project);
+                self.set_git_target(sid, t, target.is_some(), cx);
+            }
             MenuAction::Rename(aid) => self.start_rename(aid, window, cx),
             MenuAction::Archive(aid) => self.archive_agent(aid, cx),
             MenuAction::Restore(aid) => self.restore_agent(aid, cx),
@@ -406,7 +455,7 @@ impl Monaged {
     pub(crate) fn render_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let entries = self.menu_entries(menu.target);
-        let width = if matches!(menu.target, MenuTarget::Config(..) | MenuTarget::MergeRule(..) | MenuTarget::MergeMethod(..)) { WIDE_MENU_WIDTH } else { MENU_WIDTH };
+        let width = if matches!(menu.target, MenuTarget::Config(..) | MenuTarget::MergeRule(..) | MenuTarget::MergeMethod(..) | MenuTarget::Worktree(..)) { WIDE_MENU_WIDTH } else { MENU_WIDTH };
         let height: f32 = 8. + entries.iter().map(|e| if matches!(e, Entry::Separator) { SEPARATOR_HEIGHT } else { ITEM_HEIGHT }).sum::<f32>();
         let viewport = window.viewport_size();
         let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));

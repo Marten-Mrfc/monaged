@@ -6,7 +6,7 @@ New here? Start with [Getting started](getting-started.md). The playground proje
 
 - **Sidebar** (left): your projects › subprojects › agents, with a status dot per agent (working, done, needs you) and a score meter once an agent has been reviewed. A **Needs you** inbox sits on top: questions, plans waiting for approval, permission requests, failed sessions.
 - **Agents** (middle): the focused agent's conversation. Wide screens show several agents side by side (Ctrl-click an agent to open it beside the current one), and spare room shows the focused agent's **Changes** next to its conversation. A pane's **×** closes it (it stays closed until you open that agent again), and **Show only this agent** (the maximize button in its header, or Ctrl K → "Show one agent at a time") keeps it to one agent until you switch back; Ctrl K → "Don't show changes beside the agent" turns the extra Changes column off.
-- **Inspector** (right): Pipeline, Board, Merge, Git, Run and Timeline for the subproject you're in.
+- **The dock** (right): **Pipeline** (with the agents' board), **Merge**, **Git**, **Run** and **Activity** for the subproject you're in (Alt 1–5, or click). Each tab says what's going on before you open it: a red dot when something needs you there (a decision, conflicts, failing tests), a pulsing dot while something runs, a white dot on Merge when work at the quality bar is ready, and counts for board posts and uncommitted files. The button at its right hides it (Ctrl Alt B brings it back). Git and Run show the worktree of the agent you open, until you pick one from the **Worktree** menu.
 - **Status bar**: the connection, the distro, how many agents are working, the branch, your weekly usage and Monaged's share of it.
 
 Messages follow one rule: things that *happened* appear bottom right and fade (errors stay until closed); things that are *true right now* (offline, not signed in, paused by the budget) sit in a bar at the top until they're fixed.
@@ -51,6 +51,7 @@ The inbox opens the dashboard too, and the dashboard button in an agent's header
 - **Esc** stops the agent.
 - **Undo**: every turn is checkpointed. Point at one of your messages and **↶** rolls the worktree back to before it (with Undo). Right-click an agent → **Replay** steps through its turns with each turn's diff.
 - **Side chat** (**Ctrl J**): ask Haiku about an agent's work beside its conversation; the agent never sees it.
+- **What agents write is formatted**: headings, lists, task lists, tables, ~~strikethrough~~, and code with its language and a **Copy** button (JSON and shell are recognised when the agent doesn't say). Your own messages are formatted when they use Markdown. Click a tool call to see it: its input laid out field by field (a command as a shell line, an edit as a diff, file contents highlighted), and JSON output highlighted.
 
 ## Reviewing what an agent did
 
@@ -89,7 +90,7 @@ Every agent has Monaged's tools: `board_read`, `board_post` (contracts, decision
 
 - Questions go to a Haiku **librarian** first, which answers from the board and the plan. Only if it can't is the other agent asked, and its answer comes back to the asker.
 - New contracts and decisions are attached to each agent's next message, so agents don't poll or chat.
-- The **Board** tab shows open questions, who owns which files, and every entry.
+- The **Pipeline** tab shows the board: open questions, the latest entries (all of them on request) and who owns which files.
 
 ## Merging
 
@@ -141,7 +142,8 @@ Right-click a project → **Project settings**:
 |---|---|
 | Ctrl K | Command palette: jump anywhere, run any action, switch theme, search files and conversations |
 | Ctrl N | New agent in this subproject |
-| Ctrl B / Ctrl Alt B | Toggle the sidebar / the inspector |
+| Ctrl B / Ctrl Alt B | Toggle the sidebar / the dock |
+| Alt 1 … Alt 5 | The dock's Pipeline, Merge, Git, Run, Activity (again hides it) |
 | Ctrl , | Settings |
 | Ctrl / | Every shortcut |
 | Alt ↑ / Alt ↓ | Previous / next agent |
