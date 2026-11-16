@@ -302,6 +302,7 @@ impl Monaged {
                 ("power:awake", "Keep the PC awake while agents work (the screen can still turn off); sleep would pause WSL mid-task"),
                 ("ui:ask_close", "Ask before closing Monaged while agents work (closing stops them)"),
                 ("ui:away_summary", "After you've been away for 10 minutes or more, show what happened"),
+                ("ui:group_steps", "Fold an agent's steps (files read, commands run) into one line you can open"),
             ]
             .map(|(key, text)| {
                 let on = self.store.setting(key).is_none_or(|v| v != "0");

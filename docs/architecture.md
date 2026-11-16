@@ -33,6 +33,7 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/search.rs` | Find in a conversation, search across conversations, the file index |
 | `src/layout.rs` | Resizable panes, saved layouts, zen mode, density |
 | `src/changes_ui.rs` | The diff view with line comments, and a subproject's combined changes |
+| `src/turns.rs` | The conversation turn by turn: steps folded into a summary line, turn footers, the live working line |
 | `src/timeline.rs` | The Activity tab (the timeline) |
 | `src/pipeline_edit.rs` | Editing the plan, running a stage or builder again |
 | `src/queue_ui.rs` | The merge queue with CI status |

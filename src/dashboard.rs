@@ -486,7 +486,7 @@ impl Monaged {
                     .text_color(rgb(if below { theme::red_text() } else { theme::text_3() }))
                     .child(parts.join(" · "))
             })
-            .children(self.render_working_line(agent))
+            .children(self.render_working_line(agent, cx))
             .when(!line.is_empty(), |d| d.child(div().w(px(text_w)).text_size(px(13.)).text_color(rgb(theme::text_2())).child(review::clip(&line, 280))))
             .child(
                 div()

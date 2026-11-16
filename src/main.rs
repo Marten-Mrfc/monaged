@@ -75,6 +75,7 @@ mod theme;
 mod timeline;
 mod update;
 mod ui;
+mod turns;
 mod uninstall;
 mod usage;
 mod usage_ui;
@@ -398,6 +399,8 @@ struct Monaged {
     merge_queue: std::collections::VecDeque<i64>,
     /// Tool calls opened to show their details: (agent, item).
     expanded_tools: HashSet<(i64, usize)>,
+    /// Runs of steps you opened: (agent, index of the run's first item).
+    expanded_steps: HashSet<(i64, usize)>,
     next_toast: u64,
     /// Toasts raised while handling a message (no `cx` there); shown right after.
     queued_toasts: Vec<(Tone, String, Option<(&'static str, feedback::ToastAction)>)>,
@@ -598,6 +601,7 @@ impl Monaged {
             input_subs: HashMap::new(),
             form_inputs: HashMap::new(),
             expanded_tools: HashSet::new(),
+            expanded_steps: HashSet::new(),
             ci: HashMap::new(),
             run_states: HashMap::new(),
             run_targets: HashMap::new(),

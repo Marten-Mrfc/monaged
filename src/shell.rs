@@ -1657,22 +1657,7 @@ impl Monaged {
     pub(crate) fn render_transcript(&self, agent: &AgentView, reading: f32, cx: &mut Context<Self>) -> AnyElement {
         let id = agent.record.id;
         let matches = self.find_matches(cx);
-        let items: Vec<AnyElement> = agent
-            .items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let row = div().w(px(reading)).flex_none().child(self.render_item(id, i, item, cx));
-                match self.find_mark(id, i, &matches) {
-                    Some(current) => row
-                        .rounded(px(6.))
-                        .bg(rgb(if current { theme::selected() } else { theme::hover() }))
-                        .when(current, |d| d.border_1().border_color(rgb(theme::text_3())))
-                        .into_any_element(),
-                    None => row.into_any_element(),
-                }
-            })
-            .collect();
+        let items: Vec<AnyElement> = self.transcript_rows(agent, reading, &matches, cx);
         let scroll = self.scrolls.get(&id).cloned().unwrap_or_default();
         // Scrolled up to read while new text arrives: offer the way back down.
         let max = f32::from(scroll.max_offset().height);
@@ -1708,7 +1693,7 @@ impl Monaged {
         });
         // A flex column so the scroll area gets a definite height (and scrolls)
         // instead of growing under the message box.
-        let tail = [self.render_session_state(agent, cx), self.render_working_line(agent)]
+        let tail = [self.render_session_state(agent, cx), self.render_working_line(agent, cx)]
             .into_iter()
             .flatten()
             .map(|el| div().w(px(reading)).flex_none().child(el).into_any_element());
@@ -1791,43 +1776,6 @@ impl Monaged {
                     .into_any_element(),
             }),
         }
-    }
-
-    /// While a turn runs: what the agent is doing and for how long (the clock
-    /// redraws it every second), with the way to stop it.
-    pub(crate) fn render_working_line(&self, agent: &AgentView) -> Option<AnyElement> {
-        let turn = agent.turn.as_ref()?;
-        let id = agent.record.id;
-        let secs = turn.started.elapsed().as_secs();
-        let elapsed = if secs >= 60 { format!("{}:{:02}", secs / 60, secs % 60) } else { format!("{secs}s") };
-        let waiting = agent.items.iter().any(|i| matches!(i, Item::Permission { chosen: None, .. })) || agent.open_form();
-        let activity = match agent.items.last() {
-            _ if waiting => "Waiting for your answer above",
-            _ if agent.compacting => "Compacting the conversation",
-            Some(Item::Tool { status, .. }) if status == "in_progress" || status == "pending" => "Running a tool",
-            Some(Item::Agent(_)) => "Writing",
-            Some(Item::Plan(_)) => "Planning",
-            _ => "Thinking",
-        };
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(9.))
-                .text_size(px(12.5))
-                .text_color(rgb(if waiting { theme::red_text() } else { theme::text_3() }))
-                .child(if waiting {
-                    ui::status_dot(("working-dot", id as usize), State::NeedsYou)
-                } else {
-                    ui::spinner(("working-spin", id as usize), 13., theme::text_2())
-                })
-                .child(activity)
-                .child(div().font_family(theme::MONO).text_size(px(11.5)).text_color(rgb(theme::text_3())).child(elapsed))
-                .child(div().flex_1())
-                .child(ui::kbd("Esc"))
-                .child(div().text_color(rgb(theme::text_3())).child("stop"))
-                .into_any_element(),
-        )
     }
 
     pub(crate) fn render_item(&self, agent_id: i64, index: usize, item: &Item, cx: &mut Context<Self>) -> AnyElement {

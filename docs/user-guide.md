@@ -48,6 +48,9 @@ The inbox opens the dashboard too, and the dashboard button in an agent's header
 - **Attachments**: paste an image, drop files from Explorer, or use the paperclip.
 - **Queue**: messages typed while the agent works wait for its turn to end, and survive a restart.
 - **Questions**: when an agent asks something, a form appears in its conversation; it waits for your answer.
+- **Steps fold into one line**: a run of tool calls (and the agent's thinking) shows as one line that says what it did, such as "Read 4 files, searched twice and ran a command · 7 steps", with failures in red; click it to see each step. Settings → General (or Ctrl K → "Show every step of an agent") shows every step instead.
+- **While it works**, the line under the conversation names the step that's running (the command, the file), the step number and the time, with **Stop** (or Esc).
+- **When a turn ends**: how long it took, how many steps, and how many files it changed (click to open its changes); **Copy reply** appears when you point at it.
 - **Esc** stops the agent.
 - **Undo**: every turn is checkpointed. Point at one of your messages and **↶** rolls the worktree back to before it (with Undo). Right-click an agent → **Replay** steps through its turns with each turn's diff.
 - **Side chat** (**Ctrl J**): ask Haiku about an agent's work beside its conversation; the agent never sees it.

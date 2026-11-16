@@ -679,3 +679,35 @@ fn markdown_reads_tables_tasks_and_strikes() {
     assert_eq!(crate::review_ui::guess_lang("git status"), Some(crate::syntax::Lang::Shell));
     assert_eq!(crate::review_ui::guess_lang("hello"), None);
 }
+
+#[test]
+fn steps_read_as_one_line() {
+    use crate::turns::{StepKind, step_kind, steps_summary};
+    let s = |k: StepKind, files: &[&str]| (k, files.iter().map(|f| f.to_string()).collect::<Vec<_>>());
+    // One file by name, more by count; searches as words; commands counted.
+    assert_eq!(
+        steps_summary(&[s(StepKind::Think, &[]), s(StepKind::Read, &["lunchbox/orders.py"]), s(StepKind::Run, &[])]),
+        "Read orders.py and ran a command"
+    );
+    assert_eq!(
+        steps_summary(&[
+            s(StepKind::Read, &["a.py"]),
+            s(StepKind::Read, &["b.py"]),
+            s(StepKind::Read, &["c.py:12"]),
+            s(StepKind::Read, &["d.py"]),
+            s(StepKind::Search, &[]),
+            s(StepKind::Search, &[]),
+            s(StepKind::Run, &[]),
+        ]),
+        "Read 4 files, searched twice and ran a command"
+    );
+    assert_eq!(steps_summary(&[s(StepKind::Edit, &["src/x.rs"]), s(StepKind::Edit, &["src/x.rs:40"])]), "Edited x.rs");
+    assert_eq!(steps_summary(&[s(StepKind::Read, &[]), s(StepKind::Read, &[])]), "Read 2 files");
+    assert_eq!(steps_summary(&[s(StepKind::Board, &[]), s(StepKind::Ask, &[])]), "Used the board and asked another agent");
+    assert_eq!(steps_summary(&[s(StepKind::Think, &[])]), "Thought it through");
+    // Kinds from ACP and Monaged's own tools.
+    assert_eq!(step_kind("execute", "pytest -q"), StepKind::Run);
+    assert_eq!(step_kind("other", "mcp__monaged__ask"), StepKind::Ask);
+    assert_eq!(step_kind("other", "mcp__monaged__board_post"), StepKind::Board);
+    assert_eq!(step_kind("delete", "rm a"), StepKind::Edit);
+}

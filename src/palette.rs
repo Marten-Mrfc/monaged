@@ -65,6 +65,7 @@ pub(crate) enum Command {
     ToggleSounds,
     OnePane(bool),
     ChangesBeside(bool),
+    GroupSteps(bool),
     Dashboard(i64),
     Terminal(String),
     CopyConversation(i64),
@@ -304,6 +305,16 @@ impl Monaged {
             hint: None,
             command: Command::ChangesBeside(!self.changes_beside),
         });
+        let grouped = self.group_steps();
+        out.push(Entry {
+            group: "App",
+            glyph: Icon::Lines,
+            title: if grouped { "Show every step of an agent".into() } else { "Fold an agent's steps into one line".into() },
+            detail: "Files read, commands run and edits, one per row or summed up in one line you can open".into(),
+            state: None,
+            hint: None,
+            command: Command::GroupSteps(!grouped),
+        });
         let sounds_on = self.sound.settings.on;
         out.push(Entry {
             group: "App",
@@ -460,6 +471,7 @@ impl Monaged {
             Command::Zen => self.toggle_zen(cx),
             Command::OnePane(on) => self.set_one_pane(on, cx),
             Command::ChangesBeside(on) => self.set_changes_beside(on, cx),
+            Command::GroupSteps(on) => drop(self.store.set_setting("ui:group_steps", if on { "1" } else { "0" })),
             Command::Dashboard(sub_id) => self.select_sub(sub_id, cx),
             Command::Export(scope) => self.export(scope, cx),
             Command::StartLead(sub_id) => {
