@@ -2,7 +2,9 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.0] - 2026-11-16
+
+Git work that knows about origin and can go through pull and merge requests, conversations you can read at a glance, a dock that says what's going on, and a sidebar that shows which agents have news for you.
 
 ### Added
 
@@ -12,8 +14,7 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 - **Formatted agent replies**: tables, task lists and strikethrough; code blocks say their language and have a Copy button, and unlabelled JSON and shell are recognised and highlighted. Your own messages (and Monaged's to agents) are formatted when they use Markdown.
 - **Tool calls you can read**: a call's input is laid out field by field instead of raw JSON (a command as a shell line, an edit as a diff, file contents highlighted in their language), and JSON output is highlighted.
 - **The dock tells you what's going on**: each tab has a badge (needs you, running, ready to merge, board posts, uncommitted files), Alt 1–5 switch tabs (again hides the dock), and a button hides it.
-
-- **How merges reach a branch**, per project: here then push (the default with an origin), here only, or through GitHub pull requests or GitLab merge requests, merged on the host once its reviews and checks allow it (protected branches work). Click the chip in the project view or the Merge tab.
+- **How merges reach a branch**, per project: here then push (the default with an origin), here only, or through GitHub pull requests or GitLab merge requests, merged on the host once its reviews and checks allow it (protected branches work). Pick it from the menu in the project view or the Merge tab.
 - **Update from develop**: when develop has commits a feature branch doesn't, one button brings them in (after catching develop up with origin), so conflicts show up early and can go to an agent.
 - **Better pull and merge requests**: the description says what each agent did, how it was checked, the score with its reasons and any open findings; below the quality bar the request opens as a draft and is marked ready once the score reaches the bar.
 
