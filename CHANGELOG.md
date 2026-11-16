@@ -4,6 +4,12 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-16
+
+### Fixed
+
+- **0.9.0 couldn't start the agent**: the tool folders for the agent's PATH were put on the command line wsl.exe gets, and a shell on the way in expanded them (`$PATH` split on its spaces), so bash stopped with a syntax error and the Claude connection stayed down. The agent's launch line now has nothing to expand: the folders come from a small file Monaged writes in WSL first, and a test starts a command through wsl.exe the same way.
+
 ## [0.9.0] - 2026-11-16
 
 Pipelines whose builders can pass review: they start in the order their work depends on, the tests run with the project's own package manager inside WSL, and the reviewer only counts real defects. Plus questions as one card.
@@ -224,6 +230,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.9.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.1
 [0.9.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.7.0

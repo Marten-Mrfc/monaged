@@ -96,9 +96,33 @@ pub fn launch(config: AgentConfig) -> UnboundedReceiver<AgentEvent> {
     rx
 }
 
+/// Where the agent's launch line finds `wsl::TOOL_PATHS`, written before each launch.
+const TOOL_PATHS_FILE: &str = "~/.local/share/monaged/tool-paths.sh";
+
+/// The command that starts the agent in WSL. It reaches bash as an argument
+/// of wsl.exe, which a shell expands on the way in (`$d` comes out empty and
+/// `$PATH` split on its spaces), so it holds no `$` of its own: the tool
+/// folders come from a file instead.
+pub fn launch_line(guard: &str, agent_cmd: &str) -> String {
+    format!("cd ~ && . {TOOL_PATHS_FILE} 2>/dev/null; {guard}exec {agent_cmd}")
+}
+
+/// Writes the file `launch_line` reads (through stdin, where `$` stays as written).
+pub fn write_tool_paths(distro: &str) -> Result<()> {
+    wsl::run(
+        distro,
+        &format!("mkdir -p ~/.local/share/monaged && cat > {TOOL_PATHS_FILE} <<'MONAGED_EOF'\n{}\nMONAGED_EOF", wsl::TOOL_PATHS),
+    )?;
+    Ok(())
+}
+
 fn run(config: &AgentConfig, tx: &UnboundedSender<AgentEvent>) -> Result<()> {
     let guard = if config.agents_use_git_accounts { "" } else { AGENT_GIT_GUARD };
-    let mut child = wsl::bash(&config.distro, &format!("cd ~ && {}{guard}exec {}", wsl::TOOL_PATHS, config.agent_cmd))
+    // Without it the agent still starts, only without bun & co. on its PATH.
+    if let Err(err) = write_tool_paths(&config.distro) {
+        eprintln!("[agent] couldn't write the tool folders for the agent's PATH: {err:#}");
+    }
+    let mut child = wsl::bash(&config.distro, &launch_line(guard, &config.agent_cmd))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -141,4 +165,38 @@ fn run(config: &AgentConfig, tx: &UnboundedSender<AgentEvent>) -> Result<()> {
     let code = writer.child.lock().ok().and_then(|mut child| child.wait().ok()).and_then(|status| status.code());
     let _ = tx.unbounded_send(AgentEvent::Exited(code));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_launch_line_has_nothing_for_wsl_exe_to_expand() {
+        // 0.9.0 put `$PATH` here and the agent never started.
+        for guard in ["", AGENT_GIT_GUARD] {
+            let line = launch_line(guard, "~/.local/share/claude-agent-acp/current/claude-agent-acp");
+            let own = line.replace(AGENT_GIT_GUARD, "");
+            assert!(!own.contains('$') && !own.contains('"'), "{own}");
+            assert!(line.ends_with("exec ~/.local/share/claude-agent-acp/current/claude-agent-acp"));
+        }
+    }
+
+    /// Starts a command the way the agent is started, through wsl.exe (needs
+    /// WSL: `cargo test -- --ignored launch_line_runs_in_wsl`).
+    #[test]
+    #[ignore]
+    fn launch_line_runs_in_wsl() {
+        let distro = std::env::var("MONAGED_TEST_DISTRO").unwrap_or_else(|_| "Ubuntu".into());
+        write_tool_paths(&distro).unwrap();
+        let out = wsl::bash(&distro, &launch_line(AGENT_GIT_GUARD, "printenv PATH")).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout).to_string(), String::from_utf8_lossy(&out.stderr).to_string());
+        println!("PATH: {stdout}\nstderr: {stderr}");
+        assert!(out.status.success() && !stderr.contains("syntax error"), "{stderr}");
+        // On a PC with Linux bun, it comes before Windows' folders.
+        if let Some(bun) = stdout.split(':').position(|d| d.ends_with("/.bun/bin") && !d.starts_with("/mnt/")) {
+            let windows = stdout.split(':').position(|d| d.starts_with("/mnt/")).unwrap_or(usize::MAX);
+            assert!(bun < windows, "{stdout}");
+        }
+    }
 }
