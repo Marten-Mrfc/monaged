@@ -2,6 +2,12 @@
 
 All notable changes to Monaged. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A subproject's dashboard drew its sections on top of each other on wide screens**: once the column reached its full width, the request card, the "Needs you" cards and the agent cards were laid out shorter than their text, so the next section started over them. The column now has an exact width, like the agent cards.
+
 ## [0.8.0] - 2026-11-16
 
 Git work that knows about origin and can go through pull and merge requests, conversations you can read at a glance, a dock that says what's going on, and a sidebar that shows which agents have news for you.

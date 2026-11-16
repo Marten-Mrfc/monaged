@@ -39,7 +39,11 @@ impl Monaged {
         let inner = ((main_w - chat_w).min(CONTENT_MAX) - 2. * PAD_X - 8.).max(240.);
         let per_row = if inner >= 3. * TILE_MIN + 2. * TILE_GAP { 3. } else if inner >= 2. * TILE_MIN + TILE_GAP { 2. } else { 1. };
         let tile_w = ((inner - TILE_GAP * (per_row - 1.)) / per_row).floor();
-        let main = self.render_dashboard_main(sub_id, chat_w == 0., (tile_w, per_row as usize), cx);
+        // The column gets an exact width too: capped only by a maximum, GPUI
+        // measured its text against the wider pane, so on a wide screen the
+        // cards came out shorter than their text and the sections overlapped.
+        let column_w = inner + 2. * PAD_X;
+        let main = self.render_dashboard_main(sub_id, chat_w == 0., (tile_w, per_row as usize), column_w, cx);
         div()
             .flex_1()
             .min_h(px(0.))
@@ -49,7 +53,7 @@ impl Monaged {
             .into_any_element()
     }
 
-    fn render_dashboard_main(&self, sub_id: i64, narrow: bool, (tile_w, per_row): (f32, usize), cx: &mut Context<Self>) -> AnyElement {
+    fn render_dashboard_main(&self, sub_id: i64, narrow: bool, (tile_w, per_row): (f32, usize), column_w: f32, cx: &mut Context<Self>) -> AnyElement {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id) else { return div().into_any_element() };
         let pipeline = self.pipelines.get(&sub_id);
         let running = pipeline.is_some_and(|p| !matches!(p.stage, Stage::Done | Stage::Stopped));
@@ -205,7 +209,7 @@ impl Monaged {
                     .gap(px(22.))
                     .px(px(PAD_X))
                     .py(px(20.))
-                    .max_w(px(CONTENT_MAX))
+                    .w(px(column_w))
                     .child(header)
                     .child(request_card)
                     .child(needs_section)
