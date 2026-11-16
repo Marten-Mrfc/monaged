@@ -711,3 +711,16 @@ fn steps_read_as_one_line() {
     assert_eq!(step_kind("other", "mcp__monaged__board_post"), StepKind::Board);
     assert_eq!(step_kind("delete", "rm a"), StepKind::Edit);
 }
+
+#[test]
+fn only_your_questions_make_a_reply_new() {
+    use crate::shell::from_monaged;
+    assert!(!from_monaged("Fix the failing coupon test"));
+    assert!(!from_monaged("Explain how the menu prices are loaded"));
+    assert!(from_monaged("# Monaged brief: Builder\n\nBuild the history store"));
+    assert!(from_monaged("[monaged-ask #4] build-history-api asks: ..."));
+    assert!(from_monaged("[monaged-update] Build finished"));
+    assert!(from_monaged("Monaged's review of your changes found the problems below."));
+    assert!(from_monaged("Monaged's review scored your work 2/5"));
+    assert!(from_monaged(&format!("Thanks\n\n---\n{}\n- #3 contract", crate::coord::DIGEST_HEADER)));
+}

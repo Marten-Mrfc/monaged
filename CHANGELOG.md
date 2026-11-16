@@ -6,6 +6,8 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ### Added
 
+- **New replies stand out in the sidebar**: an agent that answered something you asked while you were elsewhere is bold with a white dot until you open it, and so are its subproject and a folded project. Briefs, review rounds and lead updates from Monaged don't count, so pipelines don't light up the tree.
+- **The sidebar says more without getting longer**: a working agent shows how long it's been at it (so a stuck dot can't pass for work), one that needs you says so, subprojects count what needs you or is working, a folded project sums up what's inside, and pointing at an agent gives its role, state and score. The Needs you header shows F8, and "N more" when the list is longer than six.
 - **Conversations you can read at a glance**: an agent's steps (files read, commands run, edits, its thinking) fold into one line that says what they did ("Read 4 files, searched twice and ran a command · 7 steps", failures in red) and opens on click; Settings → General shows every step instead. Each turn ends with how long it took, how many steps and how many files it changed (click for the changes), with **Copy reply**. While an agent works, the line under the conversation names the running step, the step number and the time, with a Stop button.
 - **Formatted agent replies**: tables, task lists and strikethrough; code blocks say their language and have a Copy button, and unlabelled JSON and shell are recognised and highlighted. Your own messages (and Monaged's to agents) are formatted when they use Markdown.
 - **Tool calls you can read**: a call's input is laid out field by field instead of raw JSON (a command as a shell line, an edit as a diff, file contents highlighted in their language), and JSON output is highlighted.
@@ -35,6 +37,7 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 - Long lines in a subproject's Recent list were cut off without an ellipsis, and so were branch names and commit subjects in the Git tab.
 - A debug build crashed when an agent started working (the status bar styled one item twice).
 - "Reopened the saved conversation." no longer repeats after every restart.
+- Pointing at a subproject in the sidebar cut its "merged" label in half behind the ⋯ button; the label steps aside now. Long folded rows ("4 done: …") end in an ellipsis.
 
 ## [0.7.0] - 2026-11-15
 

@@ -161,6 +161,22 @@ fn row_menu_button(id: impl Into<gpui::ElementId>, target: MenuTarget, selected:
         .into_any_element()
 }
 
+/// A status dot with a count beside it when there's more than one.
+fn dot_count(dot: AnyElement, n: usize, red: bool) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .child(dot)
+        .when(n > 1, |d| d.child(div().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(if red { theme::red_text() } else { theme::text_2() })).child(n.to_string())))
+        .into_any_element()
+}
+
+/// Something new since you last looked (bold name and this dot).
+fn new_dot() -> AnyElement {
+    div().flex_none().size(px(6.)).rounded_full().bg(rgb(theme::text())).into_any_element()
+}
+
 /// Right-click opens the row's menu.
 fn on_right_click(target: MenuTarget, cx: &mut Context<Monaged>) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -179,6 +195,23 @@ pub(crate) fn agent_state(agent: &AgentView) -> State {
     } else {
         State::Idle
     }
+}
+
+/// The agent's current turn answers something you asked (not a brief, a
+/// review round, a board digest or a lead update from Monaged).
+pub(crate) fn prompted_by_you(agent: &AgentView) -> bool {
+    let Some(Item::User(text)) = agent.items.iter().rev().find(|i| matches!(i, Item::User(_))) else { return false };
+    !from_monaged(text)
+}
+
+/// A message Monaged wrote to an agent (a brief, another agent's question, a
+/// lead update, a board digest, a review round), not one you typed.
+pub(crate) fn from_monaged(text: &str) -> bool {
+    text.starts_with(pipeline::BRIEF_HEADER)
+        || text.starts_with("[monaged-ask #")
+        || text.starts_with(crate::lead::UPDATE_PREFIX)
+        || text.contains(coord::DIGEST_HEADER)
+        || text.starts_with("Monaged's review")
 }
 
 /// The agent's last reply asks the developer something that isn't answered yet.
@@ -347,7 +380,13 @@ impl Monaged {
         }
     }
 
+    /// The lead whose dashboard is open: you're reading it already.
+    pub(crate) fn lead_in_view(&self, agent: &AgentView) -> bool {
+        agent.role() == Role::Lead && self.window_active && self.form.is_none() && self.sel_sub == Some(agent.record.subproject_id) && self.sel_agent.is_none()
+    }
+
     pub(crate) fn pin_beside(&mut self, agent_id: i64, cx: &mut Context<Self>) {
+        self.unseen.remove(&agent_id);
         self.dismissed.remove(&agent_id);
         if !self.pinned.contains(&agent_id) && self.sel_agent != Some(agent_id) {
             self.pinned.push(agent_id);
@@ -729,6 +768,15 @@ impl Monaged {
                 cursor_ix = Some(ix);
             }
             ix += 1;
+            // Folded, the project still says what's inside: needs you, working, new.
+            let rollup = (!open).then(|| {
+                let subs: Vec<i64> = self.subprojects.iter().filter(|s| s.project_id == pid).map(|s| s.id).collect();
+                let needs = inbox.iter().filter(|i| subs.contains(&i.sub_id)).count();
+                let working = self.agents.iter().filter(|a| subs.contains(&a.record.subproject_id) && a.is_working()).count();
+                let fresh = self.unseen.iter().any(|id| self.agent(*id).is_some_and(|a| subs.contains(&a.record.subproject_id)));
+                (needs, working, fresh)
+            });
+            let fresh_inside = rollup.is_some_and(|(_, _, f)| f);
             list = list.child(
                 ui::row(("project", pid as usize), selected)
                     .when(on && !selected, |d| d.bg(rgb(theme::hover())))
@@ -750,14 +798,32 @@ impl Monaged {
                             })),
                     )
                     .child(icon(Icon::Folder).text_color(rgb(theme::text_2())))
-                    .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(theme::text())).child(project.name.clone()))
+                    .child(ui::one_line(div().flex_1()).text_color(rgb(theme::text())).when(fresh_inside, |d| d.font_weight(FontWeight::SEMIBOLD)).child(project.name.clone()))
+                    .children(rollup.map(|(needs, working, fresh)| {
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .group_hover("tree-row", |s| s.invisible())
+                            .when(needs > 0, |d| d.child(dot_count(ui::status_dot(("proj-needs", pid as usize), State::NeedsYou), needs, true)))
+                            .when(working > 0, |d| d.child(dot_count(ui::status_dot(("proj-working", pid as usize), State::Working), working, false)))
+                            .when(fresh, |d| d.child(new_dot()))
+                    }))
                     .child(
                         div()
                             .id(("project-new-sub", pid as usize))
-                            .flex_none()
-                            .mr(px(22.))
+                            .absolute()
+                            .right(px(28.))
+                            .top(px(4.))
+                            .size(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
                             .invisible()
                             .group_hover("tree-row", |s| s.visible())
+                            .hover(|s| s.bg(rgb(theme::line_strong())))
                             .tooltip(tip("New subproject"))
                             .child(icon_sized(Icon::Plus, 14.).text_color(rgb(theme::text_3())))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -774,15 +840,16 @@ impl Monaged {
             for sub in self.subprojects.iter().filter(|s| s.project_id == pid) {
                 let sid = sub.id;
                 let selected_sub = self.sel_sub == Some(sid) && self.form.is_none();
-                let needs = inbox.iter().any(|i| i.sub_id == sid);
-                let working = self.agents.iter().any(|a| a.record.subproject_id == sid && a.is_working());
-                let accessory: AnyElement = if needs {
-                    ui::status_dot(("sub-dot", sid as usize), State::NeedsYou)
+                let needs = inbox.iter().filter(|i| i.sub_id == sid).count();
+                let working = self.agents.iter().filter(|a| a.record.subproject_id == sid && a.is_working()).count();
+                let fresh = self.unseen.iter().any(|id| self.agent(*id).is_some_and(|a| a.record.subproject_id == sid));
+                let accessory: AnyElement = if needs > 0 {
+                    dot_count(ui::status_dot(("sub-dot", sid as usize), State::NeedsYou), needs, true)
                 } else if let Some(p) = self.pipelines.get(&sid).filter(|p| !matches!(p.stage, Stage::Done | Stage::Stopped)) {
                     let current = p.stage.index();
                     ui::stage_dots(format!("sub-stages-{sid}"), current, Some(current), pipeline::STAGES.len())
-                } else if working {
-                    ui::status_dot(("sub-dot", sid as usize), State::Working)
+                } else if working > 0 {
+                    dot_count(ui::status_dot(("sub-dot", sid as usize), State::Working), working, false)
                 } else if self.store.setting(&format!("sub:{sid}:merged")).is_some() {
                     ui::mono("merged").into_any_element()
                 } else {
@@ -808,14 +875,12 @@ impl Monaged {
                             theme::text_3()
                         })))
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_color(rgb(if selected_sub { theme::text() } else { theme::text_2() }))
+                            ui::one_line(div().flex_1())
+                                .text_color(rgb(if selected_sub || fresh { theme::text() } else { theme::text_2() }))
+                                .when(fresh, |d| d.font_weight(FontWeight::SEMIBOLD))
                                 .child(sub.name.clone()),
                         )
-                        .child(accessory)
+                        .child(div().flex_none().group_hover("tree-row", |s| s.invisible()).child(accessory))
                         .child(row_menu_button(("sub-more", sid as usize), MenuTarget::Sub(sid), sub_row_selected, cx))
                         .on_click(cx.listener(move |this, _, _, cx| this.select_sub(sid, cx))),
                 );
@@ -833,6 +898,40 @@ impl Monaged {
                     let aid = agent.record.id;
                     let role = agent.role();
                     let shown = self.sel_agent == Some(aid);
+                    let state = agent_state(agent);
+                    let fresh = self.unseen.contains(&aid);
+                    let accessory: AnyElement = match (state, agent.turn.as_ref()) {
+                        (State::NeedsYou, _) => div().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::red_text())).child("needs you").into_any_element(),
+                        (State::Working, Some(turn)) => {
+                            let secs = turn.started.elapsed().as_secs();
+                            ui::mono(if secs >= 60 { format!("{}:{:02}", secs / 60, secs % 60) } else { format!("{secs}s") }).into_any_element()
+                        }
+                        _ => match &agent.confidence {
+                            Some(c) => ui::score_meter(c.score).into_any_element(),
+                            None => ui::mono(short_role(&role)).into_any_element(),
+                        },
+                    };
+                    let story = {
+                        let doing = match state {
+                            State::NeedsYou => "needs you",
+                            State::Working => "working",
+                            State::Done => "idle",
+                            State::Idle => "not started",
+                        };
+                        let role_text = short_role(&role);
+                        let mut parts = vec![agent.record.name.clone()];
+                        if !role_text.is_empty() && role_text != agent.record.name {
+                            parts.push(role_text);
+                        }
+                        parts.push(doing.to_string());
+                        if let Some(c) = &agent.confidence {
+                            parts.push(format!("reviewed {}/5", c.score));
+                        }
+                        if fresh {
+                            parts.push("new reply".into());
+                        }
+                        parts.join(" · ")
+                    };
                     let on = cursor == Some(TreeNode::Agent(aid));
                     if on {
                         cursor_ix = Some(ix);
@@ -846,10 +945,16 @@ impl Monaged {
                             .group("tree-row")
                             .on_mouse_down(MouseButton::Right, on_right_click(MenuTarget::Agent(aid), cx))
                             .pl(px(46.))
-                            .child(ui::status_dot(("agent-dot", aid as usize), agent_state(agent)))
-                            .child(div().flex_1().min_w(px(0.)).truncate().child(agent.record.name.clone()))
-                            .children(agent.confidence.as_ref().map(|c| ui::score_meter(c.score)))
-                            .when(agent.confidence.is_none(), |d| d.child(ui::mono(short_role(&role))))
+                            .tooltip(crate::shell::tip_text(story))
+                            .child(ui::status_dot(("agent-dot", aid as usize), state))
+                            .child(
+                                ui::one_line(div().flex_shrink())
+                                    .when(fresh, |d| d.text_color(rgb(theme::text())).font_weight(FontWeight::SEMIBOLD))
+                                    .child(agent.record.name.clone()),
+                            )
+                            .when(fresh, |d| d.child(new_dot()))
+                            .child(div().flex_1())
+                            .child(div().flex_none().group_hover("tree-row", |s| s.invisible()).child(accessory))
                             .child(row_menu_button(("agent-more", aid as usize), MenuTarget::Agent(aid), shown, cx))
                             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                                 if event.modifiers().control {
@@ -868,7 +973,7 @@ impl Monaged {
                             .pl(px(46.))
                             .text_color(rgb(theme::text_3()))
                             .child(ui::disclosure(helpers_open))
-                            .child(div().flex_1().min_w(px(0.)).truncate().child(if helpers_open {
+                            .child(ui::one_line(div().flex_1()).child(if helpers_open {
                                 "Hide the agents whose part is done".to_string()
                             } else {
                                 format!("{} done: {}", folded.len(), names.join(", "))
@@ -985,10 +1090,22 @@ impl Monaged {
                                 .flex()
                                 .flex_col()
                                 .child(div().text_size(px(12.5)).text_color(rgb(theme::text())).child(item.title.clone()))
-                                .child(div().text_size(px(11.5)).text_color(rgb(theme::text_3())).truncate().child(item.detail.clone())),
+                                .child(ui::one_line(div()).text_size(px(11.5)).text_color(rgb(theme::text_3())).child(item.detail.clone())),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.open_inbox(sub_id, agent_id, cx)))
                 }))
+                .when(inbox.len() > 6, |d| {
+                    d.child(
+                        div()
+                            .px(px(10.))
+                            .py(px(6.))
+                            .border_t_1()
+                            .border_color(rgb(theme::line()))
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme::text_3()))
+                            .child(format!("{} more · F8 goes through them", inbox.len() - 6)),
+                    )
+                })
         });
 
         let section_label = |text: &'static str, count: Option<usize>| {
@@ -1001,7 +1118,12 @@ impl Monaged {
                 .pb(px(6.))
                 .child(ui::label(text))
                 .children(count.map(|n| {
-                    div().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::red_text())).child(n.to_string())
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .children(crate::keys::hint("next-needs-you").map(ui::kbd))
+                        .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(rgb(theme::red_text())).child(n.to_string()))
                 }))
         };
 

@@ -401,6 +401,8 @@ struct Monaged {
     expanded_tools: HashSet<(i64, usize)>,
     /// Runs of steps you opened: (agent, index of the run's first item).
     expanded_steps: HashSet<(i64, usize)>,
+    /// Agents that answered something you asked while you weren't looking.
+    unseen: HashSet<i64>,
     next_toast: u64,
     /// Toasts raised while handling a message (no `cx` there); shown right after.
     queued_toasts: Vec<(Tone, String, Option<(&'static str, feedback::ToastAction)>)>,
@@ -602,6 +604,7 @@ impl Monaged {
             form_inputs: HashMap::new(),
             expanded_tools: HashSet::new(),
             expanded_steps: HashSet::new(),
+            unseen: HashSet::new(),
             ci: HashMap::new(),
             run_states: HashMap::new(),
             run_targets: HashMap::new(),
@@ -986,6 +989,10 @@ impl Monaged {
                 if let Some(agent) = self.agent_mut(agent_id) {
                     agent.finish_turn(&reason);
                 }
+                // An answer to you, while you were elsewhere: new until you open it.
+                if reason != "cancelled" && !self.watching(agent_id) && self.agent(agent_id).is_some_and(|a| shell::prompted_by_you(a) && !self.lead_in_view(a)) {
+                    self.unseen.insert(agent_id);
+                }
                 self.record_turn(agent_id, &result["usage"]);
                 if reason != "cancelled" {
                     self.finished_turns.push(agent_id);
@@ -1147,6 +1154,7 @@ impl Monaged {
 
     fn select_agent(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         self.sel_agent = Some(agent_id);
+        self.unseen.remove(&agent_id);
         // The Git tab follows the agent you open, unless you picked a worktree there.
         if let Some(sub_id) = self.agent(agent_id).filter(|a| !a.record.archived).map(|a| a.record.subproject_id)
             && self.git_panels.get(&sub_id).is_some_and(|p| !p.pinned)
