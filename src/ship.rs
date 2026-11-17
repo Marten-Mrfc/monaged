@@ -96,7 +96,7 @@ impl Monaged {
     }
 
     /// The agent that works on the feature branch itself (the integrator, or a resolver).
-    fn feature_agent(&self, sub_id: i64) -> Option<i64> {
+    pub(crate) fn feature_agent(&self, sub_id: i64) -> Option<i64> {
         let branch = &self.subprojects.iter().find(|s| s.id == sub_id)?.branch;
         self.agents.iter().rev().find(|a| a.record.subproject_id == sub_id && !a.record.archived && a.record.branch == *branch).map(|a| a.record.id)
     }

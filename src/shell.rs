@@ -810,6 +810,19 @@ impl Monaged {
                             .when(working > 0, |d| d.child(dot_count(ui::status_dot(("proj-working", pid as usize), State::Working), working, false)))
                             .when(fresh, |d| d.child(new_dot()))
                     }))
+                    // CI on develop, acceptance or main failed (red) or is running.
+                    .children(self.project_ci_state(pid).map(|(state, why)| {
+                        div()
+                            .id(("project-ci", pid as usize))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .group_hover("tree-row", |s| s.invisible())
+                            .tooltip(crate::shell::tip_text(why))
+                            .child(ui::status_dot(("proj-ci-dot", pid as usize), state))
+                            .child(div().font_family(theme::MONO).text_size(px(10.5)).text_color(rgb(if state == State::NeedsYou { theme::red_text() } else { theme::text_3() })).child("CI"))
+                    }))
                     .child(
                         div()
                             .id(("project-new-sub", pid as usize))

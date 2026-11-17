@@ -271,7 +271,7 @@ printf '%s\n' "$out" | tail -n 30"#,
 const STRIP_COLORS: &str = r#"out=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g')"#;
 
 /// The same for text read back in Rust (a review saved before colours were taken out).
-fn strip_colors(text: &str) -> String {
+pub(crate) fn strip_colors(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

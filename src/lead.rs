@@ -249,6 +249,9 @@ impl Monaged {
         if let Some(merge) = self.ship_summary(sub_id) {
             out.push_str(&format!("\n\nMerging: {merge}"));
         }
+        if let Some(ci) = self.ci_summary(sub_id) {
+            out.push_str(&format!("\nCI: {ci}"));
+        }
         let waiting: Vec<String> = self.inbox().into_iter().filter(|i| i.sub_id == sub_id).map(|i| format!("{} ({})", i.title, i.detail)).collect();
         if !waiting.is_empty() {
             out.push_str(&format!("\n\nWaiting for the user on the dashboard: {}.", waiting.join("; ")));

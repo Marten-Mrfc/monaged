@@ -84,6 +84,7 @@ impl Monaged {
                         let _ = this.store.log_event(sub_id, Some(agent_id), "push", &format!("{name} pushed {branch} to origin (you asked)"));
                         this.chime(crate::sound::Cue::Success);
                         this.settle("push", crate::agent::Tone::Info, format!("{name} pushed {branch} to origin."), cx);
+                        this.watch_ci(project.id, &branch, cx);
                         let tail: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
                         ToolReply::ok(format!("Pushed {branch} to origin.\n{}", tail.join("\n")))
                     }

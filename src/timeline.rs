@@ -129,7 +129,7 @@ pub(crate) fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -
                 "conflict" | "failed" => Icon::Alert,
                 "archive" | "restore" => Icon::Archive,
                 "commit" => Icon::Commit,
-                "gate" => Icon::Shield,
+                "gate" | "ci" => Icon::Shield,
                 "lead" => Icon::Flow,
                 "debug" => Icon::Ask,
                 _ => Icon::Dot,

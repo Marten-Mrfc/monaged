@@ -369,6 +369,21 @@ pub fn api_url(method: &str, provider: Provider, host: &str, token: &str, url: &
     Ok((status, value, info))
 }
 
+/// A GET whose reply is text, not JSON (CI job logs).
+pub fn api_text(provider: Provider, host: &str, token: &str, path: &str) -> Result<(u16, String)> {
+    let url = format!("{}{}", api_base(provider, host), path);
+    let mut response = agent()
+        .get(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("User-Agent", "Monaged")
+        .call()
+        .map_err(|e| anyhow!("couldn't reach {host}: {e}"))?;
+    let status = response.status().as_u16();
+    // Logs can be long: the end is what matters, and 4 MB is plenty to find it.
+    let text = response.body_mut().with_config().limit(4 * 1024 * 1024).read_to_string().unwrap_or_default();
+    Ok((status, text))
+}
+
 fn accept(provider: Provider) -> &'static str {
     match provider {
         Provider::GitHub => "application/vnd.github+json",

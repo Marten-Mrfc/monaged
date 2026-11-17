@@ -329,6 +329,10 @@ impl Monaged {
         if let Some(merge) = self.render_ship_card(sub_id, cx) {
             out.insert(0, merge);
         }
+        // CI on its branch, and on develop once it merged there.
+        if let Some(ci) = self.render_sub_ci_card(sub_id, cx) {
+            out.insert(out.len().min(1), ci);
+        }
         out
     }
 

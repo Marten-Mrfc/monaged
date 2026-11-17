@@ -342,6 +342,7 @@ impl Monaged {
                         let info = this.branch_info.entry(project_id).or_default();
                         info.chain = chain;
                         info.ahead = ahead;
+                        this.refresh_ci_stale(project_id, cx);
                         // Finished pipelines may now be allowed to merge on their own.
                         let done: Vec<i64> = this
                             .subprojects
@@ -554,7 +555,10 @@ impl Monaged {
                 };
                 text.push_str(&caught_note);
                 match &pushed {
-                    Some(Ok(())) => text.push_str(&format!(" Pushed {target} to origin.")),
+                    Some(Ok(())) => {
+                        text.push_str(&format!(" Pushed {target} to origin."));
+                        this.watch_ci(project_id, &target, cx);
+                    }
                     Some(Err(why)) => {
                         tone = Tone::Warn;
                         let protected = why.contains("protected") || why.contains("declined") || why.contains("GH006");
@@ -672,6 +676,9 @@ impl Monaged {
                 })
                 .await;
             view.update(cx, |this, cx| {
+                if matches!(&result, Ok((_, RequestOutcome::Merged { .. }))) {
+                    this.watch_ci(project_id, &target, cx);
+                }
                 let (tone, text, merged) = match &result {
                     Ok((_, RequestOutcome::Merged { number, caught_up })) => (
                         Tone::Info,
@@ -783,6 +790,9 @@ impl Monaged {
                     Err(err) => drop(this.store.log_event(sub_id, None, "failed", &format!("Push failed: {err:#}"))),
                 }
                 this.chime(if result.is_ok() { crate::sound::Cue::Success } else { crate::sound::Cue::Error });
+                if result.is_ok() {
+                    this.watch_ci(sub.project_id, &sub.branch, cx);
+                }
                 let state = this.merge_state(sub_id);
                 state.busy = false;
                 state.message = Some(match result {
@@ -839,6 +849,7 @@ impl Monaged {
                     Ok(_) => {
                         this.chime(crate::sound::Cue::Success);
                         this.settle("push", Tone::Info, format!("Pushed {branch} to origin."), cx);
+                        this.watch_ci(project_id, &branch, cx);
                     }
                     Err(err) => {
                         let text = format!("{err:#}");
@@ -1062,7 +1073,7 @@ impl Monaged {
         let has_origin = info.is_some_and(|i| i.state.remote_url.is_some());
         let feature_count = self.subprojects.iter().filter(|s| s.project_id == project_id).count();
 
-        let node = |name: String, note: String, sync: Option<AnyElement>| {
+        let node = |name: String, note: String, sync: Option<AnyElement>, ci: Option<AnyElement>| {
             div()
                 .flex_none()
                 .flex()
@@ -1071,10 +1082,12 @@ impl Monaged {
                 .child(div().font_family(theme::MONO).text_size(px(12.5)).text_color(rgb(theme::text())).child(name))
                 .child(ui::mono(note))
                 .children(sync)
+                .children(ci)
         };
         let mut flow = div().flex().items_start().gap(px(10.)).child(node(
             "feature/*".into(),
             format!("{feature_count} subproject{}", if feature_count == 1 { "" } else { "s" }),
+            None,
             None,
         ));
         let mut previous = "feature/*".to_string();
@@ -1098,10 +1111,11 @@ impl Monaged {
                         .child(self.policy_chip(project_id, index, target, cx))
                         .child(div().w_full().h(px(1.)).bg(rgb(theme::line_strong()))),
                 )
-                .child(node(target.clone(), note, self.sync_chip(project_id, target, cx)));
+                .child(node(target.clone(), note, self.sync_chip(project_id, target, cx), self.ci_badge(project_id, target, cx)));
             previous = target.clone();
         }
 
+        let ci_detail = self.ci_open.clone().filter(|(p, b)| *p == project_id && chain.contains(b)).and_then(|(p, b)| self.render_ci_detail(p, &b, None, cx));
         let hops = chain.windows(2).filter_map(|pair| {
             let (from, to) = (pair[0].clone(), pair[1].clone());
             let ahead = info.and_then(|i| i.ahead.get(&(from.clone(), to.clone()))).copied().unwrap_or(0);
@@ -1156,6 +1170,8 @@ impl Monaged {
             .border_color(rgb(theme::line()))
             .bg(rgb(theme::panel()))
             .child(flow)
+            // A chain branch's CI badge was clicked: its run.
+            .children(ci_detail)
             .children(hops)
             .when(chain.len() == 1, |d| {
                 d.child(
@@ -1333,6 +1349,23 @@ impl Monaged {
                     .and_then(|s| s.message.clone())
                     .filter(|(tone, _)| !busy && !(!conflict.is_empty() && matches!(tone, Tone::Warn)))
                     .map(|(tone, text)| ui::callout(tone, text).text_size(px(12.5)).line_height(px(18.))),
+            )
+            // CI on the branch and on where it goes (click a badge for the jobs).
+            .children([sub.branch.clone(), target.clone()].into_iter().filter_map(|b| {
+                self.ci_badge(sub.project_id, &b, cx).map(|badge| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().w(px(120.)).truncate().font_family(theme::MONO).text_size(px(11.5)).text_color(rgb(theme::text_3())).child(b))
+                        .child(badge)
+                })
+            }))
+            .children(
+                self.ci_open
+                    .clone()
+                    .filter(|(p, b)| *p == sub.project_id && (*b == sub.branch || *b == target))
+                    .and_then(|(p, b)| self.render_ci_detail(p, &b, self.ci_fix_agent(sub_id), cx)),
             );
 
         // The one thing to do next.

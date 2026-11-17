@@ -1342,6 +1342,8 @@ impl Monaged {
         self.check_sandbox(cx);
         // Reviews the quality gate was waiting for when Monaged closed.
         self.resume_gates(cx);
+        // CI runs that are going stay fresh.
+        self.start_ci_polling(cx);
         // Accounts, git's helper setup in WSL (repaired if Monaged moved), SSH keys.
         self.refresh_git_auth(true, cx);
         let distro = self.config.distro.clone();

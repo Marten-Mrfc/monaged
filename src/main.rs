@@ -69,6 +69,8 @@ mod shell;
 mod ship;
 mod push_tool;
 mod cleanup;
+mod ci;
+mod ci_ui;
 mod store;
 mod syntax;
 #[cfg(test)]
@@ -407,6 +409,11 @@ struct Monaged {
     run_targets: HashMap<i64, git_ui::GitTarget>,
     /// Each subproject's latest CI run: (asked at, run).
     ci: HashMap<i64, (Instant, Option<hosting::Ci>)>,
+    /// Each (project, branch)'s latest CI run (GitLab pipeline or GitHub Actions run).
+    ci_runs: HashMap<(i64, String), ci_ui::CiEntry>,
+    /// The run whose jobs are shown (a badge was clicked).
+    ci_open: Option<(i64, String)>,
+    ci_polling: bool,
     /// Subprojects waiting their turn to merge (Merge ready ones).
     merge_queue: std::collections::VecDeque<i64>,
     /// Tool calls opened to show their details: (agent, item).
@@ -624,6 +631,9 @@ impl Monaged {
             unseen: HashSet::new(),
             answer_inputs: HashMap::new(),
             ci: HashMap::new(),
+            ci_runs: HashMap::new(),
+            ci_open: None,
+            ci_polling: false,
             run_states: HashMap::new(),
             run_targets: HashMap::new(),
             git_panels: HashMap::new(),

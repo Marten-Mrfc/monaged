@@ -4,6 +4,20 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-17
+
+CI pipelines in Monaged: see every branch's GitLab pipeline or GitHub Actions run, follow it as it runs, and act on it without leaving the app.
+
+### Added
+
+- **CI on the branches**: develop, acceptance and main in the project view each show their latest run as a badge ("CI passed · 12m", "CI running 3/7", "CI failed · test"). Click a badge for the run: what started it, the commit, every job by stage with its time (click a job to open it), and **Open**, **Retry failed**, **Cancel**, **Run pipeline** (GitLab) and refresh.
+- **CI on a subproject's dashboard**: a CI card for its own branch once it's on origin, and for develop after it merged there. When a run failed, **Send to** the agent on the branch passes it the failed jobs' last log lines (secrets masked) with what to do: find the cause, fix it, run the job locally and commit.
+- **The Merge tab** shows the branch's and its target's CI the same way.
+- **The sidebar** marks a project whose develop, acceptance or main has a failed (red) or running CI run.
+- **Followed after pushes**: every push Monaged makes (merging into develop, a promotion, an agent's push, Push in the Git tab, a request merged on the host) follows the branch's new run. Runs that are going are read every 15 s, and the project on screen every few minutes.
+- **Told when it ends**: a run you were following that finishes gives a toast with **Open** and a sound (a different one when it failed). A failure is also written to the subproject's timeline and sent to its lead, which tells you. `team_status` includes the CI of the branch and of develop.
+- **Both hosts, signed in or not**: GitLab pipelines (with stages, allowed failures and manual jobs) and GitHub Actions runs (the newest run that didn't skip itself). Calls go through your Git account's token, or through `glab api` / `gh api` when there's no account.
+
 ## [0.9.6] - 2026-11-17
 
 ### Added
@@ -284,6 +298,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.10.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.10.0
 [0.9.6]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.6
 [0.9.5]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.5
 [0.9.4]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.4
