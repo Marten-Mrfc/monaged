@@ -172,12 +172,12 @@ impl Monaged {
         .detach();
     }
 
-    /// With the branches: CI that's older than a couple of minutes is read again.
+    /// With the branches: CI that's older than a few minutes (or never read) is read.
     pub(crate) fn refresh_ci_stale(&mut self, project_id: i64, cx: &mut Context<Self>) {
         let stale: Vec<String> = self
             .ci_branches(project_id)
             .into_iter()
-            .filter(|b| self.ci_entry(project_id, b).is_none_or(|e| e.at.is_none_or(|at| at.elapsed() > Duration::from_secs(120))))
+            .filter(|b| self.ci_entry(project_id, b).is_none_or(|e| e.at.is_none_or(|at| at.elapsed() > STALE)))
             .collect();
         self.read_ci_runs(project_id, stale, cx);
     }
@@ -216,6 +216,15 @@ impl Monaged {
     }
 
     fn ci_tick(&mut self, cx: &mut Context<Self>) {
+        // The project on screen: Monaged reopens your last view without reading its
+        // branches, and CI comes with them, so read them once, then keep its CI fresh.
+        if let Some(project_id) = self.sel_project {
+            if self.branch_info.contains_key(&project_id) {
+                self.refresh_ci_stale(project_id, cx);
+            } else {
+                self.refresh_branches(project_id, cx);
+            }
+        }
         let now = Instant::now();
         let mut due: HashMap<i64, Vec<String>> = HashMap::new();
         for ((project_id, branch), e) in &self.ci_runs {
@@ -224,8 +233,7 @@ impl Monaged {
             }
             let going = e.run.as_ref().is_some_and(|r| r.status.active());
             let watched = e.watch_until.is_some_and(|t| t > now);
-            let stale = self.sel_project == Some(*project_id) && e.at.is_none_or(|at| at.elapsed() > STALE);
-            if going || watched || stale {
+            if going || watched {
                 due.entry(*project_id).or_default().push(branch.clone());
             }
         }

@@ -218,6 +218,8 @@ impl Monaged {
                     .w(px(column_w))
                     .child(header)
                     .child(request_card)
+                    // CI on its branch, and on develop once it merged there (information, not a need).
+                    .children(self.render_sub_ci_card(sub_id, cx))
                     .child(needs_section)
                     .child(agents_section)
                     .when(!events.is_empty(), |d| {
@@ -328,10 +330,6 @@ impl Monaged {
         // The merge into develop comes first: it's what a finished feature waits for.
         if let Some(merge) = self.render_ship_card(sub_id, cx) {
             out.insert(0, merge);
-        }
-        // CI on its branch, and on develop once it merged there.
-        if let Some(ci) = self.render_sub_ci_card(sub_id, cx) {
-            out.insert(out.len().min(1), ci);
         }
         out
     }

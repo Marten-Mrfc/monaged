@@ -4,6 +4,13 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-17
+
+### Fixed
+
+- **CI didn't show after a restart until you clicked into a project**: Monaged reopens your last view without reading that project's branches, and CI comes with them. The project on screen now gets its branches and CI by itself, and its CI is read again every few minutes.
+- **A passed CI run counted as "Needs you"**: the subproject's CI card sat in the Needs-you list (with its red count). It's under the request now, as information.
+
 ## [0.10.0] - 2026-11-17
 
 CI pipelines in Monaged: see every branch's GitLab pipeline or GitHub Actions run, follow it as it runs, and act on it without leaving the app.
@@ -298,6 +305,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.10.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.10.1
 [0.10.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.10.0
 [0.9.6]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.6
 [0.9.5]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.5
