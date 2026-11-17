@@ -408,7 +408,10 @@ impl Monaged {
         let button = if running {
             ui::busy_button("dash-ship", Kind::Primary, "Merging…").into_any_element()
         } else if ship.is_some_and(|s| s.step == Step::Done) {
-            div().into_any_element()
+            // Merged: the branches and worktrees can go now.
+            ui::button("dash-finish-merged", Kind::Primary, Some(Icon::Archive), "Finish and clean up")
+                .on_click(cx.listener(move |this, _, window, cx| this.finish_sub(sub_id, window, cx)))
+                .into_any_element()
         } else {
             ui::button("dash-ship", Kind::Primary, Some(Icon::Merge), if stuck { "Try again".to_string() } else { format!("Merge into {target}") })
                 .on_click(cx.listener(move |this, _, _, cx| {

@@ -80,10 +80,16 @@ impl Monaged {
         actions = if running {
             actions.child(ui::button("dash-stop", Kind::Secondary, Some(Icon::Stop), "Stop pipeline").on_click(cx.listener(move |this, _, _, cx| this.stop_pipeline(sub_id, cx))))
         } else {
-            actions.child(
-                ui::button("dash-run", Kind::Secondary, Some(Icon::Play), if pipeline.is_some() { "Run again" } else { "Run pipeline" })
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_pipeline_form(sub_id, window, cx))),
-            )
+            actions
+                .child(
+                    ui::button("dash-run", Kind::Secondary, Some(Icon::Play), if pipeline.is_some() { "Run again" } else { "Run pipeline" })
+                        .on_click(cx.listener(move |this, _, window, cx| this.open_pipeline_form(sub_id, window, cx))),
+                )
+                .child(
+                    ui::button("dash-finish", Kind::Secondary, Some(Icon::Archive), "Finish…")
+                        .tooltip(tip("Delete its merged branches here and on origin, remove its worktrees, and archive it (it shows what first)"))
+                        .on_click(cx.listener(move |this, _, window, cx| this.finish_sub(sub_id, window, cx))),
+                )
         };
         let header = div()
             .flex()

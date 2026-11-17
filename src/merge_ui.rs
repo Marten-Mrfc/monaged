@@ -1204,6 +1204,49 @@ impl Monaged {
                         )
                     }),
             )
+            .child(self.render_cleanup_row(project_id, cx))
+            .into_any_element()
+    }
+
+    /// Cleaning up merged branches, and the finished subprojects you can bring back.
+    fn render_cleanup_row(&self, project_id: i64, cx: &mut Context<Self>) -> AnyElement {
+        let target = self.chain(project_id).first().cloned().unwrap_or_else(|| "develop".into());
+        let archived: Vec<crate::store::Subproject> = self.store.archived_subprojects().unwrap_or_default().into_iter().filter(|s| s.project_id == project_id).collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .pt(px(12.))
+            .border_t_1()
+            .border_color(rgb(theme::line()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(rgb(theme::text_3())).child(format!(
+                        "Branches whose work is already in {target} can go, here and on origin. The chain branches stay."
+                    )))
+                    .child(
+                        ui::button("cleanup-branches", Kind::Secondary, Some(Icon::Archive), "Clean up branches…")
+                            .tooltip(crate::shell::tip("Shows what it would delete first"))
+                            .on_click(cx.listener(move |this, _, window, cx| this.cleanup_branches(project_id, window, cx))),
+                    ),
+            )
+            .children(archived.into_iter().map(|sub| {
+                let id = sub.id;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon_sized(Icon::Archive, 13.).flex_none().text_color(rgb(theme::text_3())))
+                    .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.5)).text_color(rgb(theme::text_2())).child(format!("{} (finished)", sub.name)))
+                    .child(
+                        ui::button(("restore-sub", id as usize), Kind::Ghost, None, "Restore")
+                            .tooltip(crate::shell::tip("Bring it back to the sidebar; its branch is made again if it was deleted"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.restore_sub(id, cx))),
+                    )
+            }))
             .into_any_element()
     }
 

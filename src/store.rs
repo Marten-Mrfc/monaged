@@ -226,6 +226,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE board ADD COLUMN delivered_to INTEGER",
     "ALTER TABLE pipelines ADD COLUMN gate TEXT",
     "ALTER TABLE pipelines ADD COLUMN members TEXT",
+    "ALTER TABLE subprojects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
 ];
 
 /// How many startup backups to keep.
@@ -315,9 +316,24 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The subprojects in use (archived ones are left out: see `archived_subprojects`).
     pub fn subprojects(&self) -> Result<Vec<Subproject>> {
-        let mut stmt = self.conn.prepare("SELECT id, project_id, name, kind, branch FROM subprojects ORDER BY created_at, id")?;
-        let rows = stmt.query_map([], |r| {
+        self.subprojects_where(false)
+    }
+
+    /// Subprojects that were finished and cleaned up (they can be restored).
+    pub fn archived_subprojects(&self) -> Result<Vec<Subproject>> {
+        self.subprojects_where(true)
+    }
+
+    pub fn set_subproject_archived(&self, sub_id: i64, archived: bool) -> Result<()> {
+        self.conn.execute("UPDATE subprojects SET archived = ?2 WHERE id = ?1", params![sub_id, archived as i64])?;
+        Ok(())
+    }
+
+    fn subprojects_where(&self, archived: bool) -> Result<Vec<Subproject>> {
+        let mut stmt = self.conn.prepare("SELECT id, project_id, name, kind, branch FROM subprojects WHERE archived = ?1 ORDER BY created_at, id")?;
+        let rows = stmt.query_map(params![archived as i64], |r| {
             Ok(Subproject { id: r.get(0)?, project_id: r.get(1)?, name: r.get(2)?, kind: r.get(3)?, branch: r.get(4)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

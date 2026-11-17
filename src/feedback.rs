@@ -80,6 +80,11 @@ pub(crate) enum ConfirmAction {
     SignOutGit(String),
     /// Close Monaged although agents are working.
     Quit,
+    /// Finish a subproject: delete its merged branches here and on origin,
+    /// remove its worktrees, archive its agents and itself.
+    FinishSub(i64, crate::cleanup::Plan),
+    /// Delete a project's branches whose work is already in develop.
+    CleanupBranches(i64, crate::cleanup::Plan),
 }
 
 pub(crate) struct Confirm {
@@ -194,6 +199,12 @@ impl Monaged {
             })
             .detach();
         }
+        cx.notify();
+    }
+
+    /// Takes away a progress toast (when a dialog takes over from it).
+    pub(crate) fn dismiss_progress(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        self.toasts.retain(|t| t.key != Some(key));
         cx.notify();
     }
 
@@ -400,6 +411,26 @@ impl Monaged {
                 "Restart".into(),
                 true,
             ),
+            ConfirmAction::FinishSub(sub_id, plan) => {
+                let name = self.sub_name(*sub_id);
+                let agents = self.agents.iter().filter(|a| a.record.subproject_id == *sub_id && !a.record.archived).count();
+                (
+                    format!("Finish {name} and clean up?"),
+                    format!(
+                        "{} Then its {agents} agent{} and the subproject itself are archived: their conversations stay readable, and you can restore the subproject from the project view.",
+                        plan.describe(),
+                        if agents == 1 { "" } else { "s" }
+                    ),
+                    "Finish and clean up".to_string(),
+                    true,
+                )
+            }
+            ConfirmAction::CleanupBranches(project_id, plan) => (
+                format!("Clean up {}'s branches?", self.projects.iter().find(|p| p.id == *project_id).map(|p| p.name.clone()).unwrap_or_default()),
+                format!("{} The project's own branches (develop, acceptance, main) are never touched.", plan.describe()),
+                format!("Delete {} branch{}", plan.local.len() + plan.remote.len(), if plan.local.len() + plan.remote.len() == 1 { "" } else { "es" }),
+                true,
+            ),
             ConfirmAction::Promote(_, from, to) => (
                 format!("Merge {from} into {to}?"),
                 format!("{to} is your top branch, so this asks first. Monaged merges in a clean checkout and stops if there are conflicts."),
@@ -433,6 +464,8 @@ impl Monaged {
             ConfirmAction::SignOutGit(key) => self.sign_out_git(key, cx),
             ConfirmAction::CleanupWorktrees(sub_id) => self.cleanup_worktrees(sub_id, cx),
             ConfirmAction::Promote(project_id, from, to) => self.promote_confirmed(project_id, from, to, cx),
+            ConfirmAction::FinishSub(sub_id, plan) => self.finish_sub_confirmed(sub_id, plan, cx),
+            ConfirmAction::CleanupBranches(project_id, plan) => self.cleanup_branches_confirmed(project_id, plan, cx),
             ConfirmAction::Rerun(sub_id, stage) => self.rerun_stage(sub_id, stage, cx),
             ConfirmAction::RerunBuilder(sub_id, workstream) => self.rerun_builder(sub_id, &workstream, cx),
             ConfirmAction::Discard(sub_id, file) => self.git_discard(sub_id, file, cx),

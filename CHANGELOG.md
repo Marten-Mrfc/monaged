@@ -4,6 +4,23 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-11-17
+
+### Added
+
+- **Finish and clean up a subproject**: **Finish…** on its dashboard, or **Finish and clean up** once it's merged into develop. It shows what it will do, then:
+  - removes its agents' worktrees (any with uncommitted changes are kept, with their branches);
+  - deletes its branches here and on origin, but only those whose work is already in develop;
+  - archives its agents and the subproject, which leaves the sidebar.
+
+  The project view lists finished subprojects with **Restore**, which brings one back and makes its branch again if it was deleted.
+- **Clean up branches**, in the project view: deletes every branch here and on origin whose work is already in develop, so the host keeps develop, acceptance and main instead of every feature and agent branch ever pushed.
+  - It never touches the chain branches or origin's default branch.
+  - Branches still used by subprojects or agents stay here; their merged copies on origin go.
+  - Branches with work develop doesn't have are kept and listed with how many commits.
+  - Each branch is checked again right before it's deleted.
+  - A refusal from the host (a protected branch, a sign-in) is reported with what to do.
+
 ## [0.9.5] - 2026-11-17
 
 ### Added
@@ -267,6 +284,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.9.6]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.6
 [0.9.5]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.5
 [0.9.4]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.4
 [0.9.3]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.3

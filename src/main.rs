@@ -68,6 +68,7 @@ mod sound;
 mod shell;
 mod ship;
 mod push_tool;
+mod cleanup;
 mod store;
 mod syntax;
 #[cfg(test)]
