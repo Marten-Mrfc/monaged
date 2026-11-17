@@ -61,7 +61,7 @@ The inbox opens the dashboard too, and the dashboard button in an agent's header
 The **Changes** tab shows the agent's diff against where its branch started, a summary written by Haiku, and a **1–5 confidence score** that always lists its reasons:
 
 - the project's tests run first (from Project settings → Run, `monaged.json`, or detected); failing tests cap the score at 2, no tests at 4. Detection uses the project's own package manager (bun, pnpm, yarn or npm, from the lock file or `packageManager`) and installs the dependencies first when the worktree has none. Tests that can't run (the tool isn't installed in WSL, only a Windows copy is found through interop, the install fails, or the runner stops without a word) say why and cap the score at 4 instead of counting as failing;
-- then a short Haiku review asked to find what's broken; "partly" caps the score at 3, "broken" at 2. Findings must be defects the code shows: one that rests on code the reviewer couldn't see is marked "not confirmed" and counts as minor.
+- then a short Haiku review asked to find what's broken; "partly" caps the score at 3, "broken" at 2, but only with a serious (high or medium) finding behind it; otherwise it counts as unclear (at most 4). Findings must be defects the code shows: one that rests on code the reviewer couldn't see is marked "not confirmed" and counts as minor.
 
 The reviewer doesn't only see the diff: it gets the task and what you said to the agent after it, the project's `CLAUDE.md` and the shared notes for its agents (so it follows the project's conventions instead of flagging them), the agent's own account of its work (as a claim to check), the changed files in full (so it can see what the diff calls), and the findings you ruled out before.
 

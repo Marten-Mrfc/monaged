@@ -4,6 +4,13 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-17
+
+### Fixed
+
+- **A "broken" verdict with nothing serious behind it held work at 2/5**: on the Mobietrain run the reviewer kept calling a builder "broken" while every finding it listed was minor or unconfirmed, and its own summary said the code looked sound. "broken" and "partly" now need a high or medium finding; without one the verdict counts as unclear (at most 4/5), as it already did once you ruled out the last serious finding, and the reasons say what the reviewer said. The reviewer is also told that what later messages ask the agent to run or report is process, not a finding.
+- **Reviews running side by side made timing tests fail**: two full test suites (and their base-branch runs) at once pushed a performance test past its limit, and the failure looked new. Test runs for reviews now take turns.
+
 ## [0.9.2] - 2026-11-16
 
 ### Fixed
@@ -237,6 +244,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.9.3]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.3
 [0.9.2]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.2
 [0.9.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.1
 [0.9.0]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.0

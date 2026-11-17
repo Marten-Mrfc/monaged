@@ -197,7 +197,13 @@ fn runner(fence: bool) -> &'static str {
     }
 }
 
+/// One test run at a time: two full suites (plus their base-branch runs) at
+/// once made timing tests fail that pass on a quiet machine, and those
+/// failures look new. The next review waits for the one before it.
+static CHECKS_RUNNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn run_checks(distro: &str, worktree: &str, command: Option<&str>, base: Option<&str>, fence: bool) -> Checks {
+    let _one_at_a_time = CHECKS_RUNNING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let script = format!(
         r#"cd {wt} || exit 1
 cmd={given}
@@ -426,7 +432,11 @@ unverified; a finding that ends in \"no defect confirmed\" or \"this is fine\" i
 are the evidence about tests: don't report that the agent didn't or couldn't run them, and when the checks couldn't \
 run, judge the code itself. Text like [masked] or [masked token] is Monaged hiding a secret from you, not the code. \
 confirmed: true only when the code shown proves the problem; false when it rests on code, files or behaviour you \
-couldn't see (unconfirmed findings count as minor).";
+couldn't see (unconfirmed findings count as minor).
+
+Judge the change, not the conversation: what the later messages ask the agent to run, report or say is process, not \
+part of the change, and never a finding. Give \"broken\" or \"partly\" only with a high or medium finding that shows \
+it; when the diff is too large to see whole and nothing you saw is wrong, say \"unclear\".";
 
 /// A finding you said isn't a problem, and why (the next reviews are told).
 #[derive(Clone, Debug, PartialEq)]
@@ -616,8 +626,11 @@ pub fn review(backend: &Backend, context: &ReviewContext, diff: &str, checks: &C
     let (prompt, diff_note) = review_prompt(context, diff, checks);
     let (value, usage) = llm::complete_json(backend, REVIEW_SYSTEM, &prompt, &schema)?;
     let issues = read_issues(&value["issues"]);
-    let verdict = value["verdict"].as_str().unwrap_or("unclear").to_string();
+    let (verdict, unbacked) = settle_verdict(value["verdict"].as_str().unwrap_or("unclear"), &issues);
     let (score, mut reasons) = score(checks, &verdict, &issues);
+    if let Some(said) = unbacked {
+        reasons.push(format!("– The reviewer said \"{said}\" without naming anything serious, so it counts as unclear"));
+    }
     if let Some(summary) = value["summary"].as_str().filter(|s| !s.is_empty()) {
         reasons.push(format!("Reviewer: {summary}"));
     }
@@ -650,6 +663,19 @@ fn read_issues(value: &Value) -> Vec<Issue> {
             Some(Issue { severity, file: i["file"].as_str().unwrap_or_default().to_string(), problem })
         })
         .collect()
+}
+
+/// "broken" or "partly" has to rest on a high or medium finding. Without
+/// one (only minor or unconfirmed findings), the reviewer couldn't show what
+/// doesn't work, and the verdict counts as unclear, as it does once you rule
+/// out the last serious finding. Returns the verdict to score and, when it
+/// was changed, what the reviewer said.
+pub fn settle_verdict(said: &str, issues: &[Issue]) -> (String, Option<String>) {
+    let serious = issues.iter().any(|i| matches!(i.severity.as_str(), "high" | "medium"));
+    if matches!(said, "broken" | "partly") && !serious {
+        return ("unclear".into(), Some(said.to_string()));
+    }
+    (said.to_string(), None)
 }
 
 /// A finding that says this about itself isn't one.
@@ -839,6 +865,20 @@ mod checks_tests {
         assert_eq!(failure_lines(&strip_colors(line)).len(), 1);
         let c = read(&format!("MONAGED_CMD bun run test\nMONAGED_EXIT 1\n{line}\n"));
         assert!(matches!(&c, Checks::Failed { tail, .. } if !tail.contains('\u{1b}')), "{}", c.describe());
+    }
+
+    #[test]
+    fn a_verdict_needs_a_serious_finding_behind_it() {
+        let issue = |severity: &str| Issue { severity: severity.into(), file: "a.ts".into(), problem: "x".into() };
+        // api-client-worker: "broken", three minor findings, so 2/5 every round.
+        let (verdict, said) = settle_verdict("broken", &[issue("low"), issue("low")]);
+        assert_eq!((verdict.as_str(), said.as_deref()), ("unclear", Some("broken")));
+        let checks = Checks::FailedBefore { command: "bun run test".into(), tail: String::new() };
+        assert_eq!(score(&checks, &verdict, &[issue("low")]).0, 4);
+        // With something serious it stands, and so do "works" and "unclear".
+        assert_eq!(settle_verdict("partly", &[issue("medium")]), ("partly".to_string(), None));
+        assert_eq!(settle_verdict("broken", &[issue("high")]), ("broken".to_string(), None));
+        assert_eq!(settle_verdict("works", &[]), ("works".to_string(), None));
     }
 
     #[test]
