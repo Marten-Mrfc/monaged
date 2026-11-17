@@ -4,6 +4,23 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-17
+
+### Added
+
+- **Merge into develop, in one go**: one button on a finished subproject's dashboard (or "merge it" to the lead) runs every step itself, shown on the card as Check, Bring develop in and Merge:
+  - it checks the score and that nobody is working on the feature branch;
+  - it brings develop in first (after catching it up with origin), so the merge can't conflict;
+  - it hands any conflicts to the agent on the feature branch, with what to keep (and to take the next free number when both sides raised a schema version);
+  - it has that work reviewed again, then merges the project's way (here, here then push, or a request).
+
+  Every step is a sentence on the card, in Recent and to the lead; anything that stops it says why, with **Try again**. Develop's **Automatically** rule uses the same steps, so a conflict no longer leaves an automatic merge stuck for good (it used to never try again, even after the conflicts were resolved).
+- **The lead can merge for you**: a `merge_to_develop` tool, and `team_status` says how far the branch is from develop and how a merge stands. Before, the lead told you it couldn't merge.
+
+### Fixed
+
+- **The lead never heard back from the agents it asked**: it said "I'll report when the integrator finishes", the integrator finished with a full report, and nothing reached the lead or you. The reply of an agent the lead messaged, started or sent findings to now goes back to the lead when that turn ends (result blocks left out), and the lead is told to pass it on.
+
 ## [0.9.3] - 2026-11-17
 
 ### Fixed
@@ -244,6 +261,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.9.4]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.4
 [0.9.3]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.3
 [0.9.2]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.2
 [0.9.1]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.1

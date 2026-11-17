@@ -66,6 +66,7 @@ mod side_chat;
 mod signin;
 mod sound;
 mod shell;
+mod ship;
 mod store;
 mod syntax;
 #[cfg(test)]
@@ -298,6 +299,10 @@ struct Monaged {
     starting_lead: HashSet<i64>,
     /// Agents the lead asked a review of.
     lead_reviews: lead::LeadReviews,
+    /// What the lead asked agents to do; their reply goes back to it.
+    lead_asks: Vec<lead::LeadAsk>,
+    /// Merges into develop under way (or just finished), by subproject.
+    ships: HashMap<i64, ship::Ship>,
     /// One agent at a time instead of several side by side (Ctrl K, or the pane's button).
     one_pane: bool,
     /// The focused agent's changes in a pane beside it when there's room.
@@ -586,6 +591,8 @@ impl Monaged {
             show_helpers: HashSet::new(),
             lead_updates: HashMap::new(),
             lead_reviews: HashSet::new(),
+            lead_asks: Vec::new(),
+            ships: HashMap::new(),
             one_pane: false,
             changes_beside: true,
             inputs: HashMap::new(),

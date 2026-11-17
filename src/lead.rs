@@ -37,7 +37,12 @@ pub fn brief(sub: &str, branch: &str, request: Option<&str>) -> String {
          - `message_agent`: pass an instruction or an answer to one agent. Short and concrete; say what to do, not how you feel.\n\
          - `start_agent`: start a new agent for a piece of work nobody is on (a name and its task). Only when the user asks \
          for work, or when the plan clearly needs it.\n\
-         - `fix_findings`: send an agent its review findings to fix. `review_agent`: review an agent's work again.\n\n\
+         - `fix_findings`: send an agent its review findings to fix. `review_agent`: review an agent's work again.\n\
+         - `merge_to_develop`: when the user asks to merge, push or ship the feature, call it. Monaged does every step \
+         itself (checks the score, brings develop in, has conflicts resolved and reviewed, merges and pushes the project's \
+         way) and sends you each step. Never tell the user you can't merge: this tool is how you do it for them.\n\n\
+         When an agent you messaged, started or sent findings to finishes that turn, Monaged sends you its reply. Tell the \
+         user what came of it in two or three sentences, without being asked: they only hear it from you.\n\n\
          ## How Monaged works around you\n\
          When a pipeline runs, Monaged moves it on by itself: research, verification, a plan, builders, then an integrator. \
          Builders and the integrator only count as done when a review scores their work at the bar (usually 4/5); below it \
@@ -93,12 +98,17 @@ pub fn tools() -> Value {
             "name": "review_agent",
             "description": "Run the tests and a review of an agent's work now. The score comes back as an update.",
             "inputSchema": { "type": "object", "properties": { "agent": agent }, "required": ["agent"] }
+        },
+        {
+            "name": "merge_to_develop",
+            "description": "Merge the feature branch into develop (the project's first branch) for the user: call it when they ask to merge, push or ship. Monaged checks the score, brings develop in, has any conflicts resolved by the agent on the feature branch and reviewed again, then merges and pushes the project's way. Each step comes back as an update; tell the user how it ends.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
 
 pub fn is_tool(name: &str) -> bool {
-    matches!(name, "team_status" | "message_agent" | "start_agent" | "fix_findings" | "review_agent")
+    matches!(name, "team_status" | "message_agent" | "start_agent" | "fix_findings" | "review_agent" | "merge_to_develop")
 }
 
 /// One agent in `team_status`.
@@ -236,6 +246,9 @@ impl Monaged {
                 out.push_str(&describe_agent(agent));
             }
         }
+        if let Some(merge) = self.ship_summary(sub_id) {
+            out.push_str(&format!("\n\nMerging: {merge}"));
+        }
         let waiting: Vec<String> = self.inbox().into_iter().filter(|i| i.sub_id == sub_id).map(|i| format!("{} ({})", i.title, i.detail)).collect();
         if !waiting.is_empty() {
             out.push_str(&format!("\n\nWaiting for the user on the dashboard: {}.", waiting.join("; ")));
@@ -270,7 +283,9 @@ impl Monaged {
                         return Some(ToolReply::error("message_agent needs a `message`."));
                     }
                     let busy = self.agent(id).is_some_and(|a| a.is_working());
-                    self.send_prompt(id, format!("From the lead (via Monaged): {message}"));
+                    let text = format!("From the lead (via Monaged): {message}");
+                    self.lead_asks.push(LeadAsk::new(sub_id, Some(id), &text));
+                    self.send_prompt(id, text);
                     ToolReply::ok(if busy { format!("Queued: {name} is working and gets it when its turn ends.") } else { format!("Sent to {name}.") })
                 }
             },
@@ -283,6 +298,7 @@ impl Monaged {
                 } else if running >= MAX_AGENTS {
                     ToolReply::error(format!("This subproject already has {running} agents. Give the work to one of them with message_agent, or ask the user to archive some."))
                 } else {
+                    self.lead_asks.push(LeadAsk::new(sub_id, None, &task));
                     let spec = AgentSpec { name: name.clone(), role: Role::Free, on_feature_branch: false, brief: Some(task), select: false, merge_from: Vec::new() };
                     self.spawn_agent(sub_id, spec, cx);
                     let _ = self.store.log_event(sub_id, Some(from), "lead", &format!("The lead started {name}"));
@@ -293,6 +309,7 @@ impl Monaged {
                 Err(e) => e,
                 Ok((id, name)) => match self.agent(id).and_then(|a| a.confidence.as_ref()).and_then(review::fix_prompt) {
                     Some(prompt) => {
+                        self.lead_asks.push(LeadAsk::new(sub_id, Some(id), &prompt));
                         self.send_prompt(id, prompt);
                         ToolReply::ok(format!("Sent {name} its findings to fix."))
                     }
@@ -307,6 +324,10 @@ impl Monaged {
                     ToolReply::ok(format!("Reviewing {name}; the score comes as an update."))
                 }
             },
+            "merge_to_develop" => {
+                let status = self.ship(sub_id, "the lead (the user asked)", cx);
+                ToolReply::ok(format!("{status}\nEach next step comes to you as an update."))
+            }
             _ => return None,
         };
         cx.notify();
@@ -330,3 +351,93 @@ impl Monaged {
 
 /// Agents the lead asked a review of (their score goes back to it).
 pub type LeadReviews = HashSet<i64>;
+
+/// Something the lead asked an agent to do. When that agent finishes the
+/// turn that had it, its reply goes back to the lead. Before, the lead said
+/// "I'll report when it's done" and never heard: nothing told it.
+#[derive(Clone, Debug)]
+pub struct LeadAsk {
+    pub sub_id: i64,
+    /// The agent, when it already exists (not for start_agent).
+    pub agent: Option<i64>,
+    /// The start of what was sent, to recognise the turn that had it.
+    pub marker: String,
+}
+
+impl LeadAsk {
+    pub fn new(sub_id: i64, agent: Option<i64>, sent: &str) -> Self {
+        Self { sub_id, agent, marker: sent.trim().chars().take(80).collect() }
+    }
+
+    /// Whether this turn (its request, possibly with more joined to it) answers the ask.
+    pub fn answered_by(&self, sub_id: i64, agent: i64, request: &str) -> bool {
+        self.sub_id == sub_id && self.agent.is_none_or(|a| a == agent) && !self.marker.is_empty() && request.contains(&self.marker)
+    }
+}
+
+/// What the lead gets back: the agent's reply, shortened, without result blocks.
+pub fn answer_text(name: &str, reply: &str) -> String {
+    let mut kept = Vec::new();
+    let mut in_block = false;
+    for line in reply.lines() {
+        if line.trim_start().starts_with("```monaged-") {
+            in_block = true;
+            continue;
+        }
+        if in_block {
+            if line.trim_start().starts_with("```") {
+                in_block = false;
+            }
+            continue;
+        }
+        kept.push(line);
+    }
+    let text = kept.join("\n");
+    let text = match text.trim() {
+        "" => "(no text, only its result block)",
+        t => t,
+    };
+    format!("{name} finished what you asked. Its reply:\n{}\n\nTell the user what came of it in two or three sentences.", review::clip(text, 2500))
+}
+
+impl Monaged {
+    /// An agent's turn ended: if it answered something the lead asked, pass the reply on.
+    pub(crate) fn lead_answer_back(&mut self, agent_id: i64) {
+        let Some(agent) = self.agent(agent_id) else { return };
+        if agent.role() == Role::Lead {
+            return;
+        }
+        let (sub_id, request) = (agent.record.subproject_id, agent.last_request());
+        let text = answer_text(&agent.record.name, &agent.last_reply());
+        let Some(index) = self.lead_asks.iter().position(|a| a.answered_by(sub_id, agent_id, &request)) else { return };
+        self.lead_asks.remove(index);
+        self.tell_lead(sub_id, text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lead_hears_back_from_the_turn_that_had_its_message() {
+        let ask = LeadAsk::new(7, Some(32), "From the lead (via Monaged): Release check on feature/mobietrain-rework (after your develop merge).");
+        // The message may arrive joined to others, with board updates in front.
+        let request = "New on the board: …\n\nFrom the lead (via Monaged): Release check on feature/mobietrain-rework (after your develop merge). Fix what you find.";
+        assert!(ask.answered_by(7, 32, request));
+        assert!(!ask.answered_by(7, 31, request), "another agent's turn");
+        assert!(!ask.answered_by(6, 32, request), "another subproject");
+        assert!(!ask.answered_by(7, 32, "Monaged's review of your changes found…"), "a turn without the message");
+        // start_agent: the agent doesn't exist yet, so any agent with that task answers.
+        assert!(LeadAsk::new(7, None, "Make the release check").answered_by(7, 40, "Make the release check"));
+    }
+
+    #[test]
+    fn the_reply_goes_back_without_result_blocks() {
+        let reply = "All six items are done.\n\n```monaged-done\n{\"summary\": \"x\"}\n```\nNothing pushed.";
+        let text = answer_text("integrator", reply);
+        assert!(text.starts_with("integrator finished what you asked. Its reply:\nAll six items are done."));
+        assert!(text.contains("Nothing pushed.") && !text.contains("monaged-done") && !text.contains("summary"));
+        assert!(answer_text("x", "```monaged-done\n{}\n```").contains("only its result block"));
+    }
+}

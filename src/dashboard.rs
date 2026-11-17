@@ -319,8 +319,9 @@ impl Monaged {
                 out.push(card);
             }
         }
-        if let Some(merge) = self.dashboard_merge(sub_id, cx) {
-            out.push(merge);
+        // The merge into develop comes first: it's what a finished feature waits for.
+        if let Some(merge) = self.render_ship_card(sub_id, cx) {
+            out.insert(0, merge);
         }
         out
     }
@@ -394,33 +395,6 @@ impl Monaged {
                         .child(ui::button(("dash-open-need", id as usize), Kind::Secondary, None, "Open").on_click(cx.listener(move |this, _, _, cx| this.select_agent(id, cx)))),
                 )
                 .children(body)
-                .into_any_element(),
-        )
-    }
-
-    /// The feature is done but the merge waits for you.
-    fn dashboard_merge(&self, sub_id: i64, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let p = self.pipelines.get(&sub_id).filter(|p| p.stage == Stage::Done)?;
-        let sub = self.subprojects.iter().find(|s| s.id == sub_id)?;
-        let target = self.merge_target(sub_id)?;
-        let ahead = self.branch_info.get(&sub.project_id).and_then(|i| i.ahead.get(&(sub.branch.clone(), target.clone()))).copied();
-        if !ahead.is_some_and(|n| n > 0) {
-            return None;
-        }
-        let state = self.merges.get(&sub_id);
-        let busy = state.is_some_and(|s| s.busy);
-        let message = state.and_then(|s| s.message.clone()).map(|(_, m)| m).unwrap_or_else(|| p.note.clone().unwrap_or_default());
-        let score = self.sub_confidence(sub_id).map(|(s, from)| format!("Confidence {s}/5 ({from})."));
-        Some(
-            ui::card()
-                .child(div().flex().items_center().gap(px(8.)).child(icon(Icon::Merge).size(px(14.))).child(ui::label(format!("Ready to merge into {target}"))))
-                .child(div().text_size(px(13.)).text_color(rgb(theme::text_2())).child(message))
-                .children(score.map(ui::mono))
-                .child(div().flex().gap(px(6.)).child(if busy {
-                    ui::busy_button("dash-merge", Kind::Primary, "Merging…")
-                } else {
-                    ui::button("dash-merge", Kind::Primary, Some(Icon::Merge), format!("Merge into {target}")).on_click(cx.listener(move |this, _, _, cx| this.merge_subproject(sub_id, cx)))
-                }))
                 .into_any_element(),
         )
     }

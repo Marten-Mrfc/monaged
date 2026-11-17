@@ -97,6 +97,13 @@ Every agent has Monaged's tools: `board_read`, `board_post` (contracts, decision
 
 ## Merging
 
+- **Merge into develop, in one go.** When a feature is done, the dashboard's first card says how many commits are ready and the score, with one button: **Merge into develop**. You can also just tell the lead "merge it". Monaged then does every step itself and shows them on the card (**Check**, **Bring develop in**, **Merge**):
+  1. It checks that the score is at the bar and that nobody is working on the feature branch.
+  2. It brings develop in, after catching develop up with origin, so the merge itself can't conflict. When that conflicts, the agent on the feature branch (the integrator) gets the files and resolves them. Its work is reviewed again, and merging goes on only at the bar.
+  3. It merges the project's way: here, here then push, or through a request.
+
+  Each step is one sentence on the card and in Recent, and the lead hears it and tells you. When something stops it (a low score, a branch in use, develop that kept moving), the card says why and offers **Try again**. Develop's **Automatically** rule runs the same steps by itself.
+- **The lead hears back.** When an agent the lead messaged, started or sent findings to finishes that turn, its reply goes to the lead, which tells you what came of it.
 - **The project view** shows your branch chain (develop → acceptance → main) with a rule on each hop; click it for a menu: **Automatically** (develop's default: once the integrator's latest work is reviewed at the quality bar, 4/5 by default), **Ask me** (acceptance's default), **Confirm twice** (the top branch's). Under each branch it says how it stands against origin: "in sync", or "5 to push" / "2 to pull", which push or pull it when you click. **Set up develop and acceptance** creates them. The refresh button fetches from origin and reads the branches again.
 - **How merges reach a branch** (**Merges** next to origin in the project view, **How** in the Merge tab; both open a menu):
   - **Here, then push** (the default with an origin): Monaged fetches first and catches the target up with origin, merges, then pushes the target. When the target moved both here and on origin, it stops and asks you to pull it first, so it never pushes over someone else's work. A push that's refused (a protected branch) says so and suggests the next method.

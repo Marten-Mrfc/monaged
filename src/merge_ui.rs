@@ -156,7 +156,7 @@ pub struct BranchInfo {
 }
 
 impl Monaged {
-    fn merge_state(&mut self, sub_id: i64) -> &mut MergeState {
+    pub(crate) fn merge_state(&mut self, sub_id: i64) -> &mut MergeState {
         self.merges.entry(sub_id).or_insert_with(|| {
             let merged = self
                 .store
@@ -166,7 +166,7 @@ impl Monaged {
         })
     }
 
-    fn set_merge_message(&mut self, sub_id: i64, tone: Tone, text: impl Into<String>) {
+    pub(crate) fn set_merge_message(&mut self, sub_id: i64, tone: Tone, text: impl Into<String>) {
         self.merge_state(sub_id).message = Some((tone, text.into()));
     }
 
@@ -454,6 +454,10 @@ impl Monaged {
         if !self.pipelines.get(&sub_id).is_some_and(|p| p.stage == Stage::Done) {
             return;
         }
+        // A merge into develop is under way, or stopped and waits for someone to act.
+        if self.ships.get(&sub_id).is_some_and(|s| s.running() || s.step == crate::ship::Step::Stuck) {
+            return;
+        }
         let Some((project_id, branch)) = self.subprojects.iter().find(|s| s.id == sub_id).map(|s| (s.project_id, s.branch.clone())) else { return };
         let Some(target) = self.merge_target(sub_id) else { return };
         // Only when there's something to merge (unknown counts wait for the next refresh).
@@ -490,8 +494,9 @@ impl Monaged {
                 format!("Confidence is {score}/5, below the {}/5 needed to merge into {target} by itself. Fix the findings, or merge it yourself.", self.min_score()),
             ),
             Some((score, from)) => {
+                // The whole way: bring the target in, conflicts resolved and reviewed, then merge.
                 self.set_merge_message(sub_id, Tone::Info, format!("Confidence {score}/5 ({from}): merging into {target} automatically."));
-                self.merge_subproject(sub_id, cx);
+                self.ship(sub_id, &format!("this project's rule ({target} merges automatically)"), cx);
             }
         }
         cx.notify();
@@ -570,6 +575,8 @@ impl Monaged {
     /// The end of any merge: sound, the event, the state, the queue, the branches.
     #[allow(clippy::too_many_arguments)]
     fn finish_merge(&mut self, project_id: i64, sub_id: Option<i64>, target: &str, tone: Tone, text: String, merged_sha: Option<String>, conflict: Vec<String>, cx: &mut Context<Self>) {
+        // For a merge into develop under way (`ship`): merged (or already there), or conflicts.
+        let (did_merge, conflict_files) = (merged_sha.is_some(), conflict.clone());
         // A merge that did something rises; one that couldn't, falls.
         match (&merged_sha, tone) {
             (Some(sha), _) if !sha.is_empty() => self.chime(crate::sound::Cue::Success),
@@ -595,6 +602,9 @@ impl Monaged {
             if let Some(sha) = merged_sha {
                 state.merged = Some((target.to_string(), sha));
             }
+        }
+        if let Some(sub_id) = sub_id {
+            self.ship_after_merge(sub_id, did_merge, &conflict_files, tone, &text, cx);
         }
         self.settle("merge", tone, text, cx);
         self.advance_merge_queue(cx);

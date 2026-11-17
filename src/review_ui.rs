@@ -100,6 +100,10 @@ impl Monaged {
         if !answered || other_result {
             self.pipeline_on_turn(agent_id, cx);
         }
+        // A merge into develop waiting for this agent's conflict work goes on.
+        self.ship_after_turn(agent_id, cx);
+        // What the lead asked it to do is answered: the lead hears back.
+        self.lead_answer_back(agent_id);
         self.take_checkpoint(agent_id, cx);
         self.take_lead_updates(agent_id);
         self.flush_queued_prompt(agent_id);
@@ -351,6 +355,7 @@ impl Monaged {
                 let name = this.agent(agent_id).map(|a| a.record.name.clone()).unwrap_or_default();
                 this.lead_review_done(agent_id);
                 this.gate_on_review(agent_id, outcome.0, format!("{name} {}", outcome.1), cx);
+                this.ship_after_review(agent_id, outcome.0, cx);
                 cx.notify();
             })
             .ok();

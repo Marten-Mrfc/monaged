@@ -372,7 +372,7 @@ fn the_lead_gets_its_own_tools() {
     let plain = crate::coord::parse_relay_args(&args[..8]).unwrap();
     assert!(!plain.lead);
     let names: Vec<String> = crate::lead::tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-    assert_eq!(names, ["team_status", "message_agent", "start_agent", "fix_findings", "review_agent"]);
+    assert_eq!(names, ["team_status", "message_agent", "start_agent", "fix_findings", "review_agent", "merge_to_develop"]);
     assert!(names.iter().all(|n| crate::lead::is_tool(n)));
     // The everyday tools stay apart from the lead's.
     let base: Vec<String> = crate::coord::tool_list().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
@@ -383,6 +383,8 @@ fn the_lead_gets_its_own_tools() {
     let brief = crate::lead::brief("Order history", "feature/order-history", Some("Keep every order"));
     assert!(brief.starts_with(pipeline::BRIEF_HEADER));
     assert!(brief.contains("Keep every order") && brief.contains("team_status") && brief.contains(crate::lead::UPDATE_PREFIX));
+    // It merges when asked, and passes on what the agents it asked came back with.
+    assert!(brief.contains("merge_to_develop") && brief.contains("Never tell the user you can't merge") && brief.contains("Monaged sends you its reply"));
     assert!(crate::lead::brief("x", "b", None).contains("Nothing yet"));
 }
 
