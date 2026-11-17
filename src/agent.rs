@@ -367,6 +367,11 @@ pub struct AgentView {
     // Pipeline (Phase 3).
     /// A message to send as soon as the session is open (e.g. the role brief).
     pub queued_prompt: Option<String>,
+    /// The current (or last) turn started with a message you typed: what
+    /// only you may ask for (pushing) works in it.
+    pub user_turn: bool,
+    /// A message you typed waits in `queued_prompt`.
+    pub user_queued: bool,
     /// What you picked on open questions so far: (item index, question index) -> pick.
     pub answers: HashMap<(usize, usize), Pick>,
     /// Already reminded once to deliver its result block.
@@ -421,6 +426,8 @@ impl AgentView {
             review_stale: false,
             review_error: None,
             queued_prompt: None,
+            user_turn: false,
+            user_queued: false,
             answers: HashMap::new(),
             nudged: false,
             model: None,

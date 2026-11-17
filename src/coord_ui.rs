@@ -64,6 +64,7 @@ impl Monaged {
             "ask" => return self.tool_ask(agent, &arguments, reply, cx),
             "env_list" => self.tool_env_list(agent),
             "run_with_env" => return self.tool_run_with_env(agent, &arguments, reply, cx),
+            "push" => return self.tool_push(agent, &arguments, reply, cx),
             other => self.lead_tool(agent, other, &arguments, cx).unwrap_or_else(|| ToolReply::error(format!("Unknown Monaged tool: {other}"))),
         };
         let _ = reply.send(answer);

@@ -4,6 +4,12 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-17
+
+### Added
+
+- **Agents push when you ask them to**: "push and merge!" to an agent used to end in "permission denied", because agents may not run `git push` themselves (Monaged checks new commits for secrets before anything leaves the machine) and there was no way through. Every agent now has a `push` tool that goes through Monaged's secret check. It only works in a turn that started with a message you typed (not one from the lead, a brief or Monaged), and only for the agent's own branch, its subproject's branch or develop; acceptance and main stay yours. A refused push says why, and a failed sign-in points to Settings → Git accounts.
+
 ## [0.9.4] - 2026-11-17
 
 ### Added
@@ -261,6 +267,7 @@ The first release meant for other people's PCs: Monaged now sets up everything i
 - Usage awareness: weekly usage, Monaged's share, budgets and models per role.
 - A redesigned window with themes, a command palette and a UX pass.
 
+[0.9.5]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.5
 [0.9.4]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.4
 [0.9.3]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.3
 [0.9.2]: https://github.com/Marten-Mrfc/monaged/releases/tag/v0.9.2

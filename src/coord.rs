@@ -25,6 +25,7 @@ pub fn tool_list() -> Value {
     let mut tools = base_tools();
     if let Some(list) = tools.as_array_mut() {
         list.extend(crate::env::tool_defs());
+        list.push(crate::push_tool::tool_def());
     }
     tools
 }

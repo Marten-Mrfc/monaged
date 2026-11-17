@@ -67,6 +67,7 @@ mod signin;
 mod sound;
 mod shell;
 mod ship;
+mod push_tool;
 mod store;
 mod syntax;
 #[cfg(test)]
@@ -1407,9 +1408,12 @@ impl Monaged {
 
     /// Sends a message to an agent, or queues it until its session is open and idle.
     fn send_prompt(&mut self, agent_id: i64, text: String) {
+        // Messages you type go out with the budget bypassed: that's how they're told apart.
+        let by_user = self.bypass_budget;
         let Some(agent) = self.agent_mut(agent_id) else { return };
         let session = agent.record.session_id.clone().filter(|_| agent.live && agent.turn.is_none());
         let Some(session_id) = session else {
+            agent.user_queued |= by_user;
             agent.queued_prompt = Some(match agent.queued_prompt.take() {
                 Some(earlier) => format!("{earlier}\n\n{text}"),
                 None => text,
@@ -1443,6 +1447,7 @@ impl Monaged {
             agent.items.push(Item::Attachments(attachments.iter().map(|a| (a.name.clone(), a.preview.clone())).collect()));
         }
         agent.turn = Some(Turn { started: Instant::now(), first_words: None });
+        agent.user_turn = by_user || std::mem::take(&mut agent.user_queued);
         let mut prompt = vec![json!({ "type": "text", "text": text })];
         prompt.extend(attachments.iter().map(|a| a.content_block()));
         self.request("session/prompt", json!({ "sessionId": session_id, "prompt": prompt }), Pending::Prompt(agent_id));
@@ -1543,6 +1548,7 @@ impl Monaged {
                     Some(earlier) => format!("{earlier}\n\n{text}"),
                     None => text.clone(),
                 });
+                agent.user_queued = true;
             }
             input.update(cx, |input, cx| {
                 input.push_history(text.clone());
