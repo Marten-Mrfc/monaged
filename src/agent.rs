@@ -400,6 +400,9 @@ pub struct AgentView {
     pub title: Option<String>,
     /// The agent is compacting its context.
     pub compacting: bool,
+    /// The last sign of life from its session: an update, or a message sent
+    /// to it. The stall guard (`crate::stall`) watches this.
+    pub activity: Instant,
 }
 
 impl AgentView {
@@ -441,6 +444,7 @@ impl AgentView {
             attachments: Vec::new(),
             title: None,
             compacting: false,
+            activity: Instant::now(),
         }
     }
 
@@ -514,6 +518,12 @@ impl AgentView {
             .join("\n\n")
     }
 
+    /// A tool call of this turn is still running (a command can run for minutes).
+    pub fn tool_running(&self) -> bool {
+        let start = self.last_user_index().map_or(0, |i| i + 1);
+        self.items[start..].iter().any(|i| matches!(i, Item::Tool { status, .. } if status == "pending" || status == "in_progress"))
+    }
+
     /// Tool calls since the last request, as "title (status)".
     pub fn tools_this_turn(&self) -> Vec<String> {
         let start = self.last_user_index().map_or(0, |i| i + 1);
@@ -546,6 +556,7 @@ impl AgentView {
     /// Applies one `session/update` (live, or replayed by `session/load`).
     /// Secret values are masked on the way in; ones that showed up are noted.
     pub fn apply_update(&mut self, update: &Value) {
+        self.activity = Instant::now();
         self.apply_update_inner(update);
         self.leaks.extend(crate::env::take_found());
     }

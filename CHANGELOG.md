@@ -4,6 +4,20 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+
+- **Chats don't stall any more**: Monaged watches every working agent and gets stuck ones going again by itself.
+  - A turn with no sign of life for 6 minutes (30 while a command, a subagent or compaction runs; never while it waits for you) is stopped, and the agent is asked to continue where it left off. If even the stop goes unanswered for 90 seconds, its session is reopened with the same request.
+  - A turn that ends in an error (overloaded, a network hiccup) is asked again after 30 seconds.
+  - Turns cut off when the connection to Claude dropped (WSL restarting, say) continue once Claude is back, instead of waiting forever.
+  - A session that takes over 3 minutes to open is opened again.
+  - At most three automatic recoveries per agent an hour; after that it's in Needs you as **Stalled**. Every recovery is in the agent's conversation and the Activity tab.
+- **Didn't deliver its result** in Needs you: a pipeline agent that finished twice without its result used to leave the pipeline waiting silently. The lead is asked to sort it out too.
+
+### Fixed
+
+- **A hung `wsl.exe` could block Monaged's other WSL work**: since 0.11.0 only a few run at a time, so one that never ended held its place forever. Every `wsl.exe` now has a time limit (10 minutes for git and quick scripts, 30 for tests and installs, an hour for clones) and is stopped when it runs over.
+
 ## [0.11.0] - 2026-11-22
 
 Project chat: describe a feature and Monaged takes it to develop on autopilot. And WSL that stays up, or comes back by itself.

@@ -849,6 +849,7 @@ impl Monaged {
                         this.check_notifications();
                         this.sync_queue();
                         this.maybe_autofetch(cx);
+                        this.check_stalls(cx);
                         this.poll_hosts(cx);
                         this.remember_place();
                         if this.needs_clock() {

@@ -694,6 +694,14 @@ impl Monaged {
         let name = agent.record.name.clone();
         if agent.nudged {
             self.set_note(sub_id, format!("{name} finished without delivering its result. Reply to it, or stop the pipeline."));
+            // Not a silent wait: it's in Needs you, and the lead hears of it.
+            if self.stall.undelivered.insert(agent_id) {
+                self.chime(crate::sound::Cue::NeedsYou);
+                self.tell_lead(
+                    sub_id,
+                    format!("{name} finished twice without its result block, so the pipeline waits on it. Ask it with message_agent what's blocking it and to finish, or tell the user if it needs them."),
+                );
+            }
             return;
         }
         agent.nudged = true;

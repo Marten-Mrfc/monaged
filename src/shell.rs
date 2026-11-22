@@ -463,6 +463,10 @@ impl Monaged {
             for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub.id && !a.record.archived) {
                 let title = if self.vault.requests.iter().any(|r| r.agent_id == agent.record.id) {
                     Some("Wants to use secrets".to_string())
+                } else if self.stall.held.contains(&agent.record.id) {
+                    Some("Stalled".to_string())
+                } else if self.stall.undelivered.contains(&agent.record.id) {
+                    Some("Didn't deliver its result".to_string())
                 } else if agent.needs_attention() {
                     Some("Asks for permission".to_string())
                 } else if agent.open_form() || open_question(agent) {

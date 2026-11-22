@@ -85,6 +85,10 @@ It never merges into the top branch: in a project with only `main`, it stops wit
 
 Under the box, each autopilot run shows its stage, where it stands (in red when it needs you) and what the lead said last; click one for its dashboard, where you talk to the lead. The **Autopilot** switch on a dashboard turns it off (questions, the plan and the merge wait for you as usual) or on for any pipeline.
 
+## When a chat stalls
+
+Monaged keeps an eye on every working agent. A turn with no sign of life for 6 minutes (30 while a command, a subagent or compaction runs, and never while it waits for you) is stopped, and the agent is asked to continue where it left off; if the stop isn't answered either, its session is reopened with the same request. Turns that end in an error are asked again after 30 seconds, turns cut off by a lost connection continue when Claude is back, and a session that doesn't open within 3 minutes is opened again. Each of these shows in the conversation and the Activity tab. After three in an hour, the agent waits for you as **Stalled** in Needs you: send it a message, or restart its session from its menu. A pipeline agent that finishes twice without its result shows as **Didn't deliver its result**.
+
 ## The pipeline
 
 **Run pipeline** (in a new feature subproject, or Ctrl K) takes a sentence and runs:

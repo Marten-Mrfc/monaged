@@ -102,8 +102,58 @@ fn take(pool: &'static Slots) -> Slot {
     Slot { pool: Some(pool) }
 }
 
-fn slot() -> Slot {
-    take(&QUICK)
+/// The longest a `wsl.exe` may take before Monaged stops it: a hung one
+/// would otherwise hold its slot (and whatever waits on it, like a chat
+/// waiting for its checkpoint) forever.
+const QUICK_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Test runs, installs, `run_with_env` commands.
+const HEAVY_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// Clones and setup steps that stream their progress.
+const STREAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Waits for `child` at most `limit`, stopping it when it runs over. `read`
+/// takes stdout meanwhile. Returns how it ended and what it wrote to stderr.
+fn wait_within(mut child: std::process::Child, limit: std::time::Duration, read: impl FnOnce(std::process::ChildStdout)) -> Result<(std::process::ExitStatus, Vec<u8>)> {
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    let stdout = child.stdout.take().context("wsl stdout missing")?;
+    let mut stderr = child.stderr.take().context("wsl stderr missing")?;
+    let errors = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    let child = Arc::new(Mutex::new(child));
+    let fired = Arc::new(AtomicBool::new(false));
+    let (done, finished) = mpsc::channel::<()>();
+    let watchdog = {
+        let (child, fired) = (child.clone(), fired.clone());
+        std::thread::spawn(move || {
+            if let Err(mpsc::RecvTimeoutError::Timeout) = finished.recv_timeout(limit) {
+                fired.store(true, Ordering::SeqCst);
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                }
+            }
+        })
+    };
+    read(stdout);
+    // Its output can end before it does: the limit covers the wait too.
+    let status = loop {
+        let exited = child.lock().map_err(|_| anyhow::anyhow!("wsl.exe's handle was lost"))?.try_wait().context("waiting for wsl.exe failed")?;
+        if let Some(status) = exited {
+            break status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let _ = done.send(());
+    let _ = watchdog.join();
+    let stderr = errors.join().unwrap_or_default();
+    if fired.load(Ordering::SeqCst) {
+        bail!("wsl.exe didn't finish within {} minutes, so Monaged stopped it", limit.as_secs() / 60);
+    }
+    Ok((status, stderr))
 }
 
 impl Drop for Slot {
@@ -257,16 +307,16 @@ pub fn bash(distro: &str, script: &str) -> Command {
 /// changes scripts. Git never prompts for credentials here (it would hang
 /// without a terminal).
 pub fn run(distro: &str, script: &str) -> Result<String> {
-    run_in(&QUICK, distro, script)
+    run_in(&QUICK, QUICK_LIMIT, distro, script)
 }
 
 /// `run` for test runs and other scripts that take minutes and memory: only
 /// a couple at a time, apart from the quick calls.
 pub fn run_heavy(distro: &str, script: &str) -> Result<String> {
-    run_in(&HEAVY, distro, script)
+    run_in(&HEAVY, HEAVY_LIMIT, distro, script)
 }
 
-fn run_in(pool: &'static Slots, distro: &str, script: &str) -> Result<String> {
+fn run_in(pool: &'static Slots, limit: std::time::Duration, distro: &str, script: &str) -> Result<String> {
     if !installed() {
         bail!(NOT_INSTALLED);
     }
@@ -284,16 +334,26 @@ fn run_in(pool: &'static Slots, distro: &str, script: &str) -> Result<String> {
         let mut stdin = child.stdin.take().context("wsl stdin missing")?;
         stdin.write_all(format!("{PRELUDE}{TOOL_PATHS}\n{script}\n").as_bytes())?;
     }
-    let output = child.wait_with_output().context("waiting for wsl.exe failed")?;
-    if !output.status.success() {
-        let stderr = decode(&output.stderr);
-        let stdout = decode(&output.stdout);
+    finish(child, limit)
+}
+
+/// Waits (within `limit`) for a script started with its stdout and stderr
+/// piped; its trimmed stdout, or what went wrong.
+fn finish(child: std::process::Child, limit: std::time::Duration) -> Result<String> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    let (status, err) = wait_within(child, limit, |mut stdout| {
+        let _ = stdout.read_to_end(&mut out);
+    })?;
+    if !status.success() {
+        let stderr = decode(&err);
+        let stdout = decode(&out);
         let message = if stderr.trim().is_empty() { stdout } else { stderr };
         note_failure(&message);
         let short: Vec<&str> = message.trim().lines().take(4).collect();
         bail!("{}", short.join(" · "));
     }
-    Ok(decode(&output.stdout).trim().to_string())
+    Ok(decode(&out).trim().to_string())
 }
 
 /// Runs a script and hands over its output as it comes, split at line ends
@@ -332,7 +392,6 @@ fn stream_with(mut command: Command, script: &str, mut on_line: impl FnMut(&str)
         let mut stdin = child.stdin.take().context("wsl stdin missing")?;
         stdin.write_all(format!("{PRELUDE}exec 2>&1\n{script}\n").as_bytes())?;
     }
-    let mut stdout = child.stdout.take().context("wsl stdout missing")?;
     let mut all = String::new();
     let mut line: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
@@ -345,23 +404,24 @@ fn stream_with(mut command: Command, script: &str, mut on_line: impl FnMut(&str)
             line.clear();
         }
     };
-    loop {
-        let n = stdout.read(&mut buf).unwrap_or(0);
-        if n == 0 {
-            break;
-        }
-        for &b in &buf[..n] {
-            if b == b'\n' || b == b'\r' {
-                flush(&mut line, &mut all);
-            } else {
-                line.push(b);
+    let (status, err) = wait_within(child, STREAM_LIMIT, |mut stdout| {
+        loop {
+            let n = stdout.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if b == b'\n' || b == b'\r' {
+                    flush(&mut line, &mut all);
+                } else {
+                    line.push(b);
+                }
             }
         }
-    }
-    flush(&mut line, &mut all);
-    let output = child.wait_with_output().context("waiting for wsl.exe failed")?;
-    if !output.status.success() {
-        let stderr = decode(&output.stderr);
+        flush(&mut line, &mut all);
+    })?;
+    if !status.success() {
+        let stderr = decode(&err);
         let message = if stderr.trim().is_empty() { all.clone() } else { stderr };
         note_failure(&message);
         let tail: Vec<&str> = message.trim().lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
@@ -408,7 +468,8 @@ pub fn run_clean(distro: &str, script: &str) -> Result<String> {
     // Worked out before taking a slot: it may run a script of its own.
     let prelude = clean_prelude(distro);
     check_up()?;
-    let _slot = slot();
+    // Commands with secrets: tests and whatever you approved, so heavy.
+    let _slot = take(&HEAVY);
     let mut child = clean_command(distro)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -419,16 +480,7 @@ pub fn run_clean(distro: &str, script: &str) -> Result<String> {
         let mut stdin = child.stdin.take().context("wsl stdin missing")?;
         stdin.write_all(format!("{PRELUDE}{prelude}{script}\n").as_bytes())?;
     }
-    let output = child.wait_with_output().context("waiting for wsl.exe failed")?;
-    if !output.status.success() {
-        let stderr = decode(&output.stderr);
-        let stdout = decode(&output.stdout);
-        let message = if stderr.trim().is_empty() { stdout } else { stderr };
-        note_failure(&message);
-        let short: Vec<&str> = message.trim().lines().take(4).collect();
-        bail!("{}", short.join(" · "));
-    }
-    Ok(decode(&output.stdout).trim().to_string())
+    finish(child, HEAVY_LIMIT)
 }
 
 /// Single-quotes a string for bash.
@@ -503,9 +555,9 @@ mod health_tests {
         let threads: Vec<_> = (0..12)
             .map(|_| {
                 std::thread::spawn(|| {
-                    let _slot = slot();
+                    let _slot = take(&QUICK);
                     // Nested calls on the same thread don't wait for themselves.
-                    let _inner = slot();
+                    let _inner = take(&QUICK);
                     let n = NOW.fetch_add(1, Ordering::SeqCst) + 1;
                     MOST.fetch_max(n, Ordering::SeqCst);
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -517,6 +569,17 @@ mod health_tests {
             t.join().unwrap();
         }
         assert!(MOST.load(Ordering::SeqCst) <= MAX_PARALLEL - MAX_HEAVY);
+    }
+
+    #[test]
+    fn a_hung_command_is_stopped_at_its_limit() {
+        // Not wsl.exe, but the same waiting: a command that would run for a minute.
+        let child = Command::new("sleep").arg("60").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+        let Ok(child) = child else { return }; // no `sleep` here (Windows)
+        let started = std::time::Instant::now();
+        let err = wait_within(child, std::time::Duration::from_millis(300), |_| {}).unwrap_err();
+        assert!(err.to_string().contains("didn't finish"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]

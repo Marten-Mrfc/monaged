@@ -132,10 +132,12 @@ pub(crate) fn describe(event: &TimelineEvent, agent_name: &dyn Fn(Option<i64>) -
                 "gate" | "ci" => Icon::Shield,
                 "lead" => Icon::Flow,
                 "debug" => Icon::Ask,
+                "stall" => Icon::Refresh,
                 _ => Icon::Dot,
             };
             // Work held below the bar waits for you: worth seeing in red.
-            (glyph, event.data.clone(), matches!(what, "conflict" | "failed") || (what == "gate" && event.data.contains("waits for you")))
+            let waits = matches!(what, "gate" | "stall") && event.data.contains("waits for you");
+            (glyph, event.data.clone(), matches!(what, "conflict" | "failed") || waits)
         }
         _ => (Icon::Dot, event.data.clone(), false),
     }

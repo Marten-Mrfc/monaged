@@ -84,6 +84,7 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/acp.rs` | One `claude-agent-acp` process through `wsl.exe`, newline-delimited JSON-RPC |
 | `src/git.rs` | Repos, branches and worktrees inside WSL |
 | `src/store.rs` | SQLite storage and backups |
+| `src/stall.rs` | The stall guard: quiet turns stopped and continued, failed turns asked again, interrupted turns resumed after a reconnect, sessions that don't open reopened, an hourly cap |
 | `src/wsl_health.rs` | When WSL itself breaks: checking WSL after the Claude process stops, `wsl --shutdown` and reconnecting, Restart WSL (and its service, as administrator) |
 | `src/wsl.rs` | Runs scripts in WSL via `bash -s` over stdin, a few `wsl.exe` at a time, and holds them while WSL's service is broken |
 | `src/zed.rs` | `zed --wsl user@distro path` |

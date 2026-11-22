@@ -66,6 +66,7 @@ mod settings_ui;
 mod side_chat;
 mod signin;
 mod sound;
+mod stall;
 mod shell;
 mod ship;
 mod push_tool;
@@ -434,6 +435,8 @@ struct Monaged {
     reconnect: feedback::Reconnect,
     /// Checking and restarting WSL when its own service breaks.
     wsl_recovery: wsl_health::Recovery,
+    /// Notices chats that stopped moving and gets them going again.
+    stall: stall::Guard,
     settings_scroll: ScrollHandle,
     _clock: Task<()>,
     /// "system" or a theme key.
@@ -683,6 +686,7 @@ impl Monaged {
             queued_toasts: Vec::new(),
             reconnect: feedback::Reconnect::default(),
             wsl_recovery: wsl_health::Recovery::default(),
+            stall: stall::Guard::default(),
             settings_scroll: ScrollHandle::new(),
             _clock: Self::start_clock(cx),
             theme_key,
@@ -768,13 +772,17 @@ impl Monaged {
     fn drop_live_sessions(&mut self) {
         self.pending.clear();
         self.sessions.clear();
+        let mut interrupted = Vec::new();
         for agent in &mut self.agents {
             if agent.turn.take().is_some() {
-                agent.notice(Tone::Warn, "Interrupted: the connection to Claude was lost.");
+                agent.notice(Tone::Warn, "Interrupted: the connection to Claude was lost. It continues when Claude is back.");
+                interrupted.push(agent.record.id);
             }
             agent.live = false;
             agent.status = Status::Idle;
         }
+        // Picked up again after the reconnect, instead of waiting forever.
+        self.stall_interrupted(&interrupted);
     }
 
     fn agent_mut(&mut self, id: i64) -> Option<&mut AgentView> {
@@ -946,6 +954,7 @@ impl Monaged {
                         agent.turn = None;
                         agent.notice(Tone::Error, format!("Claude couldn't answer: {text}.{hint}"));
                     }
+                    self.stall_turn_failed(agent_id, &text);
                 }
             }
             return;
@@ -1026,6 +1035,7 @@ impl Monaged {
                 if let Some(agent) = self.agent_mut(agent_id) {
                     agent.finish_turn(&reason);
                 }
+                self.stall_turn_ended(agent_id, &reason);
                 // An answer to you, while you were elsewhere: new until you open it.
                 if reason != "cancelled" && !self.watching(agent_id) && self.agent(agent_id).is_some_and(|a| shell::prompted_by_you(a) && !self.lead_in_view(a)) {
                     self.unseen.insert(agent_id);
@@ -1488,7 +1498,9 @@ impl Monaged {
             agent.items.push(Item::Attachments(attachments.iter().map(|a| (a.name.clone(), a.preview.clone())).collect()));
         }
         agent.turn = Some(Turn { started: Instant::now(), first_words: None });
+        agent.activity = Instant::now();
         agent.user_turn = by_user || std::mem::take(&mut agent.user_queued);
+        self.stall_sent(agent_id);
         let mut prompt = vec![json!({ "type": "text", "text": text })];
         prompt.extend(attachments.iter().map(|a| a.content_block()));
         self.request("session/prompt", json!({ "sessionId": session_id, "prompt": prompt }), Pending::Prompt(agent_id));
