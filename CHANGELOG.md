@@ -4,6 +4,10 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-22
+
+Chats that stop moving get going again by themselves.
+
 ### Added
 
 - **Chats don't stall any more**: Monaged watches every working agent and gets stuck ones going again by itself.
