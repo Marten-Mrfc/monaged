@@ -4,6 +4,10 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-22
+
+Plans you can read, comment on and approve: full documents with drawn diagrams and tables, on their own page.
+
 ### Added
 
 - **The plan page**: a plan is a full document now, not just a card. The planner writes it in Markdown with:
