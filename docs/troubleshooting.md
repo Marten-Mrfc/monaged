@@ -24,6 +24,8 @@ Monaged writes a log to `%APPDATA%\Monaged\monaged.log` (the previous run's is `
 
 **My distro only has root.** The setup guide offers the same username and password form; **Create my user** makes the user, adds it to the usual groups (sudo among them) and makes it the default. If you'd rather keep using root, choose **Keep using root** (not recommended).
 
+**"Wsl/Service/E_UNEXPECTED", "Catastrophic failure" (Dutch: "Onherstelbare fout"), or "The Claude process stopped (exit code -1)".** WSL's own Windows service has stopped working; `wsl -d Ubuntu` fails in a terminal too. Monaged notices this, runs `wsl --shutdown` by itself and reconnects. If it's still broken, click **Restart WSL** in the bar: it also restarts WSL's service as administrator. By hand: `wsl --shutdown` in a terminal; if that hangs or doesn't help, `Restart-Service WSLService` in an administrator PowerShell, or restart Windows. If it keeps coming back, `wsl --update` and Windows Update are worth a try, and so is giving WSL more memory (`memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`) when many builders run at once.
+
 **I use another distro.** The setup guide lists the distros you have; click one to use it. Monaged remembers it. You can also start Monaged with `--distro <name>`.
 
 ## The Claude agent

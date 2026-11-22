@@ -14,6 +14,7 @@ mod accounts_ui;
 mod add_project;
 mod agent;
 mod attach;
+mod autopilot;
 mod changes_ui;
 mod checkpoints;
 mod coord;
@@ -85,6 +86,7 @@ mod uninstall;
 mod usage;
 mod usage_ui;
 mod wsl;
+mod wsl_health;
 mod zed;
 
 use std::collections::{HashMap, HashSet};
@@ -307,6 +309,8 @@ struct Monaged {
     lead_asks: Vec<lead::LeadAsk>,
     /// Merges into develop under way (or just finished), by subproject.
     ships: HashMap<i64, ship::Ship>,
+    /// The project chat's box in the project view on screen.
+    project_chat: Option<autopilot::ProjectChat>,
     /// One agent at a time instead of several side by side (Ctrl K, or the pane's button).
     one_pane: bool,
     /// The focused agent's changes in a pane beside it when there's room.
@@ -428,6 +432,8 @@ struct Monaged {
     /// Toasts raised while handling a message (no `cx` there); shown right after.
     queued_toasts: Vec<(Tone, String, Option<(&'static str, feedback::ToastAction)>)>,
     reconnect: feedback::Reconnect,
+    /// Checking and restarting WSL when its own service breaks.
+    wsl_recovery: wsl_health::Recovery,
     settings_scroll: ScrollHandle,
     _clock: Task<()>,
     /// "system" or a theme key.
@@ -602,6 +608,7 @@ impl Monaged {
             lead_reviews: HashSet::new(),
             lead_asks: Vec::new(),
             ships: HashMap::new(),
+            project_chat: None,
             one_pane: false,
             changes_beside: true,
             inputs: HashMap::new(),
@@ -675,6 +682,7 @@ impl Monaged {
             next_toast: 1,
             queued_toasts: Vec::new(),
             reconnect: feedback::Reconnect::default(),
+            wsl_recovery: wsl_health::Recovery::default(),
             settings_scroll: ScrollHandle::new(),
             _clock: Self::start_clock(cx),
             theme_key,
@@ -846,7 +854,8 @@ impl Monaged {
                 self.conn = Conn::Failed(err);
                 self.writer = None;
                 self.drop_live_sessions();
-                self.schedule_reconnect(cx);
+                // WSL itself may have broken: check before reconnecting.
+                self.connection_lost(cx);
             }
             AgentEvent::Exited(code) => {
                 if matches!(self.conn, Conn::Ready) {
@@ -856,7 +865,7 @@ impl Monaged {
                 self.conn = Conn::Failed(format!("The Claude process stopped (exit code {code})."));
                 self.writer = None;
                 self.drop_live_sessions();
-                self.schedule_reconnect(cx);
+                self.connection_lost(cx);
             }
         }
         for agent_id in std::mem::take(&mut self.finished_turns) {
@@ -1230,6 +1239,39 @@ impl Monaged {
         cx.notify();
     }
 
+    /// Makes the branch (off the project's base) and the subproject, then
+    /// calls `done` with its id.
+    fn make_subproject(
+        &mut self,
+        project_id: i64,
+        kind: SubKind,
+        name: String,
+        branch: String,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Self, anyhow::Result<i64>, &mut Context<Self>) + 'static,
+    ) {
+        let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() else {
+            done(self, Err(anyhow::anyhow!("This project is gone.")), cx);
+            return;
+        };
+        let distro = self.config.distro.clone();
+        cx.spawn(async move |view, cx| {
+            let (repo, b, base) = (project.path.clone(), branch.clone(), project.base_branch.clone());
+            let created = cx.background_spawn(async move { git::ensure_branch(&distro, &repo, &b, &base) }).await;
+            view.update(cx, |this, cx| {
+                let made = created.and_then(|_| this.store.add_subproject(project_id, &name, kind.as_str(), &branch)).map(|sub| {
+                    let id = sub.id;
+                    this.subprojects.push(sub);
+                    id
+                });
+                done(this, made, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn open_pipeline_form(&mut self, sub_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let request = cx.new(|cx| TextInput::new("What should be built?", cx));
         window.focus(&request.focus_handle(cx));
@@ -1238,7 +1280,6 @@ impl Monaged {
     }
 
     fn submit_form(&mut self, cx: &mut Context<Self>) {
-        let distro = self.config.distro.clone();
         match &mut self.form {
             Some(Form::NewProject(_)) => {
                 self.submit_add_project(cx);
@@ -1258,40 +1299,29 @@ impl Monaged {
                     cx.notify();
                     return;
                 }
-                let Some(project) = self.projects.iter().find(|p| p.id == *project_id).cloned() else { return };
                 let (project_id, kind) = (*project_id, *kind);
                 let branch = format!("{}/{}", kind.as_str(), git::slug(&sub_name));
                 *busy = true;
                 *error = None;
-                cx.spawn(async move |view, cx| {
-                    let (repo, b, base) = (project.path.clone(), branch.clone(), project.base_branch.clone());
-                    let created = cx.background_spawn(async move { git::ensure_branch(&distro, &repo, &b, &base) }).await;
-                    view.update(cx, |this, cx| {
-                        match created.and_then(|_| this.store.add_subproject(project_id, &sub_name, kind.as_str(), &branch)) {
-                            Ok(sub) => {
-                                let id = sub.id;
-                                this.subprojects.push(sub);
-                                this.form = None;
-                                this.select_sub(id, cx);
-                                if run_pipeline {
-                                    let request = if request.is_empty() { sub_name.clone() } else { request.clone() };
-                                    this.start_pipeline(id, request, auto_mode, cx);
-                                } else {
-                                    this.add_agent(id, cx);
-                                }
-                            }
-                            Err(err) => {
-                                if let Some(Form::NewSubproject { busy, error, .. }) = &mut this.form {
-                                    *busy = false;
-                                    *error = Some(format!("{err:#}"));
-                                }
-                            }
+                let name = sub_name.clone();
+                self.make_subproject(project_id, kind, sub_name, branch, cx, move |this, made, cx| match made {
+                    Ok(id) => {
+                        this.form = None;
+                        this.select_sub(id, cx);
+                        if run_pipeline {
+                            let request = if request.is_empty() { name.clone() } else { request.clone() };
+                            this.start_pipeline(id, request, auto_mode, cx);
+                        } else {
+                            this.add_agent(id, cx);
                         }
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
+                    }
+                    Err(err) => {
+                        if let Some(Form::NewSubproject { busy, error, .. }) = &mut this.form {
+                            *busy = false;
+                            *error = Some(format!("{err:#}"));
+                        }
+                    }
+                });
             }
             Some(Form::StartPipeline { sub_id, request, auto_mode, error, invalid }) => {
                 let text = request.read(cx).text().trim().to_string();
@@ -1523,6 +1553,10 @@ impl Monaged {
             return;
         }
         if self.setup_enter(window, cx) {
+            return;
+        }
+        if self.project_chat_focused(window, cx) {
+            self.project_chat_enter(window, cx);
             return;
         }
         if self.form.is_some() {
@@ -1940,6 +1974,10 @@ fn main() {
     }
     // Started as administrator by the setup guide to install WSL (no window;
     // see `onboarding::install_wsl_here`).
+    // Started as administrator by Restart WSL, when `wsl --shutdown` wasn't enough.
+    if args.get(1).map(String::as_str) == Some(wsl_health::RESTART_ARG) {
+        std::process::exit(wsl_health::restart_service_here());
+    }
     if args.get(1).map(String::as_str) == Some("--install-wsl") {
         std::process::exit(onboarding::install_wsl_here(args.get(2).map(std::path::PathBuf::from)));
     }

@@ -770,9 +770,39 @@ impl Monaged {
         self.connect(cx);
     }
 
+    /// The bar while WSL itself is broken, or being checked or restarted.
+    fn render_wsl_bar(&self, reason: &str, cx: &mut Context<Self>) -> AnyElement {
+        let running = self.wsl_recovery.running;
+        let text = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(div().text_color(rgb(theme::text())).child(if running { "Checking WSL…" } else { "WSL itself stopped working." }))
+            .child(div().font_family(theme::MONO).text_size(px(11.5)).text_color(rgb(theme::text_3())).truncate().child(reason.to_string()))
+            .into_any_element();
+        let reason_text = reason.to_string();
+        let code = self.wsl_recovery.broken.clone().unwrap_or_else(|| "Wsl/Service/E_UNEXPECTED".into());
+        self.notice_bar(text, !running)
+            .child(ui::button("wsl-copy", Kind::Ghost, Some(Icon::Copy), "Copy details").on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(reason_text.clone()));
+                this.toast(Tone::Info, "Copied to the clipboard", cx);
+            })))
+            .child(if running {
+                ui::busy_button("wsl-restart", Kind::Primary, "Restarting WSL…")
+            } else {
+                ui::button("wsl-restart", Kind::Primary, Some(Icon::Refresh), "Restart WSL")
+                    .tooltip(crate::shell::tip("Shuts WSL down and starts it again; if that isn't enough, restarts WSL's Windows service (Windows asks for administrator rights)"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.restart_wsl(code.clone(), true, cx)))
+            })
+            .into_any_element()
+    }
+
     /// The bar shown while Claude is unreachable.
     pub(crate) fn render_connection_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let Conn::Failed(reason) = &self.conn else { return None };
+        if self.wsl_recovery.running || self.wsl_recovery.broken.is_some() {
+            return Some(self.render_wsl_bar(reason, cx));
+        }
         let countdown = self.reconnect.at.map(|at| at.saturating_duration_since(Instant::now()).as_secs() + 1);
         let text = div()
             .flex()

@@ -426,6 +426,15 @@ Asked for: one agent at a time and a close button that works; Fix findings next 
 
 **Not tested yet:** a real lead on Claude (does it use its tools well and keep its replies short), and how much its updates cost over a long pipeline.
 
+### Release 0.11.0: project chat on autopilot, and WSL that stays up (done 2026-11-22)
+Asked for: in the project view, a title and a description, and an agent that does everything from there until it's merged into develop, asking only when it needs you and once for approval; and a fix for WSL crashing (`Wsl/Service/E_UNEXPECTED`, "The Claude process stopped (exit code -1)").
+
+- [x] **Project chat** (`src/autopilot.rs`): a box at the top of the project view starts a feature subproject on **autopilot**; its runs are listed under it with their stage, status and the lead's last word.
+- [x] **Autopilot** on a pipeline: questions go to the lead first (it answers what's settled, passes on what's yours); verification never stops at "build this?"; the plan always asks, once, and that covers the merge; four fix rounds instead of two; after the integrator, the merge into develop runs by itself even where develop "asks you", and a feature branch below the bar after develop came in gets its findings fixed (twice) instead of stopping. Never into the top branch. A switch on the dashboard turns it on or off for any pipeline.
+- [x] **WSL**: at most five `wsl.exe` at a time (two for test runs and other heavy scripts); WSL service errors recognised by their code in any language; calls held while the service is broken; after the Claude process stops, a probe, then `wsl --shutdown` and reconnect by itself (once per ten minutes); **Restart WSL** in the bar, which can restart WslService as administrator through the service manager.
+
+**Tested:** unit tests for the gates, fix rounds, branch names, the lead's brief, recognising service errors (the Dutch message included), the slot limits and holding calls (on Linux, with the Windows type-check and clippy clean). **Not tested on a real PC yet:** a full autopilot run on Claude, the automatic `wsl --shutdown` against a really broken WSL, and the elevated service restart. Why WSL broke on this PC isn't known for sure: the flood of `wsl.exe` is the likeliest cause Monaged had a hand in, and memory pressure from many builders is the other suspect.
+
 ### Release 0.9.0: pipelines that can pass review (done 2026-11-16)
 Asked for: pull the Mobietrain Rework run (7 builders, 6 stuck below the bar at 1–2/5) through Monaged's MCP tools, find out why, and improve the app.
 

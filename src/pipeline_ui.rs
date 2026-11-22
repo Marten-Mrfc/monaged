@@ -84,15 +84,22 @@ impl Monaged {
     // ---- Stage transitions ---------------------------------------------------
 
     pub(crate) fn start_pipeline(&mut self, sub_id: i64, request: String, auto_mode: bool, cx: &mut Context<Self>) {
-        let mut p = Pipeline::new(sub_id, request.clone(), auto_mode);
+        self.start_pipeline_with(sub_id, request, auto_mode, false, cx);
+    }
+
+    /// `autopilot`: the run goes all the way to develop by itself (the project chat).
+    pub(crate) fn start_pipeline_with(&mut self, sub_id: i64, request: String, auto_mode: bool, autopilot: bool, cx: &mut Context<Self>) {
+        let mut p = Pipeline::new(sub_id, request.clone(), auto_mode && !autopilot);
+        p.autopilot = autopilot;
         p.verifications = pipeline::empty_verifications();
         p.note = Some("The researcher is reading the code.".into());
         self.pipelines.insert(sub_id, p);
         self.save_pipeline(sub_id);
         self.mark_pipeline_started(sub_id);
         self.spawn_agent(sub_id, Self::role_spec("research", Role::Researcher, pipeline::researcher_brief(&request), false), cx);
-        // The lead oversees the run; you talk to it on the dashboard.
-        if self.lead_enabled() {
+        // The lead oversees the run; you talk to it on the dashboard. On
+        // autopilot it's the conversation itself, so it always starts.
+        if autopilot || self.lead_enabled() {
             self.start_lead(sub_id, cx);
         }
         cx.notify();
@@ -359,6 +366,7 @@ impl Monaged {
         // a planner asked "why?" during Build doesn't re-plan.
         let expected = p.expects(agent_id, &role);
         let auto = p.auto_mode;
+        let autopilot = p.autopilot;
 
         let questions: Vec<Question> = found.iter().filter_map(|d| if let Directive::Question(q) = d { Some(q.clone()) } else { None }).collect();
         if !questions.is_empty() {
@@ -377,7 +385,11 @@ impl Monaged {
                 let asked = questions.iter().map(|q| format!("\"{}\" ({})", q.question, q.labels().join(" / "))).collect::<Vec<_>>().join("; ");
                 self.tell_lead(
                     sub_id,
-                    format!("{name} asks the user: {asked}. If the user already told you the answer, give it to {name} with message_agent; otherwise leave it to the user (it's on the dashboard)."),
+                    if autopilot {
+                        crate::autopilot::question_update(&name, &asked)
+                    } else {
+                        format!("{name} asks the user: {asked}. If the user already told you the answer, give it to {name} with message_agent; otherwise leave it to the user (it's on the dashboard).")
+                    },
                 );
             }
             return;
@@ -415,7 +427,8 @@ impl Monaged {
                 p.verifications[slot] = value;
                 if p.verification_count() >= 2 {
                     p.stage = Stage::Decide;
-                    match pipeline::decide_gate(&p.verifications, auto) {
+                    let gate = if autopilot { pipeline::autopilot_decide_gate(&p.verifications) } else { pipeline::decide_gate(&p.verifications, auto) };
+                    match gate {
                         Gate::Auto(reason) => {
                             p.note = Some(format!("{reason}. Writing the plan."));
                             self.save_pipeline(sub_id);
@@ -434,7 +447,7 @@ impl Monaged {
             }
             (Role::Planner, Some(Directive::Plan(value))) => {
                 let allows = self.project_of(sub_id).map(|pr| pr.id).is_some_and(|id| self.project_auto_start(id));
-                let gate = self.budget_gate(&value, pipeline::plan_gate(&value, allows, auto));
+                let gate = if autopilot { pipeline::autopilot_plan_gate(&value) } else { self.budget_gate(&value, pipeline::plan_gate(&value, allows, auto)) };
                 let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
                 let title = pipeline::plan_title(&value);
                 p.plan = Some(value);
@@ -450,6 +463,9 @@ impl Monaged {
                         p.note = Some(format!("\"{title}\" is ready for your approval. {reason}."));
                         self.save_pipeline(sub_id);
                         self.tell_lead(sub_id, format!("The plan \"{title}\" waits for the user's approval on the dashboard ({reason})."));
+                        if autopilot {
+                            self.chime(crate::sound::Cue::NeedsYou);
+                        }
                     }
                 }
             }
@@ -533,7 +549,8 @@ impl Monaged {
         if !p.gate.pending.contains(&name) || matches!(p.stage, Stage::Stopped | Stage::Done) {
             return;
         }
-        match p.gate.step(&name, score, &why, min) {
+        let rounds = p.fix_rounds();
+        match p.gate.step(&name, score, &why, min, rounds) {
             pipeline::GateStep::Accept => {
                 p.gate.clear(&name);
                 self.gate_accept(sub_id, agent_id, false, cx);
@@ -541,14 +558,11 @@ impl Monaged {
             pipeline::GateStep::Fix(round) => {
                 p.gate.fix(&name, true);
                 let score = score.unwrap_or(0);
-                p.note = Some(format!(
-                    "{name} scored {score}/5, below the {min}/5 needed. Monaged sent it the findings to fix (round {round} of {}).",
-                    pipeline::MAX_FIX_ROUNDS
-                ));
+                p.note = Some(format!("{name} scored {score}/5, below the {min}/5 needed. Monaged sent it the findings to fix (round {round} of {rounds})."));
                 let _ = self.store.log_event(sub_id, Some(agent_id), "gate", &format!("{name}: {score}/5, sent back to fix (round {round})"));
                 self.save_pipeline(sub_id);
                 self.send_fix(agent_id);
-                self.tell_lead(sub_id, format!("{name} scored {score}/5 (the bar is {min}/5); Monaged sent it the findings to fix, round {round} of {}.", pipeline::MAX_FIX_ROUNDS));
+                self.tell_lead(sub_id, format!("{name} scored {score}/5 (the bar is {min}/5); Monaged sent it the findings to fix, round {round} of {rounds}."));
             }
             pipeline::GateStep::Hold(why) => {
                 p.gate.hold(&name, why.clone());
@@ -1087,7 +1101,16 @@ impl Monaged {
                         .items_center()
                         .gap_2()
                         .child(
-                            button("plan-approve", format!("Approve and build ({builders} builder{})", if builders == 1 { "" } else { "s" }), theme::PRIMARY_BG)
+                            button(
+                                "plan-approve",
+                                if self.pipelines.get(&sub_id).is_some_and(|p| p.autopilot) {
+                                    let target = self.merge_target(sub_id).unwrap_or_else(|| "develop".into());
+                                    format!("Approve: build and merge into {target}")
+                                } else {
+                                    format!("Approve and build ({builders} builder{})", if builders == 1 { "" } else { "s" })
+                                },
+                                theme::PRIMARY_BG,
+                            )
                                 .on_click(cx.listener(move |this, _, _, cx| this.start_build(sub_id, cx))),
                         )
                         .child(

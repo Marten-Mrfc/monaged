@@ -4,6 +4,27 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-22
+
+Project chat: describe a feature and Monaged takes it to develop on autopilot. And WSL that stays up, or comes back by itself.
+
+### Added
+
+- **Project chat**: describe a feature (a title and a description) at the top of a project's view, and Monaged takes it from there to merged into develop on **autopilot**: research, verification, a plan, builders, reviews, integration, bringing develop in, resolving conflicts and merging, the project's way. It asks you once to approve the plan (that's also your yes to the merge), and otherwise only what only you can decide:
+  - agents' questions go to the lead first, which answers what the request, research, plan or code settles and passes on only what's yours to decide;
+  - verifiers' major issues go to the planner instead of stopping at "build this?";
+  - work below the bar gets four automatic fix rounds instead of two;
+  - when the feature branch drops below the bar after develop came in, its agent gets the findings to fix and the merge goes on (twice), and develop moving underneath is retried;
+  - it never merges into the top branch: a project with only main stops with the work ready, in the inbox.
+
+  Each run is listed under the box with its stage, where it stands and the lead's last word. The **Autopilot** switch on a dashboard turns it off, or on for any pipeline. Autopilot always starts a lead, even when leads are off in Settings.
+- **Restart WSL**: when WSL itself breaks (`Wsl/Service/E_UNEXPECTED`, "Catastrophic failure", or the Claude process stopping with exit code -1 while `wsl -d Ubuntu` fails in your own terminal too), Monaged now notices, runs `wsl --shutdown` by itself (at most once every ten minutes), checks WSL again and reconnects. If that isn't enough, the connection bar says WSL itself stopped working and offers **Restart WSL**, which also restarts WSL's Windows service as administrator (Windows asks first), so you don't have to restart Windows.
+
+### Fixed
+
+- **WSL kept crashing under load**: every git call, diff, review and test run started its own `wsl.exe`, with no limit, so a busy pipeline could start dozens at once, and a burst like that is what leaves WSL's service failing every call. Monaged now runs at most five `wsl.exe` commands at a time, and at most two of them are test runs and other heavy scripts, so ten builders' reviews don't install and test all at once and quick git calls never wait behind them.
+- **Reconnecting into a broken WSL**: while WSL's service was failing, Monaged kept starting `wsl.exe` (refreshes, reviews, reconnects), each one failing again. It now holds its WSL commands until WSL is back, and says so instead of showing each failure.
+
 ## [0.10.1] - 2026-11-17
 
 ### Fixed

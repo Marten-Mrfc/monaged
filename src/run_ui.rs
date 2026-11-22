@@ -188,7 +188,7 @@ fn run_tests(distro: &str, worktree: &str, command: &str, times: usize, exports:
     let mut any_failed = false;
     for _ in 0..times.max(1) {
         let script = format!("cd {} || exit 1\n{exports}/usr/bin/timeout 900 /bin/bash -c {} 2>&1\necho \"MONAGED_EXIT $?\"", shell_path(worktree), quote(command));
-        let out = if exports.is_empty() { run(distro, &script)? } else { crate::wsl::run_clean(distro, &script)? };
+        let out = if exports.is_empty() { crate::wsl::run_heavy(distro, &script)? } else { crate::wsl::run_clean(distro, &script)? };
         let out = crate::env::mask_names(&out).0;
         let (body, code) = out.rsplit_once("MONAGED_EXIT ").map(|(b, c)| (b.to_string(), c.trim().parse::<i32>().unwrap_or(1))).unwrap_or((out.clone(), 1));
         let ok = code == 0;

@@ -72,6 +72,7 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/merge_ui.rs` | Branch chain and rules, merging, promotions, push, merge/pull requests, cleanup, auto-merge |
 | `src/hosting.rs` | GitHub/GitLab remote parsing; pull/merge requests and CI through the REST API with your account, or the `gh`/`glab` CLIs |
 | `src/pipeline.rs` | Roles, stages, briefs, `monaged-*` block parsing, and the gate rules |
+| `src/autopilot.rs` | The project chat in a project's view, and autopilot: what it decides itself, the lead's autopilot brief, fixing and retrying the merge into develop |
 | `src/pipeline_ui.rs` | Running the pipeline after each turn; gate, plan and question cards; the pipeline strip |
 | `src/review_ui.rs` | The Changes tab, the summary and confidence flows, Markdown rendering, Settings |
 | `src/review.rs` | Summary and review prompts, running the project's tests, and the 1–5 scoring rules |
@@ -83,7 +84,8 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/acp.rs` | One `claude-agent-acp` process through `wsl.exe`, newline-delimited JSON-RPC |
 | `src/git.rs` | Repos, branches and worktrees inside WSL |
 | `src/store.rs` | SQLite storage and backups |
-| `src/wsl.rs` | Runs scripts in WSL via `bash -s` over stdin |
+| `src/wsl_health.rs` | When WSL itself breaks: checking WSL after the Claude process stops, `wsl --shutdown` and reconnecting, Restart WSL (and its service, as administrator) |
+| `src/wsl.rs` | Runs scripts in WSL via `bash -s` over stdin, a few `wsl.exe` at a time, and holds them while WSL's service is broken |
 | `src/zed.rs` | `zed --wsl user@distro path` |
 | `src/text_input.rs` | Text input adapted from GPUI's example |
 | `build.rs` | Embeds the icon and version info in the Windows exe (needs `rc.exe` from the Windows SDK) |

@@ -471,9 +471,20 @@ impl Monaged {
         if state.busy || !state.conflict.is_empty() {
             return;
         }
-        if self.policy(project_id, &target) != Policy::Auto {
-            self.set_merge_message(sub_id, Tone::Info, format!("Ready to merge into {target}. This project asks you first."));
-            return;
+        // On autopilot, approving the plan was the answer to "merge into develop?";
+        // the top branch (a project with only main) stays yours.
+        let autopilot = self.pipelines.get(&sub_id).is_some_and(|p| p.autopilot);
+        match self.policy(project_id, &target) {
+            Policy::Auto => {}
+            Policy::Ask if autopilot => {}
+            Policy::Confirm if autopilot => {
+                self.set_merge_message(sub_id, Tone::Warn, crate::autopilot::top_branch_note(&target));
+                return;
+            }
+            _ => {
+                self.set_merge_message(sub_id, Tone::Info, format!("Ready to merge into {target}. This project asks you first."));
+                return;
+            }
         }
         // The score has to be of what's there now.
         let integrator = self.agents.iter().rev().find(|a| a.record.subproject_id == sub_id && !a.record.archived && a.role() == Role::Integrator);

@@ -31,6 +31,9 @@ pub enum Step {
     Resolving,
     /// The feature branch changed: its review has to reach the bar again.
     Reviewing(i64),
+    /// On autopilot: that review was below the bar, so the agent on the
+    /// feature branch got the findings to fix; reviewed again after its turn.
+    Fixing(i64),
     /// Merging into the target, the project's way.
     Merging,
     Done,
@@ -45,6 +48,8 @@ pub struct Ship {
     pub status: String,
     /// Times the target was brought in: it can move while we work.
     pub rounds: u8,
+    /// On autopilot: times it fixed findings or started over instead of stopping.
+    pub retries: u8,
 }
 
 impl Ship {
@@ -55,7 +60,7 @@ impl Ship {
     /// 1-3 for the card's steps.
     pub fn number(&self) -> usize {
         match self.step {
-            Step::Updating | Step::Resolving | Step::Reviewing(_) => 2,
+            Step::Updating | Step::Resolving | Step::Reviewing(_) | Step::Fixing(_) => 2,
             Step::Merging | Step::Done => 3,
             Step::Stuck => 0,
         }
@@ -109,7 +114,7 @@ impl Monaged {
         }
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return "This subproject is gone.".into() };
         let Some(target) = self.merge_target(sub_id) else { return "This project has no branch to merge into.".into() };
-        self.ships.insert(sub_id, Ship { step: Step::Updating, target: target.clone(), status: String::new(), rounds: 0 });
+        self.ships.insert(sub_id, Ship { step: Step::Updating, target: target.clone(), status: String::new(), rounds: 0, retries: 0 });
         let _ = self.store.log_event(sub_id, None, "merge", &format!("Merge into {target} started by {by}"));
         // Nobody may be changing the branch while it merges.
         if let Some(name) = self.feature_agent(sub_id).and_then(|id| self.agent(id)).filter(|a| a.is_working()).map(|a| a.record.name.clone()) {
@@ -139,7 +144,7 @@ impl Monaged {
         self.ships.get(&sub_id).map(|s| s.status.clone()).unwrap_or_default()
     }
 
-    fn set_ship_step(&mut self, sub_id: i64, step: Step) {
+    pub(crate) fn set_ship_step(&mut self, sub_id: i64, step: Step) {
         if let Some(s) = self.ships.get_mut(&sub_id) {
             s.step = step;
         }
@@ -153,7 +158,7 @@ impl Monaged {
         ship.step = Step::Updating;
         ship.rounds += 1;
         let (target, rounds) = (ship.target.clone(), ship.rounds);
-        if rounds > MAX_ROUNDS {
+        if rounds > MAX_ROUNDS && !self.autopilot_ship_again(sub_id, cx) {
             self.ship_stuck(sub_id, format!("{target} kept changing while merging ({MAX_ROUNDS} rounds). Try again in a moment."), cx);
             return;
         }
@@ -244,6 +249,13 @@ impl Monaged {
     pub(crate) fn ship_after_turn(&mut self, agent_id: i64, cx: &mut Context<Self>) {
         let Some(agent) = self.agent(agent_id) else { return };
         let (sub_id, name, branch) = (agent.record.subproject_id, agent.record.name.clone(), agent.record.branch.clone());
+        // On autopilot: it fixed the findings; review again, then the merge goes on.
+        if self.ships.get(&sub_id).is_some_and(|s| s.step == Step::Fixing(agent_id)) {
+            self.set_ship_step(sub_id, Step::Reviewing(agent_id));
+            self.ship_say(sub_id, format!("{name} is done with the findings. Reviewing its work again before merging."), cx);
+            self.review_fresh(agent_id, cx);
+            return;
+        }
         if !self.ships.get(&sub_id).is_some_and(|s| s.step == Step::Resolving) {
             return;
         }
@@ -271,6 +283,7 @@ impl Monaged {
         let min = self.min_score();
         match score {
             Some(score) if score >= min => self.ship_update(sub_id, cx),
+            Some(score) if self.autopilot_fix_before_merge(sub_id, agent_id, score, cx) => {}
             Some(score) => {
                 let findings: Vec<String> = self
                     .agent(agent_id)
@@ -296,6 +309,7 @@ impl Monaged {
             // Merged, or a request is open and merges once the host allows it.
             self.set_ship_step(sub_id, Step::Done);
             self.ship_say(sub_id, text.to_string(), cx);
+            self.autopilot_landed(sub_id, merged, cx);
         } else if !conflict.is_empty() {
             // The target moved in the meantime: bring it in again.
             self.ship_update(sub_id, cx);
@@ -305,7 +319,7 @@ impl Monaged {
     }
 
     /// Says where it stands: on the card, in the Merge tab and to the lead.
-    fn ship_say(&mut self, sub_id: i64, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn ship_say(&mut self, sub_id: i64, text: String, cx: &mut Context<Self>) {
         if let Some(s) = self.ships.get_mut(&sub_id) {
             s.status = text.clone();
         }
@@ -436,10 +450,12 @@ mod tests {
 
     #[test]
     fn steps_are_numbered_for_the_card() {
-        let ship = |step| Ship { step, target: "develop".into(), status: String::new(), rounds: 0 };
+        let ship = |step| Ship { step, target: "develop".into(), status: String::new(), rounds: 0, retries: 0 };
         assert_eq!(ship(Step::Updating).number(), 2);
         assert_eq!(ship(Step::Resolving).number(), 2);
         assert_eq!(ship(Step::Reviewing(3)).number(), 2);
+        assert_eq!(ship(Step::Fixing(3)).number(), 2);
+        assert!(ship(Step::Fixing(3)).running());
         assert_eq!(ship(Step::Merging).number(), 3);
         assert!(ship(Step::Merging).running() && !ship(Step::Done).running() && !ship(Step::Stuck).running());
     }

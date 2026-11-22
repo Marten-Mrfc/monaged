@@ -132,6 +132,10 @@ pub struct Pipeline {
     pub stage: Stage,
     pub request: String,
     pub auto_mode: bool,
+    /// Started from the project chat: Monaged takes it from the request to
+    /// merged into develop by itself, asking you only what only you can
+    /// decide and once to approve the plan. See `crate::autopilot`.
+    pub autopilot: bool,
     pub research: Option<Value>,
     /// Indexed by verifier number - 1.
     pub verifications: Vec<Value>,
@@ -177,12 +181,20 @@ impl Pipeline {
         self.gate.held.iter_mut().for_each(|(n, _)| swap(n));
         self.gate.rounds.iter_mut().for_each(|(n, _)| swap(n));
     }
+
+    /// Automatic fix rounds before the quality gate asks you: an autopilot
+    /// run tries harder on its own, because asking you is what it avoids.
+    pub fn fix_rounds(&self) -> u8 {
+        if self.autopilot { AUTOPILOT_FIX_ROUNDS } else { MAX_FIX_ROUNDS }
+    }
 }
 
 /// The lowest confidence score that integrates or merges without asking you.
 pub const DEFAULT_MIN_SCORE: u8 = 4;
 /// How many times Monaged sends the findings back before it asks you.
 pub const MAX_FIX_ROUNDS: u8 = 2;
+/// The same for an autopilot run.
+pub const AUTOPILOT_FIX_ROUNDS: u8 = 4;
 
 /// Builders and the integrator only count as done once a review scores their
 /// work at the bar (4/5 by default). Below it, Monaged sends the findings
@@ -246,13 +258,14 @@ impl QualityGate {
     }
 
     /// The decision for a finished review: `score` is None when the work
-    /// couldn't be scored (`why` says why).
-    pub fn step(&self, name: &str, score: Option<u8>, why: &str, min: u8) -> GateStep {
+    /// couldn't be scored (`why` says why). `max_rounds`: automatic fix rounds
+    /// before it asks you (`Pipeline::fix_rounds`).
+    pub fn step(&self, name: &str, score: Option<u8>, why: &str, min: u8, max_rounds: u8) -> GateStep {
         match score {
             Some(score) if score >= min => GateStep::Accept,
             Some(score) => {
                 let used = self.rounds_for(name);
-                if used < MAX_FIX_ROUNDS {
+                if used < max_rounds {
                     GateStep::Fix(used + 1)
                 } else {
                     GateStep::Hold(format!(
@@ -303,6 +316,7 @@ impl Pipeline {
             stage: Stage::Research,
             request,
             auto_mode,
+            autopilot: false,
             research: None,
             verifications: Vec::new(),
             plan: None,
@@ -549,6 +563,29 @@ pub fn plan_gate(plan: &Value, project_allows_auto: bool, auto_mode: bool) -> Ga
         return Gate::Ask("This project always asks before building".into());
     }
     Gate::Auto(format!("Small, no risk flags, confidence {confidence}/5"))
+}
+
+/// After verification, on autopilot: always go on to the plan. Major issues
+/// the verifiers found go to the planner with their reports, and you see the
+/// plan (your one approval) before anything is built.
+pub fn autopilot_decide_gate(verifications: &[Value]) -> Gate {
+    let major = verifications.iter().filter(|v| v["verdict"] == "major_issues").count();
+    match major {
+        0 => Gate::Auto("Both verifiers confirmed the research".into()),
+        n => Gate::Auto(format!(
+            "{n} verifier{} found major issues; the planner works from their reports, and you see the plan before anything is built",
+            if n == 1 { "" } else { "s" }
+        )),
+    }
+}
+
+/// The plan on autopilot: the one thing it always asks you. After this it
+/// builds, reviews, integrates and merges into develop without asking again.
+pub fn autopilot_plan_gate(plan: &Value) -> Gate {
+    let risks: Vec<&str> = plan["risk_flags"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let size = plan["size"].as_str().unwrap_or("large");
+    let what = if risks.is_empty() { format!("A {size} plan") } else { format!("A {size} plan, flagged {}", risks.join(", ").replace('_', " ")) };
+    Gate::Ask(format!("{what}. Autopilot asks once: approve it, and Monaged builds, reviews and merges it into develop by itself"))
 }
 
 #[derive(Clone, Debug)]

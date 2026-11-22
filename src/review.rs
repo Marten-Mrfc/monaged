@@ -254,7 +254,8 @@ printf '%s\n' "$out" | tail -n 30"#,
         js = JS_PACKAGE_MANAGER,
         runner = runner(fence),
     );
-    let out = match run(distro, &script) {
+    // Installs and tests: a couple at a time across all reviews (`wsl::run_heavy`).
+    let out = match crate::wsl::run_heavy(distro, &script) {
         Ok(out) => out,
         Err(err) => return Checks::Unavailable(format!("{err:#}")),
     };
@@ -397,7 +398,7 @@ printf '%s\n' "$out" | grep -E '^\s*(FAIL|ERROR:|--- FAIL|✕|×|test .*FAILED$)
         runner = runner(fence),
         strip = STRIP_COLORS,
     );
-    let out = run(distro, &script).ok()?;
+    let out = crate::wsl::run_heavy(distro, &script).ok()?;
     let code: i32 = out.lines().find_map(|l| l.strip_prefix("MONAGED_EXIT ")).and_then(|c| c.trim().parse().ok())?;
     let result = (code != 0).then(|| out.lines().skip_while(|l| !l.starts_with("MONAGED_EXIT")).skip(1).collect::<Vec<_>>().join("\n"));
     if let Ok(mut cache) = BASE_RESULTS.lock() {

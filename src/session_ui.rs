@@ -70,7 +70,7 @@ impl Monaged {
 
     pub(crate) fn make_composer(&mut self, agent_id: i64, cx: &mut Context<Self>) -> Entity<TextInput> {
         let (name, history) = self.agent(agent_id).map(|a| (a.record.name.clone(), a.typed_messages())).unwrap_or_default();
-        let ctrl_send = self.store.setting("composer:send").as_deref() == Some("ctrl-enter");
+        let ctrl_send = self.ctrl_send();
         let input = cx.new(|cx| {
             let mut input = TextInput::new(format!("Message {name}   ·   / for commands"), cx).bare().multiline();
             input.set_history(history);

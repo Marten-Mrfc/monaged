@@ -1,6 +1,6 @@
 [package]
 name = "monaged"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 publish = false
 description = "Monaged: run Claude Code agents on your projects, inside WSL, from one native window"
@@ -37,6 +37,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_Power",
     "Win32_System_Registry",
+    "Win32_System_Services",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

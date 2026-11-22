@@ -255,6 +255,60 @@ mod imp {
         }
     }
 
+    /// Restarts a Windows service (as administrator): asks it to stop, ends
+    /// its process when it won't, then starts it. `Ok(false)` when there's no
+    /// such service.
+    pub fn restart_service(name: &str) -> Result<bool> {
+        use std::time::{Duration, Instant};
+        use windows::Win32::System::Services::{
+            CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT,
+            SC_STATUS_PROCESS_INFO, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STATUS, SERVICE_STATUS_PROCESS,
+            SERVICE_STOP, SERVICE_STOPPED, StartServiceW,
+        };
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+        let service_name = HSTRING::from(name);
+        // SAFETY: every handle opened here is closed before returning; the
+        // status structs are plain data sized as the calls expect.
+        unsafe {
+            let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+                .map_err(|e| anyhow::anyhow!("couldn't open Windows' service manager: {}", e.message()))?;
+            let Ok(service) = OpenServiceW(scm, PCWSTR(service_name.as_ptr()), SERVICE_STOP | SERVICE_START | SERVICE_QUERY_STATUS) else {
+                let _ = CloseServiceHandle(scm);
+                return Ok(false);
+            };
+            let query = || -> Option<SERVICE_STATUS_PROCESS> {
+                let mut status = SERVICE_STATUS_PROCESS::default();
+                let mut needed = 0u32;
+                let bytes = std::slice::from_raw_parts_mut(&mut status as *mut _ as *mut u8, std::mem::size_of::<SERVICE_STATUS_PROCESS>());
+                QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, Some(bytes), &mut needed).ok()?;
+                Some(status)
+            };
+            let stopped = |s: &Option<SERVICE_STATUS_PROCESS>| s.as_ref().is_some_and(|s| s.dwCurrentState == SERVICE_STOPPED);
+            let mut status = SERVICE_STATUS::default();
+            let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
+            let started = Instant::now();
+            while !stopped(&query()) && started.elapsed() < Duration::from_secs(20) {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            // A service that hangs doesn't stop when asked: end its process.
+            if let Some(pid) = query().filter(|s| s.dwCurrentState != SERVICE_STOPPED).map(|s| s.dwProcessId).filter(|&p| p != 0)
+                && let Ok(process) = OpenProcess(PROCESS_TERMINATE, false, pid)
+            {
+                let _ = TerminateProcess(process, 1);
+                let _ = CloseHandle(process);
+                let again = Instant::now();
+                while !stopped(&query()) && again.elapsed() < Duration::from_secs(10) {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            }
+            let result = StartServiceW(service, None).map_err(|e| anyhow::anyhow!("couldn't start {name} again: {}", e.message()));
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+            result?;
+            Ok(true)
+        }
+    }
+
     /// The user's Downloads folder (wherever they moved it).
     pub fn downloads_dir() -> Option<std::path::PathBuf> {
         use windows::Win32::System::Com::CoTaskMemFree;
@@ -407,6 +461,9 @@ mod imp {
     }
     pub fn create_shortcut(_: &Path, _: &Path, _: &str, _: &str) -> Result<()> {
         bail!("shortcuts are made on Windows only")
+    }
+    pub fn restart_service(_: &str) -> Result<bool> {
+        Ok(false)
     }
     pub fn run_elevated(_: &Path, _: &str) -> Result<u32> {
         bail!("running as administrator works on Windows only")

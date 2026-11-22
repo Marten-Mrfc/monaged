@@ -21,7 +21,9 @@ pub const UPDATE_PREFIX: &str = "[monaged-update]";
 /// The most agents the lead may have running in one subproject.
 const MAX_AGENTS: usize = 8;
 
-pub fn brief(sub: &str, branch: &str, request: Option<&str>) -> String {
+/// `autopilot` adds what the lead does differently on an autopilot run.
+pub fn brief(sub: &str, branch: &str, request: Option<&str>, autopilot: bool) -> String {
+    let autopilot = if autopilot { format!("{}\n\n", crate::autopilot::lead_section()) } else { String::new() };
     let request = match request.map(str::trim).filter(|r| !r.is_empty()) {
         Some(r) => format!("## What the user asked for\n{r}"),
         None => "## What the user asked for\nNothing yet: the user will tell you on the dashboard.".to_string(),
@@ -55,7 +57,7 @@ pub fn brief(sub: &str, branch: &str, request: Option<&str>) -> String {
          ```monaged-question\n\
          {{\"header\": \"Topic\", \"question\": \"...?\", \"why\": \"how the answer changes the work\", \"options\": [{{\"label\": \"...\", \"description\": \"what it means\"}}, {{\"label\": \"...\", \"description\": \"...\"}}], \"recommended\": 0}}\n\
          ```\n\n\
-         {request}\n\n\
+         {autopilot}{request}\n\n\
          Start with `team_status`, then greet the user in two sentences at most: where things stand and what (if anything) \
          waits for them.",
         header = pipeline::BRIEF_HEADER,
@@ -165,12 +167,13 @@ impl Monaged {
         }
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id).cloned() else { return };
         let request = self.pipelines.get(&sub_id).map(|p| p.request.clone());
+        let autopilot = self.pipelines.get(&sub_id).is_some_and(|p| p.autopilot);
         self.starting_lead.insert(sub_id);
         let spec = AgentSpec {
             name: "lead".into(),
             role: Role::Lead,
             on_feature_branch: false,
-            brief: Some(brief(&sub.name, &sub.branch, request.as_deref())),
+            brief: Some(brief(&sub.name, &sub.branch, request.as_deref(), autopilot)),
             select: false,
             merge_from: Vec::new(),
         };

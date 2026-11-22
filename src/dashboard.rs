@@ -113,7 +113,7 @@ impl Monaged {
                     )
                     .child(actions),
             )
-            .children(pipeline.map(|p| self.render_stage_strip(sub_id, p.stage, p.auto_mode, cx)));
+            .children(pipeline.map(|p| self.render_stage_strip(sub_id, p.stage, p.auto_mode, p.autopilot, cx)));
 
         // ---- The request and where it stands
         let request = pipeline.map(|p| p.request.clone()).or_else(|| {
@@ -250,7 +250,7 @@ impl Monaged {
             .into_any_element()
     }
 
-    fn render_stage_strip(&self, sub_id: i64, stage: Stage, auto_mode: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_stage_strip(&self, sub_id: i64, stage: Stage, auto_mode: bool, autopilot: bool, cx: &mut Context<Self>) -> AnyElement {
         let current = STAGES.iter().position(|s| *s == stage);
         div()
             .flex()
@@ -281,10 +281,18 @@ impl Monaged {
             }))
             .when(stage == Stage::Stopped, |d| d.child(ui::mono("stopped")))
             .child(div().flex_1())
+            // Autopilot decides more than auto mode does, so only one of them shows.
+            .when(!autopilot, |d| {
+                d.child(
+                    ui::switch(("dash-auto", sub_id as usize), "Auto mode", auto_mode)
+                        .tooltip(tip("Answer the agents' questions with the recommended option and start small, safe plans by themselves"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_auto_mode(sub_id, cx))),
+                )
+            })
             .child(
-                ui::switch(("dash-auto", sub_id as usize), "Auto mode", auto_mode)
-                    .tooltip(tip("Answer the agents' questions with the recommended option and start small, safe plans by themselves"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_auto_mode(sub_id, cx))),
+                ui::switch(("dash-autopilot", sub_id as usize), "Autopilot", autopilot)
+                    .tooltip(tip("Take it to develop by itself: ask once for the plan, and otherwise only what only you can decide. Off: questions, the plan and the merge wait for you"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_autopilot(sub_id, cx))),
             )
             .into_any_element()
     }

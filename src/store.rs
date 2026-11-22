@@ -227,6 +227,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE pipelines ADD COLUMN gate TEXT",
     "ALTER TABLE pipelines ADD COLUMN members TEXT",
     "ALTER TABLE subprojects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE pipelines ADD COLUMN autopilot INTEGER NOT NULL DEFAULT 0",
 ];
 
 /// How many startup backups to keep.
@@ -422,10 +423,10 @@ impl Store {
     pub fn save_pipeline(&self, p: &Pipeline) -> Result<()> {
         let json = |v: &Option<serde_json::Value>| v.as_ref().map(|v| v.to_string());
         self.conn.execute(
-            "INSERT INTO pipelines (subproject_id, stage, request, auto_mode, research, verifications, plan, done, note, gate, members)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO pipelines (subproject_id, stage, request, auto_mode, research, verifications, plan, done, note, gate, members, autopilot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(subproject_id) DO UPDATE SET stage = ?2, request = ?3, auto_mode = ?4, research = ?5,
-             verifications = ?6, plan = ?7, done = ?8, note = ?9, gate = ?10, members = ?11, updated_at = strftime('%s','now')",
+             verifications = ?6, plan = ?7, done = ?8, note = ?9, gate = ?10, members = ?11, autopilot = ?12, updated_at = strftime('%s','now')",
             params![
                 p.subproject_id,
                 p.stage.as_str(),
@@ -438,6 +439,7 @@ impl Store {
                 p.note,
                 p.gate.to_json().to_string(),
                 serde_json::to_string(&p.members)?,
+                p.autopilot,
             ],
         )?;
         Ok(())
@@ -446,7 +448,7 @@ impl Store {
     pub fn pipelines(&self) -> Result<HashMap<i64, Pipeline>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT subproject_id, stage, request, auto_mode, research, verifications, plan, done, note, gate, members FROM pipelines")?;
+            .prepare("SELECT subproject_id, stage, request, auto_mode, research, verifications, plan, done, note, gate, members, autopilot FROM pipelines")?;
         let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
         let rows = stmt.query_map([], |r| {
             let subproject_id: i64 = r.get(0)?;
@@ -457,6 +459,7 @@ impl Store {
                     stage: Stage::parse(&r.get::<_, String>(1)?),
                     request: r.get(2)?,
                     auto_mode: r.get(3)?,
+                    autopilot: r.get(11)?,
                     research: parse(r.get(4)?),
                     verifications: parse(r.get(5)?)
                         .and_then(|v| v.as_array().cloned())

@@ -448,6 +448,17 @@ impl Monaged {
                 for (name, _) in &p.gate.held {
                     out.push(Inbox { title: "Below the bar".into(), detail: format!("{} · {name}", sub.name), sub_id: sub.id, agent_id: None });
                 }
+                // On autopilot nobody else picks up a merge that stopped, or
+                // one into the top branch, which stays yours.
+                if p.autopilot && self.ships.get(&sub.id).is_some_and(|s| s.step == crate::ship::Step::Stuck) {
+                    out.push(Inbox { title: "Autopilot stopped at the merge".into(), detail: sub.name.clone(), sub_id: sub.id, agent_id: None });
+                } else if p.autopilot && p.stage == Stage::Done && !self.ships.contains_key(&sub.id) {
+                    let target = self.merge_target(sub.id);
+                    let ahead = target.as_ref().and_then(|t| self.branch_info.get(&sub.project_id)?.ahead.get(&(sub.branch.clone(), t.clone())).copied());
+                    if let Some(t) = target.filter(|t| ahead.is_some_and(|n| n > 0) && self.policy(sub.project_id, t) == crate::merge_ui::Policy::Confirm) {
+                        out.push(Inbox { title: format!("Ready for you to merge into {t}"), detail: sub.name.clone(), sub_id: sub.id, agent_id: None });
+                    }
+                }
             }
             for agent in self.agents.iter().filter(|a| a.record.subproject_id == sub.id && !a.record.archived) {
                 let title = if self.vault.requests.iter().any(|r| r.agent_id == agent.record.id) {
@@ -525,6 +536,13 @@ impl Monaged {
             }
             (true, false) => self.columns(main_w),
         };
+        // The project view's chat box needs its inputs before it's drawn.
+        if self.form.is_none()
+            && self.sel_sub.is_none()
+            && let Some(project_id) = self.sel_project
+        {
+            self.prepare_project_chat(project_id, cx);
+        }
         if let Some(sub_id) = self.sel_sub {
             self.load_pane_weights(sub_id, columns.len());
             if self.inspector_tab == InspectorTab::Git && self.inspector_open {
@@ -2382,6 +2400,7 @@ impl Monaged {
                                     .on_click(cx.listener(move |this, _, window, cx| this.open_sub_form(project_id, window, cx))),
                             ),
                     )
+                    .child(self.render_project_chat(project_id, cx))
                     .child(widgets)
                     .child(if wide {
                         div().flex().gap(px(28.)).items_start().child(div().flex_1().min_w(px(0.)).child(subprojects)).child(div().flex_1().min_w(px(0.)).child(branches))

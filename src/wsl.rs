@@ -48,6 +48,185 @@ pub fn installed() -> bool {
 
 const NOT_INSTALLED: &str = "WSL isn't installed on this PC. Ctrl K → Setup guide installs it.";
 
+// ---- Keeping WSL's own service healthy -------------------------------------------
+//
+// Every `wsl.exe` asks WSL's Windows service (WslService) for a new session.
+// Monaged used to start as many as it liked at once (git for every panel,
+// diffs, reviews, checks, ten builders' tests), and a burst like that is what
+// leaves the service failing every call with `Wsl/Service/E_UNEXPECTED`
+// ("Catastrophic failure"), the Claude process dying with exit code -1 and
+// `wsl -d Ubuntu` failing in your own terminal too. So: a few at a time, and
+// when the service has broken, no more calls into it until it's restarted.
+
+/// At most this many `wsl.exe` commands run at once. The Claude process,
+/// dev servers and terminals are long-lived and don't count.
+const MAX_PARALLEL: usize = 5;
+/// Of which test runs and other heavy scripts (`run_heavy`), so ten
+/// builders' reviews don't build and test all at once, and quick git calls
+/// always find a free slot.
+const MAX_HEAVY: usize = 2;
+
+/// How long calls are refused after the service was seen broken (a restart
+/// that works clears it sooner).
+const DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(45);
+
+struct Slots {
+    max: usize,
+    used: std::sync::Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+static QUICK: Slots = Slots { max: MAX_PARALLEL - MAX_HEAVY, used: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
+static HEAVY: Slots = Slots { max: MAX_HEAVY, used: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
+
+thread_local! {
+    /// This thread holds a slot already (a script that runs another inside it).
+    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A turn to run `wsl.exe`; the next one waiting goes when it's dropped.
+struct Slot {
+    pool: Option<&'static Slots>,
+}
+
+fn take(pool: &'static Slots) -> Slot {
+    if HELD.with(std::cell::Cell::get) {
+        return Slot { pool: None };
+    }
+    let mut used = pool.used.lock().unwrap_or_else(|e| e.into_inner());
+    while *used >= pool.max {
+        used = pool.freed.wait(used).unwrap_or_else(|e| e.into_inner());
+    }
+    *used += 1;
+    HELD.with(|h| h.set(true));
+    Slot { pool: Some(pool) }
+}
+
+fn slot() -> Slot {
+    take(&QUICK)
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let Some(pool) = self.pool else { return };
+        HELD.with(|h| h.set(false));
+        let mut used = pool.used.lock().unwrap_or_else(|e| e.into_inner());
+        *used = used.saturating_sub(1);
+        pool.freed.notify_one();
+    }
+}
+
+/// When WSL's service was last seen broken, and the code it gave.
+static DOWN: std::sync::Mutex<Option<(std::time::Instant, String)>> = std::sync::Mutex::new(None);
+
+/// The error code in what `wsl.exe` said when WSL's own service (not the
+/// distro, not the script) has failed. The codes are the same in every
+/// language ("Catastrophic failure" is "Onherstelbare fout" in Dutch).
+pub fn service_error(text: &str) -> Option<String> {
+    let text = text.replace('\0', "");
+    // A missing or misnamed distro is your setup, not a broken service.
+    if text.contains("WSL_E_DISTRO_NOT_FOUND") {
+        return None;
+    }
+    const CODES: [&str; 8] = [
+        "Wsl/Service/E_UNEXPECTED",
+        "E_UNEXPECTED",
+        "Wsl/Service/CreateInstance/CreateVm",
+        "HCS_E_",
+        "0x8000ffff",
+        "0x800706be",
+        "0x800706ba",
+        "RPC_S_SERVER_UNAVAILABLE",
+    ];
+    let lower = text.to_ascii_lowercase();
+    CODES.iter().find(|c| lower.contains(&c.to_ascii_lowercase())).map(|code| {
+        // The whole code as wsl.exe printed it ("Wsl/Service/E_UNEXPECTED"), when there is one.
+        text.split_whitespace().find(|w| w.to_ascii_lowercase().contains(&code.to_ascii_lowercase())).unwrap_or(code).trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '_').to_string()
+    })
+}
+
+fn mark_down(code: String) {
+    if let Ok(mut down) = DOWN.lock() {
+        eprintln!("[wsl] WSL's service failed ({code}); holding wsl.exe calls until it's restarted");
+        *down = Some((std::time::Instant::now(), code));
+    }
+}
+
+/// WSL answers again.
+pub fn mark_up() {
+    if let Ok(mut down) = DOWN.lock() {
+        *down = None;
+    }
+}
+
+/// The code WSL's service failed with, while calls are held back.
+pub fn down() -> Option<String> {
+    let down = DOWN.lock().ok()?;
+    down.as_ref().filter(|(at, _)| at.elapsed() < DOWN_FOR).map(|(_, code)| code.clone())
+}
+
+fn down_message(code: &str) -> String {
+    format!("WSL's own service stopped working ({code}), so Monaged is holding its WSL commands until WSL restarts.")
+}
+
+/// Refuses to start a `wsl.exe` while the service is known to be broken.
+fn check_up() -> Result<()> {
+    if let Some(code) = down() {
+        bail!(down_message(&code));
+    }
+    Ok(())
+}
+
+/// Notes a broken service from a failed `wsl.exe`'s output.
+fn note_failure(text: &str) {
+    if let Some(code) = service_error(text) {
+        mark_down(code);
+    }
+}
+
+/// How WSL is doing, from a command that does nothing.
+#[derive(Debug, PartialEq)]
+pub enum Health {
+    Fine,
+    /// WSL's service is broken (the code), or stopped answering.
+    Broken(String),
+    /// Something else failed (the distro is missing, …): not ours to restart.
+    Other(String),
+}
+
+/// Starts `true` in the distro and says how that went (within 45 seconds).
+pub fn probe(distro: &str) -> Health {
+    match crate::distro::wsl_run(&["-d", distro, "--cd", "~", "--exec", "true"], std::time::Duration::from_secs(45)) {
+        Ok((true, _)) => {
+            mark_up();
+            Health::Fine
+        }
+        Ok((false, text)) => match service_error(&text) {
+            Some(code) => {
+                mark_down(code.clone());
+                Health::Broken(code)
+            }
+            None => Health::Other(text),
+        },
+        Err(err) => {
+            let code = "wsl.exe stopped answering".to_string();
+            eprintln!("[wsl] probe: {err:#}");
+            mark_down(code.clone());
+            Health::Broken(code)
+        }
+    }
+}
+
+/// `wsl --shutdown`: stops every distro and WSL's VM, which is how WSL gets
+/// out of a broken state. What was running in WSL stops (it already had).
+pub fn shutdown() -> Result<()> {
+    let (ok, text) = crate::distro::wsl_run(&["--shutdown"], std::time::Duration::from_secs(120))?;
+    if !ok {
+        bail!("wsl --shutdown failed: {}", text.lines().take(3).collect::<Vec<_>>().join(" · "));
+    }
+    Ok(())
+}
+
 /// What every script starts with: git never prompts (there's no terminal to
 /// answer in), and neither does ssh, unless you set your own ssh command.
 const PRELUDE: &str = "export GIT_TERMINAL_PROMPT=0\n\
@@ -78,9 +257,21 @@ pub fn bash(distro: &str, script: &str) -> Command {
 /// changes scripts. Git never prompts for credentials here (it would hang
 /// without a terminal).
 pub fn run(distro: &str, script: &str) -> Result<String> {
+    run_in(&QUICK, distro, script)
+}
+
+/// `run` for test runs and other scripts that take minutes and memory: only
+/// a couple at a time, apart from the quick calls.
+pub fn run_heavy(distro: &str, script: &str) -> Result<String> {
+    run_in(&HEAVY, distro, script)
+}
+
+fn run_in(pool: &'static Slots, distro: &str, script: &str) -> Result<String> {
     if !installed() {
         bail!(NOT_INSTALLED);
     }
+    check_up()?;
+    let _slot = take(pool);
     let mut command = command(distro);
     command.args(["--", "bash", "-l", "-s"]);
     let mut child = command
@@ -98,6 +289,7 @@ pub fn run(distro: &str, script: &str) -> Result<String> {
         let stderr = decode(&output.stderr);
         let stdout = decode(&output.stdout);
         let message = if stderr.trim().is_empty() { stdout } else { stderr };
+        note_failure(&message);
         let short: Vec<&str> = message.trim().lines().take(4).collect();
         bail!("{}", short.join(" · "));
     }
@@ -127,6 +319,8 @@ fn stream_with(mut command: Command, script: &str, mut on_line: impl FnMut(&str)
     if !installed() {
         bail!(NOT_INSTALLED);
     }
+    check_up()?;
+    let _slot = take(&HEAVY);
     use std::io::Read;
     let mut child = command
         .stdin(Stdio::piped())
@@ -169,6 +363,7 @@ fn stream_with(mut command: Command, script: &str, mut on_line: impl FnMut(&str)
     if !output.status.success() {
         let stderr = decode(&output.stderr);
         let message = if stderr.trim().is_empty() { all.clone() } else { stderr };
+        note_failure(&message);
         let tail: Vec<&str> = message.trim().lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
         bail!("{}", tail.join("\n"));
     }
@@ -210,7 +405,10 @@ pub fn run_clean(distro: &str, script: &str) -> Result<String> {
     if !installed() {
         bail!(NOT_INSTALLED);
     }
+    // Worked out before taking a slot: it may run a script of its own.
     let prelude = clean_prelude(distro);
+    check_up()?;
+    let _slot = slot();
     let mut child = clean_command(distro)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -226,6 +424,7 @@ pub fn run_clean(distro: &str, script: &str) -> Result<String> {
         let stderr = decode(&output.stderr);
         let stdout = decode(&output.stdout);
         let message = if stderr.trim().is_empty() { stdout } else { stderr };
+        note_failure(&message);
         let short: Vec<&str> = message.trim().lines().take(4).collect();
         bail!("{}", short.join(" · "));
     }
@@ -274,4 +473,57 @@ pub fn open_terminal(distro: &str, path: &str) -> Result<()> {
         command.creation_flags(CREATE_NEW_CONSOLE);
     }
     command.spawn().map(|_| ()).context("couldn't start wsl.exe")
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_service_is_recognised_in_any_language() {
+        let dutch = "Onherstelbare fout\r\nFoutcode: Wsl/Service/E_UNEXPECTED\r\n";
+        assert_eq!(service_error(dutch).as_deref(), Some("Wsl/Service/E_UNEXPECTED"));
+        let english = "Catastrophic failure \nError code: Wsl/Service/E_UNEXPECTED";
+        assert_eq!(service_error(english).as_deref(), Some("Wsl/Service/E_UNEXPECTED"));
+        assert!(service_error("The remote procedure call failed. Error code: Wsl/Service/0x800706be").is_some());
+        assert!(service_error("Error code: Wsl/Service/CreateInstance/CreateVm/HCS_E_SERVICE_NOT_AVAILABLE").is_some());
+    }
+
+    #[test]
+    fn script_failures_and_a_missing_distro_are_not_a_broken_service() {
+        assert_eq!(service_error("fatal: not a git repository"), None);
+        assert_eq!(service_error("There is no distribution with the supplied name.\nError code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND"), None);
+    }
+
+    #[test]
+    fn calls_wait_for_a_free_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NOW: AtomicUsize = AtomicUsize::new(0);
+        static MOST: AtomicUsize = AtomicUsize::new(0);
+        let threads: Vec<_> = (0..12)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let _slot = slot();
+                    // Nested calls on the same thread don't wait for themselves.
+                    let _inner = slot();
+                    let n = NOW.fetch_add(1, Ordering::SeqCst) + 1;
+                    MOST.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    NOW.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert!(MOST.load(Ordering::SeqCst) <= MAX_PARALLEL - MAX_HEAVY);
+    }
+
+    #[test]
+    fn calls_are_held_while_the_service_is_down() {
+        mark_down("Wsl/Service/E_UNEXPECTED".into());
+        assert!(check_up().unwrap_err().to_string().contains("E_UNEXPECTED"));
+        mark_up();
+        assert!(check_up().is_ok());
+    }
 }

@@ -191,7 +191,7 @@ impl Monaged {
 
     fn set_send_key(&mut self, ctrl: bool, cx: &mut Context<Self>) {
         let _ = self.store.set_setting("composer:send", if ctrl { "ctrl-enter" } else { "enter" });
-        for input in self.inputs.values() {
+        for input in self.inputs.values().chain(self.project_chat.as_ref().map(|c| &c.description)) {
             input.update(cx, |i, cx| i.set_ctrl_send(ctrl, cx));
         }
         cx.notify();

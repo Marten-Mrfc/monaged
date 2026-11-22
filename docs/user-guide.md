@@ -23,7 +23,7 @@ Messages follow one rule: things that *happened* appear bottom right and fade (e
 
 A subproject's dashboard is the one place for what you need to do there:
 
-- **The request** you started it with, and one line on where it stands. With a pipeline, its stages and **Auto mode** sit on top, with **Stop pipeline** or **Run pipeline**, **All changes** and **New agent**.
+- **The request** you started it with, and one line on where it stands. With a pipeline, its stages, **Auto mode** and **Autopilot** sit on top, with **Stop pipeline** or **Run pipeline**, **All changes** and **New agent**.
 - **Needs you**: every agent's open questions (answered right there, the same card as in the conversation), permission request, form and secret request; the pipeline's "build this?" and the plan to approve; work held below the bar (see the quality gate); a failed session to restart; and the merge, when it waits for you. You answer here; **Open** takes you to the agent when you want the whole conversation.
 - **Agents**: each one's state, score, findings and what it's doing, with Open, Changes, Review, **Fix findings** and Stop.
 - **The lead**, on the right: an agent that oversees the others. Ask it how things stand, or tell it what should happen next ("tell the API builder to use UUIDs", "start an agent on the README"); it passes it on. It doesn't write code itself, and it can't accept work below the bar for you. Monaged tells it what happens (a builder passed, was sent back or waits for you), and it answers in a sentence. Every pipeline starts one (Settings → Agents turns that off); elsewhere **Start the lead** does. On a narrow window it opens as a pane.
@@ -69,6 +69,21 @@ The reviewer doesn't only see the diff: it gets the task and what you said to th
 - **✓** next to a finding rules it out: say why if you like (optional). The score is worked out again without it, and the next reviews in this project are told, so the same wrong finding doesn't come back.
 
 Summaries and reviews run after every turn (Settings → Reviews turns that off), or on demand with **Review** and **Summarize**. Click a diff line to comment; comments go to the agent as one message. A subproject's **All changes** shows the feature branch plus every agent's worktree, with overlaps marked.
+
+## Project chat (autopilot)
+
+At the top of a project's view: give a feature a **title** and a **description** and press **Start on autopilot** (Enter). Monaged makes a feature subproject for it and takes it the whole way to `develop` by itself: research, two verifiers, a plan, builders, reviews, the integrator, bringing `develop` in, resolving conflicts and merging (the project's way: here, pushed, or a merge/pull request).
+
+It only stops for you when it has to:
+
+- **Questions** an agent has go to the lead first. It answers what the request, the research, the plan or the code already settles (and says what it decided); only what's really your call reaches you, on the dashboard and in the Needs you inbox.
+- **The plan, once.** Every autopilot plan waits for your approval, whatever its size; **Approve: build and merge into develop** is also your yes to the merge.
+- **Work that stays below the bar** after four fix rounds (instead of two).
+- **A merge it can't finish**: findings that survive two more fix rounds after `develop` came in, a refused push, a review that can't run. "Autopilot stopped at the merge" is in the inbox.
+
+It never merges into the top branch: in a project with only `main`, it stops with the work ready and "Ready for you to merge into main" in the inbox (set up `develop` and acceptance in the project view to avoid that).
+
+Under the box, each autopilot run shows its stage, where it stands (in red when it needs you) and what the lead said last; click one for its dashboard, where you talk to the lead. The **Autopilot** switch on a dashboard turns it off (questions, the plan and the merge wait for you as usual) or on for any pipeline.
 
 ## The pipeline
 
