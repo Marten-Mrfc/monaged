@@ -73,6 +73,8 @@ Monaged (Windows, GPUI) ──ACP over wsl.exe──▶ claude-agent-acp (WSL) �
 | `src/hosting.rs` | GitHub/GitLab remote parsing; pull/merge requests and CI through the REST API with your account, or the `gh`/`glab` CLIs |
 | `src/pipeline.rs` | Roles, stages, briefs, `monaged-*` block parsing, and the gate rules |
 | `src/autopilot.rs` | The project chat in a project's view, and autopilot: what it decides itself, the lead's autopilot brief, fixing and retrying the merge into develop |
+| `src/plan.rs`, `src/plan_view.rs` | Plans as documents: versions, comments and the message that sends them to the planner; the plan page (outline, document with comments, at a glance, approve) |
+| `src/diagram.rs` | ```mermaid flowcharts and sequence diagrams: parsing, a layered layout, drawn natively |
 | `src/pipeline_ui.rs` | Running the pipeline after each turn; gate, plan and question cards; the pipeline strip |
 | `src/review_ui.rs` | The Changes tab, the summary and confidence flows, Markdown rendering, Settings |
 | `src/review.rs` | Summary and review prompts, running the project's tests, and the 1–5 scoring rules |

@@ -697,6 +697,28 @@ pub fn verifier_brief(number: u8, request: &str, research: &Value) -> String {
     )
 }
 
+/// What the plan document holds: the developer reads it on the plan page,
+/// comments on it and approves it, so it has to stand on its own.
+pub const PLAN_DOCUMENT: &str = "## The plan document\n\
+Write the plan as a full Markdown document in your reply, before the block. The developer reads it on Monaged's plan \
+page (diagrams and tables are drawn), comments on any part of it and approves it; builders get it too. Make it complete \
+and concrete, but no longer than it needs to be. Use these sections (leave out the ones that don't apply):\n\
+- `# <Title>` and one short paragraph: what this delivers and why.\n\
+- `## What exists today`: what the research found that matters, with file paths.\n\
+- `## Approach`: how it will work, with a diagram of the parts and how data flows between them.\n\
+- `## Changes`: a table | Area | Files | Change |.\n\
+- `## Data model` and `## API` when they change: tables, or code blocks with the exact shapes.\n\
+- `## Key flow`: a sequence diagram of the main interaction, when there is one.\n\
+- `## Workstreams`: a table | Workstream | Goal | Owns | Depends on |, matching the block.\n\
+- `## Risks`: a table | Risk | Likelihood | Mitigation |.\n\
+- `## Test plan`: a task list (`- [ ] ...`) of how we'll know it works.\n\
+- `## Out of scope` and `## Open questions`.\n\
+Diagrams are ```mermaid blocks, and Monaged draws two kinds: `flowchart TD` / `flowchart LR` (nodes `id[Box]`, \
+`id(Rounded)`, `id[(Database)]`, `id{Decision}`, `id([Stadium])`; edges `-->`, `-.->` for dotted, `==>` for thick, \
+`-->|label|`; `subgraph Name ... end`) and `sequenceDiagram` (`participant A as Name`, `A->>B: call`, `B-->>A: reply`, \
+`Note over A,B: text`, `loop`/`alt`/`else`/`opt` ... `end`). Keep each diagram to the essentials (about 15 nodes at most), \
+and use short labels.";
+
 pub fn planner_brief(request: &str, research: &Value, verifications: &[Value]) -> String {
     format!(
         "{BRIEF_HEADER} Planner\n\n\
@@ -716,7 +738,8 @@ pub fn planner_brief(request: &str, research: &Value, verifications: &[Value]) -
          - size: small (one workstream, roughly an hour), medium, or large.\n\
          - risk_flags: any of \"db_migration\", \"auth\", \"data_loss\", \"public_api\", \"infra\", \"security\".\n\
          - confidence: 1-5, honest. Questions that would raise it are worth asking first.\n\n\
-         ## When you're done\nEnd your reply with exactly one block:\n\n\
+         {PLAN_DOCUMENT}\n\n\
+         ## When you're done\nAfter the document, end your reply with exactly one block:\n\n\
          ```monaged-plan\n\
          {{\"title\": \"...\", \"summary\": \"...\", \"size\": \"small\", \"risk_flags\": [], \"confidence\": 4, \
          \"confidence_reason\": \"...\", \"contracts\": [\"...\"], \"workstreams\": [{{\"name\": \"backend-api\", \"goal\": \"...\", \

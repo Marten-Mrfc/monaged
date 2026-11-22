@@ -205,6 +205,24 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     cost_usd REAL NOT NULL,
     at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+CREATE TABLE IF NOT EXISTS plan_versions (
+    id INTEGER PRIMARY KEY,
+    subproject_id INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    document TEXT NOT NULL,
+    plan TEXT NOT NULL,
+    at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS plan_comments (
+    id INTEGER PRIMARY KEY,
+    subproject_id INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    block INTEGER,
+    quote TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    sent_in INTEGER,
+    at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 CREATE TABLE IF NOT EXISTS pipelines (
     subproject_id INTEGER PRIMARY KEY REFERENCES subprojects(id) ON DELETE CASCADE,
     stage TEXT NOT NULL,
@@ -473,6 +491,73 @@ impl Store {
             ))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- Plans ---------------------------------------------------------------
+
+    pub fn add_plan_version(&self, subproject_id: i64, version: u32, document: &str, plan: &serde_json::Value) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO plan_versions (subproject_id, version, document, plan) VALUES (?1, ?2, ?3, ?4)",
+            params![subproject_id, version, document, plan.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Every subproject's plan versions and comments.
+    pub fn plan_books(&self) -> Result<HashMap<i64, crate::plan::PlanBook>> {
+        let mut books: HashMap<i64, crate::plan::PlanBook> = HashMap::new();
+        let mut stmt = self.conn.prepare("SELECT subproject_id, version, document, plan, at FROM plan_versions ORDER BY subproject_id, version")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?)))?;
+        for row in rows {
+            let (sub, version, document, plan, at) = row?;
+            let plan = serde_json::from_str(&plan).unwrap_or(serde_json::Value::Null);
+            books.entry(sub).or_default().versions.push(crate::plan::PlanVersion { version, document, plan, at });
+        }
+        let mut stmt = self.conn.prepare("SELECT id, subproject_id, version, block, quote, body, sent_in, at FROM plan_comments ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::plan::PlanComment {
+                id: r.get(0)?,
+                sub_id: r.get(1)?,
+                version: r.get(2)?,
+                block: r.get::<_, Option<i64>>(3)?.map(|b| b.max(0) as usize),
+                quote: r.get(4)?,
+                body: r.get(5)?,
+                sent_in: r.get(6)?,
+                at: r.get(7)?,
+            })
+        })?;
+        for row in rows {
+            let c = row?;
+            books.entry(c.sub_id).or_default().comments.push(c);
+        }
+        Ok(books)
+    }
+
+    pub fn add_plan_comment(&self, c: &crate::plan::PlanComment) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO plan_comments (subproject_id, version, block, quote, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![c.sub_id, c.version, c.block.map(|b| b as i64), c.quote, c.body],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn remove_plan_comment(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM plan_comments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn mark_plan_comments_sent(&self, ids: &[i64], version: u32) -> Result<()> {
+        for id in ids {
+            self.conn.execute("UPDATE plan_comments SET sent_in = ?1 WHERE id = ?2", params![version, id])?;
+        }
+        Ok(())
+    }
+
+    /// A new pipeline run starts a new plan.
+    pub fn clear_plan(&self, subproject_id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM plan_versions WHERE subproject_id = ?1", params![subproject_id])?;
+        self.conn.execute("DELETE FROM plan_comments WHERE subproject_id = ?1", params![subproject_id])?;
+        Ok(())
     }
 
     pub fn set_agent_session(&self, agent_id: i64, session_id: &str) -> Result<()> {

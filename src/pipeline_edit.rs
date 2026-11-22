@@ -234,7 +234,7 @@ impl Monaged {
             })
             .collect();
         let merged: Vec<String> = base.iter().map(|(s, _)| s.clone()).collect();
-        let brief = pipeline::builder_brief(&request, &plan, &stream, &branch, &merged);
+        let brief = self.with_plan_document(sub_id, pipeline::builder_brief(&request, &plan, &stream, &branch, &merged));
         let replaced: Vec<String> = self
             .agents
             .iter()

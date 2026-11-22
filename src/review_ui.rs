@@ -1177,7 +1177,7 @@ fn table(align: Vec<markdown::Align>, rows: Vec<Vec<Inline>>) -> AnyElement {
     out.into_any_element()
 }
 
-fn render_block(block: Block) -> AnyElement {
+pub(crate) fn render_block(block: Block) -> AnyElement {
     match block {
         Block::Heading(level, inline) => div()
             .pt(px(6.))
@@ -1227,6 +1227,8 @@ fn render_block(block: Block) -> AnyElement {
             .line_height(px(22.))
             .child(styled(inline))
             .into_any_element(),
+        // Diagrams are drawn; one Monaged can't draw stays code.
+        Block::Code(text, lang) if lang.eq_ignore_ascii_case("mermaid") => crate::diagram::render(&text).unwrap_or_else(|| code_block(text, &lang, None)),
         Block::Code(text, lang) => code_block(text, &lang, None),
         Block::Table { align, rows } => table(align, rows),
         Block::Rule => div().h(px(1.)).bg(rgb(theme::line())).into_any_element(),

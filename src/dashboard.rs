@@ -604,7 +604,7 @@ impl Monaged {
 }
 
 /// "3m ago", "2h ago", "yesterday".
-fn ago(at: i64) -> String {
+pub(crate) fn ago(at: i64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(at);
     match (now - at).max(0) {
         s if s < 60 => "just now".into(),

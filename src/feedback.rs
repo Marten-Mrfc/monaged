@@ -60,6 +60,8 @@ pub(crate) enum ToastAction {
     UndoRollback(i64),
     /// Open a web page (release notes).
     OpenUrl(String),
+    /// Open a subproject's plan page.
+    OpenPlan(i64),
 }
 
 /// Steps that can't be undone ask first.
@@ -231,6 +233,10 @@ impl Monaged {
             ToastAction::Update => self.install_update(cx),
             ToastAction::UndoRollback(agent_id) => self.undo_rollback(agent_id, cx),
             ToastAction::OpenUrl(url) => crate::ui::open_web(cx, &url),
+            ToastAction::OpenPlan(sub_id) => {
+                self.form = None;
+                self.open_plan(sub_id, cx);
+            }
             ToastAction::Open { sub_id, agent_id } => {
                 self.form = None;
                 self.select_sub(sub_id, cx);

@@ -85,6 +85,17 @@ It never merges into the top branch: in a project with only `main`, it stops wit
 
 Under the box, each autopilot run shows its stage, where it stands (in red when it needs you) and what the lead said last; click one for its dashboard, where you talk to the lead. The **Autopilot** switch on a dashboard turns it off (questions, the plan and the merge wait for you as usual) or on for any pipeline.
 
+## Plans
+
+When the planner is done, its plan is a document: the goal, what exists today, the approach with a diagram, tables of changes, workstreams and risks, the key flow as a sequence diagram, the test plan, and what's out of scope. **Read the plan** (on the plan card, from "Plan ready for approval" in Needs you, or **Review the plan** in the project chat) opens its page:
+
+- **Contents** on the left jumps to a section; **At a glance** on the right has the size, confidence, risks, cost and the build order as a diagram.
+- **Comment**: point at any heading, paragraph, table or diagram and click the comment button beside it, or comment on the whole plan in the panel. Comments wait until you **Send them to the planner**, all at once. Its next version starts with what changed, and the plan waits for you again.
+- **‹ ›** steps through earlier versions, and each comment says where it stands (not sent yet, sent, answered in v3).
+- **Approve** (on autopilot: build and merge into develop), **Edit** the workstreams yourself, or **Stop**. Esc goes back to the dashboard.
+
+Diagrams (```mermaid flowcharts and sequence diagrams) are drawn in conversations too.
+
 ## When a chat stalls
 
 Monaged keeps an eye on every working agent. A turn with no sign of life for 6 minutes (30 while a command, a subagent or compaction runs, and never while it waits for you) is stopped, and the agent is asked to continue where it left off; if the stop isn't answered either, its session is reopened with the same request. Turns that end in an error are asked again after 30 seconds, turns cut off by a lost connection continue when Claude is back, and a session that doesn't open within 3 minutes is opened again. Each of these shows in the conversation and the Activity tab. After three in an hour, the agent waits for you as **Stalled** in Needs you: send it a message, or restart its session from its menu. A pipeline agent that finishes twice without its result shows as **Didn't deliver its result**.

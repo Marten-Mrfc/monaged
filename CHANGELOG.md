@@ -4,6 +4,25 @@ All notable changes to Monaged. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+
+- **The plan page**: a plan is a full document now, not just a card. The planner writes it in Markdown with:
+  - the goal and what exists today;
+  - the approach with a diagram;
+  - tables of changes, workstreams and risks;
+  - a sequence diagram of the key flow;
+  - a test plan, what's out of scope, and open questions.
+
+  **Read the plan** (on the plan card, the inbox's "Plan ready for approval", the toast when a plan is in, and **Review the plan** in the project chat) opens it on its own page:
+  - an outline to jump to any section;
+  - the document;
+  - an at-a-glance panel: size, confidence, risks, cost, and the build order drawn from the workstreams;
+  - every version of the plan, with when it was written;
+  - Approve, Edit and Stop at the top.
+- **Comments on plans**: point at any heading, paragraph, table or diagram for **Comment**, or comment on the whole plan. **Send to the planner** sends them together. The planner answers with a new version that starts with what changed, and each comment says whether it's not sent yet, sent, or answered in a later version. A plan you commented on always waits for you again, even on autopilot or in auto mode.
+- **Diagrams**: ```mermaid flowcharts (`flowchart`/`graph`, top-down or left-right, with shapes, dotted and thick edges, labels and subgraphs) and sequence diagrams (participants, messages, notes, loop/alt/opt frames) are drawn in Monaged's own style, in plans and in every conversation. Other diagram types stay code.
+- Builders get the approved plan document with their brief.
+
 ## [0.11.1] - 2026-11-22
 
 Chats that stop moving get going again by themselves.

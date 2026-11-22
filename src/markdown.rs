@@ -16,7 +16,7 @@ pub struct Style {
     pub strike: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Inline {
     pub text: String,
     /// Sorted, non-overlapping ranges with their combined style.
@@ -56,6 +56,7 @@ pub enum Align {
     Right,
 }
 
+#[derive(Clone)]
 pub enum Block {
     Heading(u8, Inline),
     Paragraph(Inline),

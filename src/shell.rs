@@ -492,8 +492,14 @@ impl Monaged {
     }
 
     /// Everything that waits for you can be answered on the subproject's dashboard.
-    fn open_inbox(&mut self, sub_id: i64, _agent_id: Option<i64>, cx: &mut Context<Self>) {
+    fn open_inbox(&mut self, sub_id: i64, agent_id: Option<i64>, cx: &mut Context<Self>) {
         self.form = None;
+        // A plan waiting for approval opens on its plan page.
+        let plan_waits = self.pipelines.get(&sub_id).is_some_and(|p| p.stage == Stage::Approve && p.plan.is_some()) && !self.identity_missing;
+        if agent_id.is_none() && plan_waits && self.plans.get(&sub_id).is_some_and(|b| !b.versions.is_empty()) {
+            self.open_plan(sub_id, cx);
+            return;
+        }
         self.select_sub(sub_id, cx);
         cx.notify();
     }
@@ -1408,6 +1414,9 @@ impl Monaged {
         }
         if let Some(form) = &self.form {
             return self.render_form(form, main_w, cx);
+        }
+        if let Some(sub_id) = self.plan_on_screen() {
+            return self.render_plan_view(sub_id, main_w, cx);
         }
         if let Some(sub_id) = self.sel_sub {
             if self.sub_view == Some(sub_id) {

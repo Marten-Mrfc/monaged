@@ -89,6 +89,9 @@ impl Monaged {
 
     /// `autopilot`: the run goes all the way to develop by itself (the project chat).
     pub(crate) fn start_pipeline_with(&mut self, sub_id: i64, request: String, auto_mode: bool, autopilot: bool, cx: &mut Context<Self>) {
+        // A new run, a new plan.
+        self.plans.remove(&sub_id);
+        let _ = self.store.clear_plan(sub_id);
         let mut p = Pipeline::new(sub_id, request.clone(), auto_mode && !autopilot);
         p.autopilot = autopilot;
         p.verifications = pipeline::empty_verifications();
@@ -239,7 +242,7 @@ impl Monaged {
                 .filter_map(|d| run.iter().find(|(s, n, _)| s == d && done_names.contains(n)).map(|(s, _, b)| (s.clone(), b.clone())))
                 .collect();
             let merged: Vec<String> = base.iter().map(|(s, _)| s.clone()).collect();
-            let brief = pipeline::builder_brief(&request, &plan, stream, &branch, &merged);
+            let brief = self.with_plan_document(sub_id, pipeline::builder_brief(&request, &plan, stream, &branch, &merged));
             let mut spec = Self::role_spec(&name, Role::Builder(stream.name.clone()), brief, false);
             spec.merge_from = base.into_iter().map(|(_, b)| b).collect();
             self.starting_streams.insert((sub_id, stream.name.clone()));
@@ -447,7 +450,17 @@ impl Monaged {
             }
             (Role::Planner, Some(Directive::Plan(value))) => {
                 let allows = self.project_of(sub_id).map(|pr| pr.id).is_some_and(|id| self.project_auto_start(id));
-                let gate = if autopilot { pipeline::autopilot_plan_gate(&value) } else { self.budget_gate(&value, pipeline::plan_gate(&value, allows, auto)) };
+                // A plan you commented on waits for you to read the answer.
+                let commented = self.plans.get(&sub_id).is_some_and(|b| !b.comments.is_empty());
+                let gate = if commented {
+                    Gate::Ask("It's revised after your comments: read what changed".into())
+                } else if autopilot {
+                    pipeline::autopilot_plan_gate(&value)
+                } else {
+                    self.budget_gate(&value, pipeline::plan_gate(&value, allows, auto))
+                };
+                let reply = self.agent(agent_id).map(|a| a.last_reply()).unwrap_or_default();
+                let version = self.add_plan_version(sub_id, &reply, &value);
                 let Some(p) = self.pipelines.get_mut(&sub_id) else { return };
                 let title = pipeline::plan_title(&value);
                 p.plan = Some(value);
@@ -460,12 +473,19 @@ impl Monaged {
                         self.start_build(sub_id, cx);
                     }
                     Gate::Ask(reason) => {
-                        p.note = Some(format!("\"{title}\" is ready for your approval. {reason}."));
+                        p.note = Some(format!("\"{title}\" (v{version}) is ready for your approval. {reason}."));
                         self.save_pipeline(sub_id);
-                        self.tell_lead(sub_id, format!("The plan \"{title}\" waits for the user's approval on the dashboard ({reason})."));
+                        self.tell_lead(sub_id, format!("The plan \"{title}\" (version {version}) waits for the user's approval on its plan page ({reason})."));
                         if autopilot {
                             self.chime(crate::sound::Cue::NeedsYou);
                         }
+                        self.toast_action(
+                            Tone::Info,
+                            format!("The plan \"{title}\" is ready{}.", if version > 1 { format!(" (version {version})") } else { String::new() }),
+                            "Review",
+                            crate::feedback::ToastAction::OpenPlan(sub_id),
+                            cx,
+                        );
                     }
                 }
             }
@@ -1070,8 +1090,19 @@ impl Monaged {
             header = header.child(pill(&risk.replace('_', " "), true));
         }
 
+        let has_document = self.plans.get(&sub_id).is_some_and(|b| !b.versions.is_empty());
+        let version = self.plans.get(&sub_id).and_then(|b| b.latest()).map(|v| v.version).unwrap_or(1);
         gate_card("Plan")
             .child(header)
+            .when(has_document, |d| {
+                d.child(
+                    div().flex().flex_wrap().items_center().gap_2().child(
+                        ui::button(("plan-open", sub_id as usize), if actionable { ui::Kind::Primary } else { ui::Kind::Secondary }, Some(Icon::Flow), format!("Read the plan (v{version})"))
+                            .tooltip(crate::shell::tip("The whole plan with its diagrams and tables; comment on any part of it"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_plan(sub_id, cx))),
+                    ),
+                )
+            })
             .children(plan["summary"].as_str().map(|s| div().line_height(px(20.)).child(s.to_string())))
             .children(plan["confidence_reason"].as_str().map(|s| {
                 div().text_size(px(12.)).text_color(rgb(theme::text_3())).child(format!("Confidence: {s}"))
@@ -1567,7 +1598,7 @@ fn label(text: &'static str) -> AnyElement {
 }
 
 /// Mono metadata with a hairline; `attention` only for risks.
-fn pill(text: &str, attention: bool) -> AnyElement {
+pub(crate) fn pill(text: &str, attention: bool) -> AnyElement {
     div()
         .flex_none()
         .px(px(6.))

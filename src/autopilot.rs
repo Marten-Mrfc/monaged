@@ -71,6 +71,9 @@ pub fn lead_section() -> String {
      yourself with `message_agent` and say in a sentence what you decided. Pass on to the user only what only they can \
      decide (what the product should do, a trade-off with no clear winner, access or secrets), and then ask it as a \
      question block.\n\
+     - The plan is a full document (with diagrams and tables) the user reads on its plan page, where they can comment on \
+     any part of it; their comments go to the planner, whose next version waits for them again. Point them there when \
+     the plan is ready.\n\
      - The user approves the plan once; that approval also covers merging into develop. After it, Monaged builds, \
      reviews, integrates, brings develop in, has conflicts resolved and merges by itself; don't ask the user about any of \
      that, and don't call `merge_to_develop` yourself unless a merge stopped and you've fixed why.\n\
@@ -420,7 +423,18 @@ impl Monaged {
                                 .text_color(rgb(theme::text_3()))
                                 .child(icon_sized(Icon::Flow, 12.).text_color(rgb(theme::text_4())))
                                 .child(div().flex_1().min_w(px(0.)).truncate().child(format!("Lead: {line}")))
-                        })),
+                        }))
+                        // The one approval autopilot asks for, a click away.
+                        .when(stage == Stage::Approve && self.plans.get(&sid).is_some_and(|b| !b.versions.is_empty()), |d| {
+                            d.child(
+                                div().pt(px(4.)).flex().child(
+                                    ui::button(("chat-plan", sid as usize), Kind::Primary, Some(Icon::Flow), "Review the plan").on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_plan(sid, cx);
+                                    })),
+                                ),
+                            )
+                        }),
                 )
                 .child(div().pt(px(3.)).child(icon_sized(Icon::ChevronRight, 14.).text_color(rgb(theme::text_4()))))
                 .on_click(cx.listener(move |this, _, _, cx| this.select_sub(sid, cx)))

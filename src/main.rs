@@ -21,6 +21,7 @@ mod coord;
 mod coord_ui;
 mod dashboard;
 mod debug_mcp;
+mod diagram;
 mod diff;
 mod distro;
 mod env;
@@ -53,6 +54,8 @@ mod pipeline;
 mod playground;
 mod pipeline_edit;
 mod pipeline_ui;
+mod plan;
+mod plan_view;
 mod qol;
 mod project_ui;
 mod queue_ui;
@@ -232,6 +235,10 @@ struct Monaged {
     finished_turns: Vec<i64>,
     // Pipelines (Phase 3), by subproject id.
     pipelines: HashMap<i64, Pipeline>,
+    /// Each subproject's plan: its versions (the documents) and your comments.
+    plans: HashMap<i64, plan::PlanBook>,
+    /// The plan page, when it's open.
+    plan_view: Option<plan_view::PlanView>,
     /// Git inside WSL has no name/email, so builders can't commit.
     identity_missing: bool,
     // Merging (Phase 5).
@@ -480,6 +487,17 @@ impl Monaged {
         let auto_review = store.setting("auto_review").is_none_or(|v| v == "1");
         let spend = store.llm_spend().unwrap_or_default();
         let pipelines = store.pipelines().unwrap_or_default();
+        // Plans from before plan documents get one made from their fields, as version 1.
+        let mut plans = store.plan_books().unwrap_or_default();
+        for (sub_id, p) in &pipelines {
+            if let Some(value) = &p.plan
+                && plans.get(sub_id).is_none_or(|b| b.versions.is_empty())
+            {
+                let document = plan::document_from_plan(value);
+                let _ = store.add_plan_version(*sub_id, 1, &document, value);
+                plans.entry(*sub_id).or_default().versions.push(plan::PlanVersion { version: 1, document, plan: value.clone(), at: 0 });
+            }
+        }
         let board = store.board().unwrap_or_default();
         let usage_state = usage_ui::load(&store);
         let costs = store.cost_by_agent().unwrap_or_default();
@@ -564,6 +582,8 @@ impl Monaged {
             spend,
             finished_turns: Vec::new(),
             pipelines,
+            plans,
+            plan_view: None,
             identity_missing: false,
             branch_info: HashMap::new(),
             merges: HashMap::new(),
@@ -1168,6 +1188,7 @@ impl Monaged {
     // ---- Navigation -------------------------------------------------------
 
     fn select_project(&mut self, project_id: i64, cx: &mut Context<Self>) {
+        self.plan_view = None;
         self.sel_project = Some(project_id);
         self.sel_sub = None;
         self.sel_agent = None;
@@ -1181,6 +1202,7 @@ impl Monaged {
     fn select_sub(&mut self, sub_id: i64, cx: &mut Context<Self>) {
         let Some(sub) = self.subprojects.iter().find(|s| s.id == sub_id) else { return };
         let project_id = sub.project_id;
+        self.plan_view = None;
         self.sel_project = Some(project_id);
         self.sel_sub = Some(sub_id);
         self.form = None;
@@ -1571,6 +1593,9 @@ impl Monaged {
             self.project_chat_enter(window, cx);
             return;
         }
+        if self.plan_submit(window, cx) {
+            return;
+        }
         if self.form.is_some() {
             self.submit_form(cx);
             return;
@@ -1683,6 +1708,9 @@ impl Monaged {
             self.focus_request = self.focus_target();
             window.focus(&self.focus);
             cx.notify();
+            return;
+        }
+        if self.plan_cancel(window, cx) {
             return;
         }
         let Some(agent_id) = self.composer_agent(window, cx) else { return };
